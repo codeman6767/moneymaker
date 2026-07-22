@@ -24,3 +24,10 @@ __pycache__/
 # Coverage
 .coverage
 htmlcov/
+
+# Local data corpus (SQLite). Built by `python -m sports_quant db-init`;
+# never committed -- it is derived data, and it grows without bound.
+data/
+*.db
+*.db-wal
+*.db-shm

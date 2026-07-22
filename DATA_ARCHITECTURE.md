@@ -111,7 +111,7 @@ by eye is a real activity:
 | Entity | Prefix | Form | Kind |
 | --- | --- | --- | --- |
 | League | `lg_` | `lg_mlb`, `lg_nba` | Deterministic |
-| Season | `sn_` | `sn_mlb_2026` | Deterministic |
+| Season | `sn_` | `sn_mlb_2026_regular` | Deterministic |
 | Team | `tm_` | `tm_mlb_nyy`, `tm_nba_bos` | Deterministic |
 | Player | `pl_` | `pl_` + 26-char ULID | Surrogate |
 | Game | `gm_` | `gm_` + 26-char ULID | Surrogate |
@@ -129,6 +129,11 @@ by eye is a real activity:
 (a league's identity; a franchise slot within a league; a season's year). These
 are reproducible: rebuilding the corpus from raw responses yields identical IDs,
 which makes corpus diffs meaningful.
+
+A season identifier includes its **phase** (`sn_mlb_2026_regular`,
+`sn_mlb_2026_postseason`) because a league runs preseason, regular and
+postseason inside one year, and the `seasons` uniqueness key is
+`(league_id, year, phase)`. A year-only identifier would collide across phases.
 
 *Surrogate* IDs (ULIDs) are used wherever the natural key can change. Players
 get married and change names; games get postponed to a different date;
@@ -191,6 +196,25 @@ common way a data corpus quietly rots.
 
 There is deliberately no `down` migration. Rolling back a historical corpus is
 a restore-from-snapshot operation, not a schema operation.
+
+**Filenames** are `<phase-letter><3 digits>_<slug>.sql`. The digits are a
+**single global sequence** and are the version; the phase letter is cosmetic.
+Restarting the numbering per phase would make `a001` and `b001` both parse to
+version 1 and collide. Applied so far:
+
+| Version | Name | Contents |
+| --- | --- | --- |
+| 001 | `a001_core_entities` | leagues, seasons, teams, team_aliases, players, player_aliases |
+| 002 | `a002_games` | games, game_status_history, append-only triggers |
+
+**Migrations are applied statement-by-statement, not via `executescript`.**
+`sqlite3.Cursor.executescript` issues an implicit `COMMIT` before running,
+which silently ends the surrounding transaction — a failure partway through
+would leave earlier statements committed and the migration half-applied.
+`sports_quant.db.engine.split_sql_statements` splits the file instead,
+correctly handling SQL string literals (`''` escapes a quote; backslash is *not*
+an escape, which matters for `ESCAPE '\'`), line and block comments, and
+`CREATE TRIGGER` bodies whose `BEGIN … END;` block contains semicolons.
 
 ### 3.2 Reference entities
 
@@ -257,39 +281,64 @@ name resolves to the franchise that actually bore it in that season.
 
 ### 3.3 Aliases
 
+**Implemented in migration `a001_core_entities`.** The authoritative DDL is that
+file; the sketch below matches it.
+
 ```sql
 CREATE TABLE team_aliases (
     alias_id       TEXT PRIMARY KEY,
     team_id        TEXT NOT NULL REFERENCES teams(team_id),
+    league_id      TEXT NOT NULL REFERENCES leagues(league_id),
     alias          TEXT NOT NULL,                -- as written by the source
     normalized     TEXT NOT NULL,                -- normalization output (ENTITY_MATCHING §2.1)
     alias_type     TEXT NOT NULL,                -- 'abbreviation'|'city'|'nickname'
-                                                 -- |'full'|'historical'|'provider'|'punctuation'
-    provider       TEXT,                         -- NN when alias_type='provider'
-    valid_from_season INTEGER,                   -- historical names are season-scoped
-    valid_to_season   INTEGER,
+                                                 -- |'full'|'historical'|'provider'
+    provider          TEXT NOT NULL DEFAULT '',     -- '' = not provider-scoped
+    valid_from_season INTEGER NOT NULL DEFAULT 0,   -- 0    = unbounded start
+    valid_to_season   INTEGER NOT NULL DEFAULT 9999,-- 9999 = still valid
     is_ambiguous   INTEGER NOT NULL DEFAULT 0 CHECK (is_ambiguous IN (0,1)),
     source         TEXT NOT NULL,                -- 'seed'|'manual'|'provider_observed'
     created_at     TEXT NOT NULL,
-    UNIQUE (league_id_denorm, normalized, alias_type, provider, valid_from_season)
+    UNIQUE (team_id, normalized, alias_type, provider, valid_from_season)
 );
 
 CREATE TABLE player_aliases (
     alias_id       TEXT PRIMARY KEY,
     player_id      TEXT NOT NULL REFERENCES players(player_id),
+    league_id      TEXT NOT NULL REFERENCES leagues(league_id),
     alias          TEXT NOT NULL,
     normalized     TEXT NOT NULL,
+    suffix         TEXT NOT NULL DEFAULT '',     -- 'jr'/'iii'/...; '' = none
     alias_type     TEXT NOT NULL,                -- 'full'|'short'|'nickname'
                                                  -- |'accent_stripped'|'suffix_variant'|'provider'
-    provider       TEXT,
+    provider       TEXT NOT NULL DEFAULT '',
     is_ambiguous   INTEGER NOT NULL DEFAULT 0 CHECK (is_ambiguous IN (0,1)),
     source         TEXT NOT NULL,
-    created_at     TEXT NOT NULL
+    created_at     TEXT NOT NULL,
+    UNIQUE (player_id, normalized, suffix, alias_type, provider)
 );
 
-CREATE INDEX idx_team_aliases_lookup   ON team_aliases   (normalized, alias_type);
-CREATE INDEX idx_player_aliases_lookup ON player_aliases (normalized);
+CREATE INDEX idx_team_aliases_lookup   ON team_aliases   (league_id, normalized);
+CREATE INDEX idx_player_aliases_lookup ON player_aliases (league_id, normalized);
 ```
+
+**Uniqueness is scoped to the entity, not the league.** Two teams in one league
+legitimately share an alias — "chicago" belongs to both the Cubs and the White
+Sox, "los angeles" to both the Lakers and the Clippers. A league-scoped
+constraint would *reject the second team's alias at write time*, which is
+exactly backwards: shared aliases are ambiguity to record and refuse at match
+time, not writes to forbid. The seed loader derives `is_ambiguous` from the data
+after loading (`mark_ambiguous_duplicates`), so ambiguity is computed rather
+than hand-maintained.
+
+**`provider`, `valid_from_season` and `valid_to_season` are `NOT NULL` with
+sentinels** (`''`, `0`, `9999`) rather than nullable. SQLite treats two `NULL`s
+as *distinct* inside a `UNIQUE` constraint, so nullable columns would let an
+identical seed row insert again on every `db-init` — silently defeating
+idempotency. Sentinels keep the uniqueness check total.
+
+**`player_aliases.suffix` participates in the key** so "Ken Griffey Jr." and
+"Ken Griffey Sr." are two aliases of two players rather than a collision.
 
 `is_ambiguous` is the mechanism that stops a silent bad match. When two players
 in a league normalize identically (there are two Jalen Williamses; the
@@ -338,8 +387,11 @@ CREATE TABLE game_status_history (
     provider_timestamp TEXT,
     observed_at      TEXT NOT NULL,
     ingested_at      TEXT NOT NULL,
-    raw_response_id  TEXT REFERENCES raw_responses(raw_response_id),
-    raw_response_hash TEXT NOT NULL,
+    -- Nullable with no FK in Phase A: `raw_responses` arrives in Phase B, and
+    -- Phase A has no ingestion, so nothing can reference one yet. Phase B adds
+    -- the foreign key and tightens raw_response_hash to NOT NULL.
+    raw_response_id  TEXT,
+    raw_response_hash TEXT,
     content_hash     TEXT NOT NULL,
     created_at       TEXT NOT NULL,
     UNIQUE (game_id, provider, content_hash)
@@ -347,6 +399,13 @@ CREATE TABLE game_status_history (
 
 CREATE INDEX idx_game_status_asof ON game_status_history (game_id, observed_at);
 ```
+
+**Implemented in migration `a002_games`**, together with the append-only
+triggers of §5. `games` additionally carries a partial unique index on
+`(official_provider, official_game_key)` — partial so the many rows without an
+official key do not collide on `NULL` — and a `CHECK` requiring the provider and
+key to be present or absent together, since a key without its issuer is
+meaningless.
 
 `games.status` and `games.scheduled_start` are **mutable current-state
 columns** — a deliberate exception to the append-only rule, and the *only*
@@ -850,10 +909,12 @@ BEGIN
 END;
 ```
 
-Applied to: `raw_responses`, `sportsbook_price_snapshots`,
-`kalshi_orderbook_snapshots`, `kalshi_trade_snapshots`, `injury_snapshots`,
-`lineup_snapshots`, `probable_pitchers`, `weather_snapshots`,
-`game_status_history`, `entity_match_decisions`, `schema_versions`.
+Applied in Phase A to `game_status_history` (the only snapshot table that
+exists yet), and in later phases to `raw_responses`,
+`sportsbook_price_snapshots`, `kalshi_orderbook_snapshots`,
+`kalshi_trade_snapshots`, `injury_snapshots`, `lineup_snapshots`,
+`probable_pitchers`, `weather_snapshots`, and `entity_match_decisions`.
+`sports_quant.db.schema.APPEND_ONLY_TABLES` is the registry.
 
 Corrections are appended, never applied in place: a corrected observation is a
 new row with `is_correction = 1`, preserving both what was believed and what
@@ -869,39 +930,43 @@ unchanged.
 
 ## 6. Layout
 
+Built in Phase A (✅), planned for later phases (◻):
+
 ```
 sports_quant/
   db/
-    __init__.py          # public surface: Database, open_database, repositories
-    engine.py            # connection, PRAGMAs, transactions, migration runner
-    ids.py               # ULID + deterministic canonical-ID construction
-    schema.py            # table-name constants, append-only table registry
-    hashing.py           # thin re-export of streaming.event_envelope.canonical_json
+✅  __init__.py          # public surface
+✅  engine.py            # connections, PRAGMAs, transactions, migrations, SQL splitter
+✅  ids.py               # ULID + deterministic canonical-ID construction
+✅  schema.py            # timestamp format, enums, table registry
+✅  normalize.py         # deterministic name normalization + alias resolution
+✅  models.py            # typed row models
+✅  init.py              # db-init orchestration (keeps SQL out of the CLI)
     migrations/
-      a001_core_entities.sql
-      a002_games.sql
-      b001_raw_responses.sql
-      ...
+✅    a001_core_entities.sql
+✅    a002_games.sql
+◻     b003_raw_responses.sql ...
     repositories/
-      __init__.py
-      base.py            # Repository Protocol, row<->model mapping helpers
-      leagues.py  seasons.py  teams.py  players.py  games.py
-      raw_responses.py   ingestion_runs.py
-      sportsbook.py      kalshi.py
-      intel_tables.py    matching.py     data_quality.py
-  ingest/
-    __init__.py
-    runner.py            # IngestionRun lifecycle, retry, partial-failure policy
-    odds_ingestor.py     # consumes the EXISTING OddsApiClient
-    kalshi_ingestor.py   # consumes the EXISTING KalshiClient
-  matching/
-    __init__.py
-    normalize.py  teams.py  players.py  games.py  markets.py
-  pit/
-    __init__.py
-    asof.py              # as-of query builders
-    dataset.py           # emits probability.datasets.GameStateDataset
+✅    __init__.py  base.py
+✅    leagues.py           # LeagueRepository + SeasonRepository
+✅    teams.py             # TeamRepository + TeamAliasRepository
+✅    players.py           # PlayerRepository + PlayerAliasRepository
+✅    games.py             # GameRepository + status history
+◻     raw_responses.py  ingestion_runs.py  sportsbook.py  kalshi.py
+◻     intel_tables.py   matching.py       data_quality.py
+    seeds/
+✅    __init__.py  loader.py  mlb_teams.py  nba_teams.py
+◻ ingest/                 # runner.py, odds_ingestor.py, kalshi_ingestor.py
+◻ matching/               # teams.py, players.py, games.py, markets.py
+                          #   (imports db/normalize.py -- one normalizer only)
+◻ pit/                    # asof.py, dataset.py
 ```
+
+`hashing.py` was not needed: `canonical_json` is imported directly from
+`streaming.event_envelope`, keeping the count of content hashers at three
+rather than four (§4.2).
+
+`sports_quant/providers/` is untouched, exactly as planned.
 
 `sports_quant/providers/` is **not** touched. The ingestors consume
 `OddsApiClient` and `KalshiClient` exactly as they are today, so there is one

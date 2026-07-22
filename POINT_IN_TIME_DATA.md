@@ -163,6 +163,26 @@ Each subsection states the hazard, the structural defence, and the test. Rule
 codes are stable and greppable; they appear in `data_quality_issues.rule_code`
 and in test names.
 
+### Implementation status
+
+Phase A landed the temporal foundations these rules rest on. What exists today:
+
+| Mechanism | Status |
+| --- | --- |
+| ISO-8601 UTC `TEXT` timestamps, lexicographically sortable | ✅ `db/schema.py`, enforced by `CHECK` constraints on every timestamp column |
+| Naive datetimes rejected at write time | ✅ `schema.to_iso()` raises rather than assuming UTC |
+| `game_status_history` with `provider_timestamp` / `observed_at` / `ingested_at` | ✅ migration `a002_games` |
+| Append-only triggers (DQ-PIT-008) | ✅ on `game_status_history` |
+| As-of accessor filtering on `observed_at` | ✅ `GameRepository.status_as_of()` |
+| Deterministic tie-break by ULID | ✅ monotonic ULIDs, `ORDER BY observed_at DESC, status_id DESC` |
+| `games.original_start` never updated | ✅ written once at creation |
+| Full `pit/asof.py`, `pit/dataset.py`, adversarial leak fixtures | ◻ Phase E |
+
+`GameRepository.status_as_of()` is the first working instance of the §3
+pattern, and its tests already cover the DQ-PIT-004 shape: a status observed at
+T2 but back-dated by the provider to T0 is **not** returned by a query as of
+T1.
+
 ### DQ-PIT-001 — Final scores in pregame features
 
 **Hazard.** `games.status` and any final-score column reflect *now*, not the

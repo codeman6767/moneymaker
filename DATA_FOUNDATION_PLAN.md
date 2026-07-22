@@ -241,42 +241,62 @@ leakage violations) fail the build, while notes accumulate visibly.
 Strictly ordered. Each phase's completion criteria are its exit gate; a phase
 does not begin until its dependencies are green under Ruff, mypy, and pytest.
 
-### Phase A — Database engine, migrations, core entities
+### Phase A — Database engine, migrations, core entities ✅ COMPLETE
 
 **Depends on:** nothing.
 
-**Create:** `sports_quant/db/{__init__,engine,ids,schema,hashing}.py`;
+**Created:** `sports_quant/db/{__init__,engine,ids,schema,normalize,models,init}.py`;
 `sports_quant/db/migrations/{a001_core_entities,a002_games}.sql`;
-`sports_quant/db/repositories/{__init__,base,leagues,seasons,teams,players,games}.py`;
-`sports_quant/db/seeds/{mlb_teams,nba_teams}.py`;
-`sports_quant/db/tests/{test_engine,test_migrations,test_ids,test_repositories,test_isolation}.py`.
+`sports_quant/db/repositories/{__init__,base,leagues,teams,players,games}.py`;
+`sports_quant/db/seeds/{__init__,loader,mlb_teams,nba_teams}.py`;
+`sports_quant/db/tests/{conftest,test_engine,test_migrations,test_ids,test_normalize,test_repositories,test_seeds,test_isolation,test_db_init_cli}.py`.
 
-**Modify:** `sports_quant/config.py` (add `DATABASE_PATH`), `.env.example`,
-`sports_quant/cli.py` (register `db-init`), `pyproject.toml` (package list).
+**Modified:** `sports_quant/config.py` (`DATABASE_PATH` +
+`resolved_database_path()`), `.env.example`, `.gitignore` (ignore `data/`),
+`sports_quant/cli.py` (`db-init`), `pyproject.toml` (packages + testpaths).
 
 **Tables:** `schema_versions`, `leagues`, `seasons`, `teams`, `team_aliases`,
 `players`, `player_aliases`, `games`, `game_status_history`.
 
 **Repositories:** `LeagueRepository`, `SeasonRepository`, `TeamRepository`,
-`PlayerRepository`, `GameRepository` — each a `Protocol` with `Sqlite*` and
-`InMemory*` implementations, per `tracking/base.py`.
+`TeamAliasRepository`, `PlayerRepository`, `PlayerAliasRepository`,
+`GameRepository` — each a `Protocol` with a `Sqlite*` implementation.
 
-**Tests:** migrations apply in order and are idempotent; checksum mismatch
-raises; `PRAGMA foreign_keys` is ON; ULIDs are prefixed, sortable, unique;
-append-only triggers reject UPDATE/DELETE; CRUD round-trips; **isolation test —
-no module in `probability/`, `state/`, `evaluation/`, or `gateway/` imports
-`sports_quant.db`**.
+**Tests:** 178 in `sports_quant/db/tests/`, all against temporary databases.
 
 **CLI:** `db-init`.
 
-**Done when:** `db-init` on an empty directory produces a migrated, seeded
-database; re-running is a no-op; all three gates green.
+**Delivered:** migrations 001–002 applied in order and idempotently; checksum
+mismatch raises; `PRAGMA foreign_keys` verified ON per connection; ULIDs
+prefixed, monotonic, unique; append-only triggers reject UPDATE/DELETE; CRUD
+round-trips; 30 MLB + 30 NBA teams and 311 aliases seeded deterministically;
+isolation enforced by source scan **and** by subprocess import check.
+
+#### Deviations from the original Phase A sketch
+
+Each was a correction found during implementation, not a shortcut:
+
+| # | Change | Why |
+| --- | --- | --- |
+| 1 | `team_aliases` uniqueness is scoped to `team_id`, not `league_id` | The original sketch referenced a `league_id_denorm` column that was never defined, and league-scoping would have **rejected** legitimate shared aliases — "chicago" belongs to both the Cubs and the White Sox. That is ambiguity to record, not a write to refuse. A real `league_id` column was added for lookup. |
+| 2 | `provider`, `valid_from_season`, `valid_to_season` are `NOT NULL` with sentinels (`''`, `0`, `9999`) | SQLite treats two `NULL`s as **distinct** inside a `UNIQUE` constraint, so nullable columns would let identical seed rows insert again on every `db-init`, silently defeating idempotency. |
+| 3 | `game_status_history.raw_response_id` / `raw_response_hash` are nullable with no FK | `raw_responses` is a Phase B table. Phase A has no ingestion, so no row can reference one yet. Phase B adds the FK and tightens the hash to `NOT NULL`. |
+| 4 | `season_id` includes the phase (`sn_mlb_2026_regular`) | A league runs preseason, regular and postseason inside one year, and the `seasons` uniqueness key covers all three. The original `sn_mlb_2026` example would have collided. |
+| 5 | Migration numbers are a single global sequence; the phase letter is cosmetic | `a001` and `b001` would both parse to version 1 and collide. Phase B continues at `003`. |
+| 6 | `InMemory*` repositories not built | They would have had no consumer in Phase A (tests use temporary SQLite files, per requirement), and an in-memory repository cannot reproduce SQLite's constraint semantics — an unverified reimplementation gives *false* test confidence. Deferred to Phase B, where ingestors give them a real consumer. |
+| 7 | Normalization lives in `db/normalize.py`, not `matching/normalize.py` | Phase A needs it for alias storage and lookup. Phase D's matcher imports this module rather than defining a second normalizer. |
+| 8 | Added `db/models.py` and `db/init.py`; no `db/hashing.py` | Typed row models need a shared home to avoid import cycles; `db/init.py` keeps SQL out of CLI code. A `hashing.py` shim was unnecessary — `canonical_json` is imported directly from `streaming.event_envelope`. |
+| 9 | Added `split_sql_statements()` to the engine | `sqlite3.Cursor.executescript` issues an implicit `COMMIT`, which silently ended the migration transaction and would have left a half-applied migration committed. The splitter handles string literals, comments, and `CREATE TRIGGER` bodies. |
+| 10 | `TeamSeed.extra_cities` added | The Clippers brand as "LA", so "Los Angeles" would have resolved unambiguously to the Lakers. Recording the extra city makes the genuine NBA ambiguity detectable. |
 
 ---
 
 ### Phase B — Raw responses, ingestion runs, sportsbook odds
 
-**Depends on:** A.
+**Depends on:** A (complete). Phase B additionally: adds the
+`raw_responses` foreign key to `game_status_history`, builds the `InMemory*`
+repositories now that ingestors consume them, and consolidates `intel/base.py`
+onto the shared `canonical_json`.
 
 **Create:** `sports_quant/db/migrations/{b001_raw_responses,b002_sportsbook}.sql`;
 `sports_quant/db/repositories/{raw_responses,ingestion_runs,sportsbook}.py`;

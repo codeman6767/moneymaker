@@ -37,6 +37,9 @@ sports-quant = "sports_quant.cli:main"
 packages = [
     "sports_quant",
     "sports_quant.providers",
+    "sports_quant.db",
+    "sports_quant.db.repositories",
+    "sports_quant.db.seeds",
     "streaming",
     "state",
     "probability",
@@ -58,6 +61,7 @@ python_files = ["test_*.py"]
 # Project test directories only -- never venv/ or site-packages.
 testpaths = [
     "sports_quant/tests",
+    "sports_quant/db/tests",
     "streaming/tests",
     "state/tests",
     "tracking/tests",

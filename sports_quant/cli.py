@@ -20,9 +20,12 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
 from .config import ReadOnlyStartupError, Settings, load_settings
+from .db.engine import DatabaseError
+from .db.init import initialize_database
 from .providers.kalshi import KalshiClient
 from .providers.odds_api import (
     MLB_SPORT_KEY,
@@ -224,20 +227,107 @@ async def run_providers_check(
     return 1 if counts[CheckStatus.FAILED] else 0
 
 
+# Exit code reserved for database problems: missing, unmigrated, or a schema
+# checksum mismatch. Distinct from 1 (a provider genuinely failed) and 2 (the
+# read-only startup invariants were violated).
+EXIT_DATABASE_ERROR = 3
+
+
+def run_db_init(
+    settings: Optional[Settings] = None,
+    *,
+    database_path: Optional[Path] = None,
+    out: Printer = print,
+) -> int:
+    """Create, migrate and seed the local corpus database.
+
+    Offline: no network call is made and no provider client is constructed.
+    Safe to run repeatedly -- migrations apply only when pending and seeding is
+    idempotent, so a second run adds nothing and destroys nothing.
+    """
+
+    if settings is None:
+        settings = load_settings()
+    else:
+        settings.enforce_read_only()
+
+    path = database_path if database_path is not None else settings.resolved_database_path()
+
+    out("Database initialization (offline; no provider request is made)")
+    out(f"  Database: {path}")
+
+    try:
+        result = initialize_database(path)
+    except DatabaseError as exc:
+        out(f"[FAILED ] {exc}")
+        return EXIT_DATABASE_ERROR
+
+    if result.created_database:
+        out("[OK     ] database file created")
+    else:
+        out("[OK     ] database file already present")
+
+    if result.applied:
+        for migration in result.applied:
+            out(f"[OK     ] applied migration {migration.version:03d} {migration.name}")
+    else:
+        out("[SKIPPED] migrations: schema already current")
+
+    out(f"  Schema version: {result.schema_version}")
+
+    for league in result.seeds.leagues:
+        out(
+            f"[OK     ] {league.league_code}: {league.teams_total} teams "
+            f"({league.teams_created} new), {league.aliases_created} new aliases, "
+            f"{league.aliases_flagged_ambiguous} flagged ambiguous"
+        )
+
+    if result.was_already_current:
+        out("Database already up to date; nothing was changed.")
+    else:
+        out(f"Database ready: {result.seeds.teams_total} teams across "
+            f"{len(result.seeds.leagues)} leagues.")
+    return 0
+
+
 def main(argv: Optional[list[str]] = None) -> int:
-    """CLI dispatch. Usage: ``python -m sports_quant providers-check``."""
+    """CLI dispatch.
+
+    Usage::
+
+        python -m sports_quant providers-check
+        python -m sports_quant db-init
+    """
 
     import argparse
 
     parser = argparse.ArgumentParser(prog="sports_quant", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("providers-check", help="Read-only reachability check for both data providers")
+    db_init = sub.add_parser(
+        "db-init", help="Create, migrate and seed the local historical corpus database"
+    )
+    db_init.add_argument(
+        "--db",
+        dest="database_path",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Override DATABASE_PATH for this run",
+    )
 
     args = parser.parse_args(argv)
 
     if args.command == "providers-check":
         try:
             return asyncio.run(run_providers_check())
+        except ReadOnlyStartupError as exc:
+            print(str(exc))
+            return 2
+
+    if args.command == "db-init":
+        try:
+            return run_db_init(database_path=args.database_path)
         except ReadOnlyStartupError as exc:
             print(str(exc))
             return 2

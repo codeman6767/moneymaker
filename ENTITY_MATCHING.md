@@ -46,8 +46,13 @@ resolved). This design **extends that module rather than replacing it.**
 
 ### 2.1 The normalization pipeline
 
-One function, `sports_quant/matching/normalize.py::normalize_name()`, applied
-identically at alias-write time and at lookup time. Steps, in fixed order:
+**Implemented in Phase A** as `sports_quant/db/normalize.py::normalize_name()`
+— in `db/` rather than the planned `matching/` because Phase A needs it for
+alias storage and lookup. Phase D's matcher imports this module rather than
+defining a second normalizer.
+
+One function, applied identically at alias-write time and at lookup time.
+Steps, in fixed order:
 
 1. Unicode NFKD decomposition, then strip combining marks
    (`Acuña` → `Acuna`, `Dončić` → `Doncic`, `Jokić` → `Jokic`).
@@ -58,7 +63,12 @@ identically at alias-write time and at lookup time. Steps, in fixed order:
    (`St. Louis` → `st louis`, `D'Angelo` → `dangelo`, `Shai
    Gilgeous-Alexander` → `shai gilgeous alexander`).
 5. Collapse internal whitespace runs to a single space; strip ends.
-6. Drop a trailing generational suffix into a separate return value
+6. Collapse a run of single-character tokens into one (`"N.Y."` → `n y` → `ny`,
+   matching `"NY"`). A name composed *entirely* of single letters is an
+   abbreviation by construction, so joining is safe; a name with any
+   multi-letter token is left alone, so `"J R Smith"` does not become
+   `jrsmith`.
+7. Drop a trailing generational suffix into a separate return value
    (see §3.1).
 
 Deterministic and pure: no locale dependence, no `set` iteration, no clock.
@@ -132,6 +142,18 @@ is stored against **both** teams with `is_ambiguous = 1`, so a bare `NY` can
 never resolve on its own — it must be disambiguated by opponent, schedule, or
 provider scope. Encoding the ambiguity as data is what makes the refusal
 automatic instead of relying on someone remembering the edge case.
+
+**Ambiguity is derived, not hand-marked.** After seeding, the loader runs
+`mark_ambiguous_duplicates()`, which flags every alias whose normalized form
+maps to more than one team in the league. In the shipped seed that flags 6 MLB
+rows (`chicago`, `new york`, `los angeles` — two teams each) and 2 NBA rows
+(`los angeles`). Deriving the flag is deterministic and self-correcting as
+franchises move, where a hand-maintained list drifts.
+
+This is also why `TeamSeed` carries `extra_cities`. The Clippers brand
+themselves "LA", so with canonical cities alone `"Los Angeles"` would have
+resolved cleanly — and wrongly — to the Lakers. Recording "Los Angeles" as an
+additional Clippers city makes the genuine ambiguity visible to the derivation.
 
 **Historical names are season-scoped.** `valid_from_season` / `valid_to_season`
 bound each alias, and `teams` carries `(first_season, last_season)`. Resolving
@@ -382,14 +404,15 @@ sign of a position. A corpus containing either is not fit for research, and the
 
 ## 9. Testing
 
-| Layer | Content |
-| --- | --- |
-| **Normalization golden file** | Fixed input corpus (accents, punctuation, suffixes, `&`) with pinned outputs. Any change shows as a reviewable diff. |
-| **Determinism** | Every matcher runs 100× over shuffled candidate orderings; all runs produce identical decisions. Catches `set`/`dict` ordering leaks. |
-| **Ambiguity refusal** | Two Jalen Williamses, bare `NY`, same-time doubleheader — each asserts `AMBIGUOUS` and `needs_manual_review = 1`, never a match. |
-| **Hard cases** | One fixture per §4.3 case: neutral site, postponement, reschedule, both doubleheader types, suspension. |
-| **Rules disagreement** | Kalshi market whose title and rules name different games ⇒ rejected. |
-| **Decision completeness** | Property test: every matcher invocation writes exactly one decision row, and accepted rows always name an entity. |
+| Layer | Content | Status |
+| --- | --- | --- |
+| **Normalization golden file** | Fixed input corpus (accents, punctuation, suffixes, `&`, all-initial abbreviations) with pinned outputs. Any change shows as a reviewable diff. | ✅ `db/tests/test_normalize.py` |
+| **Determinism** | Normalization is stable across repeated calls; resolution is order-independent under reversed candidate lists. | ✅ Phase A; extended to 100× shuffles in Phase D |
+| **Ambiguity refusal** | Two Jalen Williamses, shared cities, generational collisions — each asserts `AMBIGUOUS`, never a match. | ✅ Phase A (unit and through the database) |
+| **Suffix binding** | A present suffix is binding (`Guerrero Jr.` never resolves to the father); an absent one is permissive unless both generations exist. | ✅ Phase A |
+| **Hard cases** | One fixture per §4.3 case: neutral site, postponement, reschedule, both doubleheader types, suspension. | Postponement/reschedule/doubleheader ✅ Phase A; the rest ◻ Phase D |
+| **Rules disagreement** | Kalshi market whose title and rules name different games ⇒ rejected. | ◻ Phase D |
+| **Decision completeness** | Property test: every matcher invocation writes exactly one decision row, and accepted rows always name an entity. | ◻ Phase D (`entity_match_decisions` is a Phase D table) |
 
 The determinism test is the one that earns its keep. Non-determinism from
 iteration order is invisible in a single run and produces a corpus that cannot

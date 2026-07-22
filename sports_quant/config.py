@@ -24,6 +24,12 @@ from pathlib import Path
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Default location of the local historical corpus, relative to the repository
+# root. Kept out of any tracked source directory and git-ignored: it is derived
+# data that grows without bound. A relative default (rather than an absolute
+# path) is what keeps the checkout portable between machines.
+DEFAULT_DATABASE_PATH = "data/corpus.db"
+
 # Repository root = parent of the ``sports_quant`` package directory.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -73,6 +79,10 @@ class Settings(BaseSettings):
     kalshi_public_rest_url: str = PRODUCTION_KALSHI_REST_URL
     kalshi_environment: str = PRODUCTION_ENVIRONMENT
 
+    # Local historical corpus. Relative paths resolve against the repository
+    # root so the value is portable across checkouts.
+    database_path: str = DEFAULT_DATABASE_PATH
+
     # Safety flags -- all must hold their read-only values (see below).
     read_only_mode: bool = True
     order_submission_enabled: bool = False
@@ -121,6 +131,19 @@ class Settings(BaseSettings):
         """True if an Odds API key is configured (its value is never revealed)."""
 
         return bool(self.odds_api_key.get_secret_value().strip())
+
+    def resolved_database_path(self) -> Path:
+        """Absolute path to the corpus database.
+
+        A relative ``DATABASE_PATH`` resolves against the repository root, not
+        the current working directory, so ``db-init`` writes to the same file
+        no matter where it is invoked from.
+        """
+
+        configured = Path(self.database_path).expanduser()
+        if configured.is_absolute():
+            return configured
+        return (REPO_ROOT / configured).resolve()
 
 
 def load_settings() -> Settings:
