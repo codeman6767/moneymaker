@@ -8,7 +8,7 @@ flag) so the detector can compare a confirmed lineup against the projected one
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional, Tuple
 

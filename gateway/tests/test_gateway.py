@@ -19,7 +19,6 @@ from gateway import (
     OrderState,
     Stage,
     StaticLimitsProvider,
-    TokenBudgetManager,
     FakeOrderTransport,
 )
 

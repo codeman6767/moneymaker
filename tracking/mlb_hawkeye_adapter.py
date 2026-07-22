@@ -29,7 +29,6 @@ from __future__ import annotations
 from typing import Iterator, Optional
 
 from .base import (
-    FrameDataUnavailable,
     FrameParquetStore,
     FrameSource,
     TrackingFrame,

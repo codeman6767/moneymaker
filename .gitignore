@@ -1,0 +1,10 @@
+# Secrets: never commit a real .env (the Odds API key lives here).
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+venv/

@@ -12,15 +12,13 @@ from probability import (
     InferenceEngine,
     MLB_SPEC,
     NBA_SPEC,
-    OODDetector,
-    ResidualWinProbModel,
     build_mlb_dataset,
     build_nba_dataset,
     onnx_available,
     onnxruntime_available,
     pregame_prior,
 )
-from probability.onnx_export import build_onnx_model, export_to_onnx
+from probability.onnx_export import export_to_onnx
 from probability.surfaces import SD_CAP
 
 PROBABILITY_SRC = Path(__file__).resolve().parents[1]

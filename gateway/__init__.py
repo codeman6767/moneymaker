@@ -1,13 +1,15 @@
-"""Benchmarked execution gateway (Module 8).
+"""Benchmarked execution gateway (Module 8) -- QUARANTINED.
 
-Phase 1 (implemented): Python asyncio gateway for Kalshi demo -- WebSocket
-market data and REST limit-order submission -- with a full safety envelope
-(demo by default, explicit arming for live, local token budget, idempotent
-unique client order ids, timeout reconciliation, partial fills, cancel/replace,
-market-pause handling, automatic disarm) and per-stage latency benchmarking.
+The project is now a strictly read-only recommendation engine. This module is
+preserved for reference but its execution functionality is disabled: the real
+Kalshi network transports call :func:`gateway.quarantine.ensure_execution_allowed`
+before any exchange contact, which raises in read-only mode. Nothing here is
+imported on the read-only application's startup path (see ``sports_quant``).
 
-Phase 2 (Rust/Tokio) and Phase 3 (Kalshi FIX) are gated and NOT implemented
-here -- see ``PHASES.md``.
+Phase 1 (as built): Python asyncio gateway for Kalshi -- WebSocket market data
+and REST limit-order submission -- with a full safety envelope and per-stage
+latency benchmarking. Phase 2 (Rust/Tokio) and Phase 3 (Kalshi FIX) were gated
+and never implemented. See ``READ_ONLY_ARCHITECTURE.md``.
 """
 
 from .arming import ArmError, ArmingController, LIVE_ARM_TOKEN
@@ -15,6 +17,7 @@ from .benchmark import E2E, GatewayReport, LatencyBenchmark, Stage, StageTimer
 from .client_ids import ClientOrderIdFactory, IdempotencyRegistry
 from .config import GatewayConfig
 from .gateway import ExecutionGateway, Strategy
+from .quarantine import EXECUTION_QUARANTINED, ExecutionQuarantinedError, ensure_execution_allowed
 from .limits import (
     DEFAULT_LIMITS,
     KalshiLimits,
@@ -45,6 +48,10 @@ __all__ = [
     "GatewayConfig",
     "ExecutionGateway",
     "Strategy",
+    # quarantine
+    "EXECUTION_QUARANTINED",
+    "ExecutionQuarantinedError",
+    "ensure_execution_allowed",
     # arming
     "ArmingController",
     "ArmError",

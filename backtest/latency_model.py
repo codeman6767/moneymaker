@@ -12,9 +12,8 @@ of the system reports separately (never conflated, per ``CLAUDE.md``):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict
 
-import numpy as np
 
 STAGES: tuple = (
     "provider_publication",

@@ -26,11 +26,11 @@ before the ack simply causes a redelivery that dedup then absorbs.
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Awaitable, Callable, List, Optional
 
-from .correction_handler import CorrectionHandler, CorrectionStatus
+from .correction_handler import CorrectionHandler
 from .deduplicator import Deduplicator
 from .event_envelope import SUPPORTED_SCHEMA_VERSIONS, EventEnvelope
 from .latency import LatencyRegistry, monotonic_ns, record_envelope_latencies

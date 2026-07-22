@@ -16,12 +16,11 @@ real historical game states with outcomes; the interfaces stay the same.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 
 from . import features
-from .reference import TRUTH, sigmoid
+from .reference import TRUTH
 
 F32 = np.float32
 

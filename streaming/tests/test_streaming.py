@@ -17,7 +17,6 @@ import random
 from datetime import datetime, timedelta, timezone
 from typing import List
 
-import pytest
 
 from streaming import (
     CorrectionHandler,

@@ -12,7 +12,7 @@ labeled execution-valid when order-book or event timestamps are missing.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Protocol
 
 import numpy as np
@@ -23,7 +23,7 @@ from evaluation.pricing import FeeModel, quote_side
 from .book_timeline import MarketTimeline, build_timelines
 from .data_quality import DataQualityReport, grade_dataset
 from .events import DECISION_TRIGGERS, ReplayEvent
-from .fill_model import FillOutcome, clv_cents, expected_profit_cents, resolve_fill
+from .fill_model import clv_cents, expected_profit_cents, resolve_fill
 from .latency_model import LatencyModel
 from .metrics import LatencyMetrics, break_even_latency, build_distributions
 

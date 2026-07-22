@@ -12,7 +12,8 @@ from __future__ import annotations
 import asyncio
 from typing import AsyncIterator, Dict, List, Optional, Protocol
 
-from .orders import LimitOrderRequest, OrderAck, OrderState, OrderStatusReport
+from .orders import LimitOrderRequest, OrderAck, OrderStatusReport
+from .quarantine import ensure_execution_allowed
 
 
 class OrderTransport(Protocol):
@@ -110,6 +111,8 @@ class KalshiRestTransport:
         return self._client
 
     async def submit(self, request: LimitOrderRequest) -> OrderAck:  # pragma: no cover
+        # Quarantined: read-only mode never submits an order to the exchange.
+        ensure_execution_allowed()
         client = await self._ensure()
         body = {
             "client_order_id": request.client_order_id,  # idempotency key
@@ -132,6 +135,8 @@ class KalshiRestTransport:
         )
 
     async def cancel(self, exchange_order_id: str) -> bool:  # pragma: no cover
+        # Quarantined: read-only mode never cancels/manages an exchange order.
+        ensure_execution_allowed()
         client = await self._ensure()
         resp = await client.delete(f"/portfolio/orders/{exchange_order_id}", headers=self._sign())
         return resp.status_code < 400
@@ -154,6 +159,8 @@ class KalshiWsFeed:  # pragma: no cover - network path
         self._ws = None
 
     async def connect(self) -> None:
+        # Quarantined: the execution feed is part of the disabled execution lane.
+        ensure_execution_allowed()
         import websockets
 
         self._ws = await websockets.connect(self._url)

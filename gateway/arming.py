@@ -55,6 +55,6 @@ class ArmingController:
             return
         if not self._armed:
             raise ArmError(
-                f"live order refused: not armed"
+                "live order refused: not armed"
                 + (f" (last disarm: {self.disarm_reason})" if self.disarm_reason else "")
             )
