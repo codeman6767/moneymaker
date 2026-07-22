@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from typing import Optional, Protocol
 
 from ..ids import new_team_alias_id
@@ -146,7 +147,12 @@ class TeamAliasRepositoryProtocol(Protocol):
     def list_for_team(self, team_id: str) -> list[TeamAlias]: ...
 
     def resolve(
-        self, raw_name: str, *, league_id: str, provider: Optional[str] = None
+        self,
+        raw_name: str,
+        *,
+        league_id: str,
+        provider: Optional[str] = None,
+        season_year: Optional[int] = None,
     ) -> AliasResolution: ...
 
     def mark_ambiguous_duplicates(self, league_id: str) -> int: ...
@@ -229,20 +235,46 @@ class SqliteTeamAliasRepository(Repository):
         ]
 
     def resolve(
-        self, raw_name: str, *, league_id: str, provider: Optional[str] = None
+        self,
+        raw_name: str,
+        *,
+        league_id: str,
+        provider: Optional[str] = None,
+        season_year: Optional[int] = None,
     ) -> AliasResolution:
         """Resolve a raw team name within one league.
 
         Returns an explicit ``AMBIGUOUS`` result when the name maps to more than
         one team, or to an alias flagged ambiguous -- never the first row.
+
+        ``season_year`` scopes the lookup to aliases valid that season:
+        ``valid_from_season <= season_year <= valid_to_season``. Omitting it
+        preserves the unscoped behaviour and, importantly, the result then
+        reports ``season_scoped=False`` -- it does not claim historical validity
+        was checked.
+
+        **Season scoping is structural, not yet curated.** Seeded aliases
+        (including historical ones such as "Cleveland Indians") are stored with
+        the unbounded sentinels 0/9999, so they match every season. Filtering
+        works and is enforced for any alias that *does* carry a curated window;
+        populating real validity years for the seeded historical names is Phase
+        D work. ``AliasResolution.season_validity_verified`` reports which case
+        a given result is in, so a caller is never misled into thinking an
+        unbounded alias was verified against the season.
         """
 
         normalized = normalize_name(raw_name).normalized
-        rows = self._fetch_all(
-            "SELECT team_id, alias, normalized, alias_type, provider, is_ambiguous "
-            "FROM team_aliases WHERE league_id = ? AND normalized = ?",
-            (league_id, normalized),
+        sql = (
+            "SELECT team_id, alias, normalized, alias_type, provider, is_ambiguous, "
+            "valid_from_season, valid_to_season "
+            "FROM team_aliases WHERE league_id = ? AND normalized = ?"
         )
+        params: tuple[object, ...] = (league_id, normalized)
+        if season_year is not None:
+            sql += " AND valid_from_season <= ? AND valid_to_season >= ?"
+            params = (*params, season_year, season_year)
+        rows = self._fetch_all(sql, params)
+
         candidates = [
             AliasCandidate(
                 entity_id=str(r["team_id"]),
@@ -254,7 +286,21 @@ class SqliteTeamAliasRepository(Repository):
             )
             for r in rows
         ]
-        return resolve_alias(raw_name, candidates, provider=provider)
+        # An alias left at the sentinels was never curated, so a season match
+        # against it proves nothing about that season.
+        verified = bool(rows) and all(
+            int(r["valid_from_season"]) != SEASON_UNBOUNDED_START
+            or int(r["valid_to_season"]) != SEASON_UNBOUNDED_END
+            for r in rows
+        )
+
+        resolution = resolve_alias(raw_name, candidates, provider=provider)
+        return replace(
+            resolution,
+            season_year=season_year,
+            season_scoped=season_year is not None,
+            season_validity_verified=season_year is not None and verified,
+        )
 
     def mark_ambiguous_duplicates(self, league_id: str) -> int:
         """Flag every alias whose normalized form maps to more than one team.

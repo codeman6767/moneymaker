@@ -27,12 +27,17 @@ def status_content_hash(
     detail: Optional[str],
     provider_timestamp: Optional[str],
 ) -> str:
-    """Content hash of one status observation.
+    """Hash of the *state* an observation reports.
 
-    Covers the observation's *content* only, so the same provider re-reporting
-    an unchanged status hashes identically and is skipped rather than appended
-    twice. Deliberately excludes ``observed_at`` -- a re-poll is not new
-    information.
+    Covers the reported state only, deliberately excluding ``observed_at``: a
+    re-poll returning an unchanged state is not new information.
+
+    Note that this is a state hash, not an observation identity. Two
+    observations of the same state at different times hash identically **on
+    purpose** -- that is what lets the repository detect "nothing changed". It
+    is emphatically *not* a global uniqueness key: a game that goes
+    ``delayed -> in_progress -> delayed`` reports the same state twice, and both
+    must be recorded. See :meth:`SqliteGameRepository.record_status`.
 
     Uses the shared ``canonical_json`` from ``streaming.event_envelope`` rather
     than a fourth in-repo canonicalizer: two canonicalizers that disagree
@@ -193,14 +198,30 @@ class SqliteGameRepository(Repository):
         detail: Optional[str] = None,
         provider_timestamp: Optional[str] = None,
     ) -> bool:
-        """Append a status observation and update the game's current state.
+        """Append a status observation and refresh the game's current state.
 
-        Two writes, one transaction: the history row and the current-state
-        update must not diverge. Returns True when a history row was appended,
-        False when this exact observation was already recorded.
+        Returns True when a history row was appended, False when the
+        observation reported no change.
+
+        **Transition-aware deduplication.** The observation is compared against
+        the one immediately *preceding* it in time from the same provider. An
+        unchanged re-poll is skipped; a genuine return to an earlier state
+        (``delayed -> in_progress -> delayed``, an ordinary rain delay that
+        resumes and re-delays) is appended, because its predecessor differs.
+        Comparing against the whole history instead would silently drop that
+        third observation.
+
+        **Stale backfill cannot regress current state.** Current state is
+        recomputed from the newest observation by ``(observed_at, status_id)``
+        after every insert, not copied from the row just written. A late-arriving
+        observation of an *earlier* moment is preserved in history but does not
+        overwrite a newer state.
 
         ``observed_at`` is when *we* learned this -- the point-in-time cutoff
         column. It is never back-dated to the provider's timestamp.
+
+        The history insert and the current-state recomputation share one
+        transaction, so the two can never diverge.
         """
 
         content = status_content_hash(
@@ -214,6 +235,14 @@ class SqliteGameRepository(Repository):
         # transaction() joins an already-open transaction rather than nesting,
         # so a caller batching several games still gets one atomic unit.
         with transaction(self._conn):
+            if self._is_unchanged_from_predecessor(
+                game_id=game_id,
+                provider=provider,
+                observed_at=observed_at,
+                content_hash=content,
+            ):
+                return False
+
             cursor = self._conn.execute(
                 "INSERT OR IGNORE INTO game_status_history "
                 "(status_id, game_id, status, scheduled_start, detail, provider, "
@@ -236,12 +265,50 @@ class SqliteGameRepository(Repository):
             )
             inserted = cursor.rowcount > 0
             if inserted:
-                self._conn.execute(
-                    "UPDATE games SET status = ?, scheduled_start = ?, updated_at = ? "
-                    "WHERE game_id = ?",
-                    (status, scheduled_start, now, game_id),
-                )
+                self._refresh_current_state(game_id, now)
         return inserted
+
+    def _is_unchanged_from_predecessor(
+        self, *, game_id: str, provider: str, observed_at: str, content_hash: str
+    ) -> bool:
+        """Whether this observation reports the same state as the one before it.
+
+        "Before it" means the latest observation from the same provider at or
+        before ``observed_at`` -- so a backfilled row is compared against its
+        own temporal neighbour rather than against the newest row overall.
+        """
+
+        row = self._fetch_one(
+            "SELECT content_hash FROM game_status_history "
+            "WHERE game_id = ? AND provider = ? AND observed_at <= ? "
+            "ORDER BY observed_at DESC, status_id DESC LIMIT 1",
+            (game_id, provider, observed_at),
+        )
+        return row is not None and str(row["content_hash"]) == content_hash
+
+    def _refresh_current_state(self, game_id: str, now: str) -> None:
+        """Set the game's current state from its newest observation.
+
+        Ordered by ``observed_at`` then ``status_id``; ULIDs are creation-
+        ordered, so observations sharing a timestamp resolve deterministically
+        to the most recently recorded one.
+
+        ``original_start`` is never touched -- it is the anchor for "was this
+        game moved?", and migration a003 makes that immutability a database
+        rule rather than a convention.
+        """
+
+        latest = self._fetch_one(
+            "SELECT status, scheduled_start FROM game_status_history WHERE game_id = ? "
+            "ORDER BY observed_at DESC, status_id DESC LIMIT 1",
+            (game_id,),
+        )
+        if latest is None:  # pragma: no cover - a row was just inserted
+            return
+        self._conn.execute(
+            "UPDATE games SET status = ?, scheduled_start = ?, updated_at = ? WHERE game_id = ?",
+            (str(latest["status"]), str(latest["scheduled_start"]), now, game_id),
+        )
 
     def status_history(self, game_id: str) -> list[GameStatusRecord]:
         """Every status observation for a game, oldest observation first."""

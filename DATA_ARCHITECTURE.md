@@ -206,6 +206,7 @@ version 1 and collide. Applied so far:
 | --- | --- | --- |
 | 001 | `a001_core_entities` | leagues, seasons, teams, team_aliases, players, player_aliases |
 | 002 | `a002_games` | games, game_status_history, append-only triggers |
+| 003 | `a003_integrity_guards` | league-consistency triggers, `original_start` immutability, `game_status_history` rebuild (§3.4.1) |
 
 **Migrations are applied statement-by-statement, not via `executescript`.**
 `sqlite3.Cursor.executescript` issues an implicit `COMMIT` before running,
@@ -406,6 +407,59 @@ triggers of §5. `games` additionally carries a partial unique index on
 official key do not collide on `NULL` — and a `CHECK` requiring the provider and
 key to be present or absent together, since a key without its issuer is
 meaningless.
+
+### 3.4.1 Status-history uniqueness (corrected in `a003`)
+
+`a002` shipped `UNIQUE (game_id, provider, content_hash)`, which deduplicates
+**states** globally. `a003` rebuilds the table with:
+
+```sql
+CONSTRAINT game_status_history_unique
+    UNIQUE (game_id, provider, observed_at, content_hash)
+```
+
+The reason: `content_hash` covers the reported state and deliberately excludes
+`observed_at`, so a game going `delayed → in_progress → delayed` produced a
+third observation that hashed identically to the first and was silently
+discarded — losing a real transition and leaving `games.status` reading
+`in_progress` while the game was delayed. Ordinary rain delays do this, and the
+failure was worst when `provider_timestamp` was absent.
+
+Including `observed_at` means the same state at a different time is storable,
+while an exact duplicate observation is still rejected. Deduplication of
+unchanged re-polls moved to the repository, which compares an observation
+against its **immediate temporal predecessor** from the same provider rather
+than against the whole history. The table therefore stores *state transitions
+per (game, provider)*. Full analysis in `DATA_FOUNDATION_PLAN.md` §5.2.
+
+SQLite cannot drop an inline `UNIQUE`, so `a003` rebuilds the table: create the
+replacement, copy every row, drop the original, rename, then recreate the index
+and the append-only triggers. Nothing references `game_status_history` by
+foreign key, so no dependent constraint is disturbed. A test applies 001–002
+alone, writes a history row, then applies 003 and asserts the row survived.
+
+### 3.4.2 League-consistency guards (`a003`)
+
+A foreign key proves a referenced row **exists**; it cannot prove the row
+belongs to the same league. Without a further guard an MLB game can reference an
+NBA season or an NBA team, and the database accepts it — the row is
+well-formed, nothing surfaces the error, and every downstream join inherits it.
+
+`a003` adds `BEFORE INSERT` and column-scoped `BEFORE UPDATE` triggers:
+
+| Rule | Trigger |
+| --- | --- |
+| `games.league_id` = league of `games.season_id` | `trg_games_league_consistency_*` |
+| `games.league_id` = league of `games.home_team_id` | `trg_games_league_consistency_*` |
+| `games.league_id` = league of `games.away_team_id` | `trg_games_league_consistency_*` |
+| `team_aliases.league_id` = league of its team | `trg_team_aliases_league_consistency_*` |
+| `player_aliases.league_id` = league of its player | `trg_player_aliases_league_consistency_*` |
+| `games.original_start` never changes | `trg_games_original_start_immutable` |
+
+The UPDATE triggers are scoped with `BEFORE UPDATE OF <columns>` so an ordinary
+status write does not pay for the subqueries. These are database rules, not
+repository checks — anything holding a connection can write, so the enforcement
+has to live where the data does.
 
 `games.status` and `games.scheduled_start` are **mutable current-state
 columns** — a deliberate exception to the append-only rule, and the *only*

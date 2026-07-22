@@ -3,8 +3,21 @@
 Master plan for the real historical data foundation of the read-only MLB/NBA
 betting **recommendation** engine.
 
-This is an architecture and planning document. **No implementation has been
-started.** Phase A begins only on explicit instruction.
+## Status
+
+**Phase A is complete**, including the a003 integrity patch (migrations 001–003,
+227 tests). **Phase B has not started** — there is no raw-response storage, no
+ingestion, and no provider request anywhere in the corpus code.
+
+Phases B–E below remain planning; each begins only on explicit instruction.
+
+| Phase | Scope | Status |
+| --- | --- | --- |
+| A | Database engine, migrations, core entities, `db-init` | ✅ Complete (schema v3) |
+| B | Raw responses, ingestion runs, sportsbook odds | ◻ Not started |
+| C | Kalshi public events, markets, books, trades | ◻ Not started |
+| D | Official providers, canonical matching | ◻ Not started |
+| E | Point-in-time builder, quality rules, leakage tests | ◻ Not started |
 
 Companion documents:
 
@@ -289,6 +302,29 @@ Each was a correction found during implementation, not a shortcut:
 | 9 | Added `split_sql_statements()` to the engine | `sqlite3.Cursor.executescript` issues an implicit `COMMIT`, which silently ended the migration transaction and would have left a half-applied migration committed. The splitter handles string literals, comments, and `CREATE TRIGGER` bodies. |
 | 10 | `TeamSeed.extra_cities` added | The Clippers brand as "LA", so "Los Angeles" would have resolved unambiguously to the Lakers. Recording the extra city makes the genuine NBA ambiguity detectable. |
 
+#### Integrity patch — migration `a003_integrity_guards`
+
+Three defects were found in the Phase A schema and repaired additively (001 and
+002 are immutable once applied):
+
+**1. Foreign keys did not enforce league consistency.** An FK proves a
+referenced row exists, not that it belongs to the same league — an MLB game
+could reference an NBA season or an NBA team and the database accepted it. The
+row looks well-formed, and every downstream join inherits the error. `a003`
+adds `BEFORE INSERT` and column-scoped `BEFORE UPDATE` triggers for:
+`games.league_id` vs. its season, home team and away team; `team_aliases.league_id`
+vs. its team; `player_aliases.league_id` vs. its player. Plus
+`games.original_start` immutability, since that column is the only record that a
+game was ever moved.
+
+**2. A stale backfill could regress current game state.** `record_status()`
+copied the row it had just written into `games.status`, so a late-arriving
+observation of an *earlier* moment overwrote a newer state. Current state is now
+recomputed from the newest observation by `(observed_at, status_id)` after every
+insert. See §5.1 below.
+
+**3. Status deduplication was global rather than transition-aware.** See §5.2.
+
 ---
 
 ### Phase B — Raw responses, ingestion runs, sportsbook odds
@@ -423,6 +459,95 @@ A–F vocabulary.
 cutoffs, labels, and the safety proof. Populating `X` is a later stage.
 
 ---
+
+## 5.1 The stale-backfill rule
+
+> **Current game state always reflects the newest observation, never the most
+> recently written one.**
+
+`games.status` and `games.scheduled_start` are recomputed after every history
+insert from:
+
+```sql
+SELECT status, scheduled_start FROM game_status_history
+WHERE game_id = ?
+ORDER BY observed_at DESC, status_id DESC
+LIMIT 1
+```
+
+Consequences, all test-pinned:
+
+| Situation | Behaviour |
+| --- | --- |
+| Newer observation arrives | Becomes current state |
+| Older observation backfilled | Stored in history; current state unchanged |
+| Observations arrive out of order | Current state converges to the newest regardless of arrival order |
+| Two observations share `observed_at` | `status_id` (a monotonic ULID) breaks the tie, so the most recently recorded wins and a rebuild agrees |
+| `original_start` | Never changed — now a database rule, not a convention |
+
+The tie-break matters more than it looks. Without a deterministic second key,
+two observations sharing a timestamp would resolve arbitrarily, and a rebuilt
+corpus could disagree with the original about a game's current state.
+
+## 5.2 Status deduplication: the decision
+
+**Decision: the deduplication design was changed** (migration `a003` plus a
+repository change), rather than documenting the old behaviour as intentional.
+
+**The problem.** Migration `a002` declared
+`UNIQUE (game_id, provider, content_hash)`, where `content_hash` covers
+`(status, scheduled_start, detail, provider_timestamp)` and deliberately
+excludes `observed_at`. That deduplicates *states* globally: a state can be
+recorded once per game per provider, ever.
+
+Baseball breaks that immediately. A rain delay that resumes and re-delays gives
+`delayed -> in_progress -> delayed`. The third observation hashes identically to
+the first, so `INSERT OR IGNORE` silently discarded it. Reproduced before the
+fix:
+
+```
+record delayed      -> inserted=True
+record in_progress  -> inserted=True
+record delayed      -> inserted=False     # silently lost
+history: ['delayed', 'in_progress']
+current status: in_progress               # WRONG - the game is delayed
+```
+
+The corpus lost a real transition *and* the current state was left wrong. With a
+missing `provider_timestamp` — common, and the case the requirement calls out —
+nothing else distinguished the two observations. This is a correctness defect,
+not a tuning preference, so redesign was warranted.
+
+**The fix.** Two coordinated changes:
+
+- **Database** (`a003`): uniqueness becomes
+  `UNIQUE (game_id, provider, observed_at, content_hash)`. Adding `observed_at`
+  means the same state at a *different* observation time is storable, while an
+  exact duplicate observation is still rejected. SQLite cannot drop an inline
+  `UNIQUE`, so the table is rebuilt — data is copied, and the append-only
+  triggers are recreated.
+- **Repository**: an observation is skipped only when it is unchanged from the
+  one **immediately preceding it in time from the same provider**, not from the
+  whole history.
+
+**The resulting semantics**, which are what the corpus now promises:
+
+> `game_status_history` stores **state transitions per (game, provider)**. An
+> observation is appended when it differs from its temporal predecessor;
+> unchanged re-polls collapse.
+
+| Case | Result |
+| --- | --- |
+| Poll every 30s, nothing changed | One row |
+| `delayed -> in_progress -> delayed` | Three rows |
+| Exact observation replayed | No new row (idempotent) |
+| Older observation backfilled that already exists | No new row (idempotent) |
+| Two providers reporting the same state | Two rows — dedup is per-provider |
+
+Comparing against the predecessor rather than the newest row is what makes
+backfill idempotent: a replayed old observation is compared against its own
+temporal neighbour, so it is recognised as unchanged even when the newest state
+differs from it.
 
 ## 6. Unresolved design risks
 

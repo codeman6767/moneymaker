@@ -170,6 +170,17 @@ class AliasResolution:
     reason: Optional[str] = None
     query: str = ""
     query_suffix: str = NO_SUFFIX
+    #: The season the caller asked about, or None if it did not supply one.
+    season_year: Optional[int] = None
+    #: Whether candidates were filtered by their season-validity window. False
+    #: means historical validity was **not** checked -- see
+    #: :attr:`season_validity_verified`.
+    season_scoped: bool = False
+    #: Whether every surviving candidate carries a curated validity window.
+    #: False means at least one candidate is stored unbounded, so a match does
+    #: not prove the alias was actually in use that season. Unbounded seed
+    #: aliases await Phase D curation (ENTITY_MATCHING.md §3.2).
+    season_validity_verified: bool = False
 
     @property
     def is_matched(self) -> bool:

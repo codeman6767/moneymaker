@@ -18,6 +18,7 @@ from sports_quant.db.schema import PHASE_A_TABLES, SCHEMA_VERSION_TABLE
 EXPECTED_MIGRATIONS = (
     (1, "a001_core_entities"),
     (2, "a002_games"),
+    (3, "a003_integrity_guards"),
 )
 
 
@@ -169,6 +170,106 @@ def test_failed_migration_rolls_back_and_leaves_version_intact(tmp_path: Path) -
         }
     assert "leagues" in names
     assert "ok_before_failure" not in names
+
+
+def test_migration_003_applies_once_and_is_idempotent(database: Database) -> None:
+    first = database.migrate()
+    assert (3, "a003_integrity_guards") in [(m.version, m.name) for m in first.applied]
+
+    second = database.migrate()
+    third = database.migrate()
+    assert second.applied == () and third.applied == ()
+    assert second.schema_version == third.schema_version == 3
+
+    with database.connection() as conn:
+        applied = database.applied_migrations(conn)
+    # Exactly one row for migration 3, however many times db-init runs.
+    assert len([a for a in applied if a.version == 3]) == 1
+
+
+def test_migration_003_installs_its_triggers(database: Database) -> None:
+    database.migrate()
+    with database.connection() as conn:
+        triggers = {
+            r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'")
+        }
+    expected = {
+        "trg_games_league_consistency_insert",
+        "trg_games_league_consistency_update",
+        "trg_games_original_start_immutable",
+        "trg_team_aliases_league_consistency_insert",
+        "trg_team_aliases_league_consistency_update",
+        "trg_player_aliases_league_consistency_insert",
+        "trg_player_aliases_league_consistency_update",
+        # Recreated after the game_status_history rebuild.
+        "trg_game_status_history_no_update",
+        "trg_game_status_history_no_delete",
+    }
+    assert expected <= triggers
+
+
+def test_migration_003_rebuild_preserves_existing_history_rows(tmp_path: Path) -> None:
+    """The rebuild copies data; it does not start the table over.
+
+    Applies 001-002 alone, writes a history row, then applies 003 and confirms
+    the row survived the table swap.
+    """
+
+    partial_dir = tmp_path / "partial"
+    partial_dir.mkdir()
+    all_migrations = discover_migrations()
+    for migration in all_migrations[:2]:
+        (partial_dir / f"{migration.name}.sql").write_text(migration.sql, encoding="utf-8")
+
+    db_path = tmp_path / "corpus.db"
+    Database(db_path, migrations_dir=partial_dir).migrate()
+
+    ts = "2026-07-01T00:00:00.000000Z"
+    start = "2026-07-04T23:05:00.000000Z"
+    database = Database(db_path)
+    with database.connection() as conn:
+        conn.execute(
+            "INSERT INTO leagues (league_id, code, name, sport, created_at, updated_at) "
+            "VALUES ('lg_mlb', 'MLB', 'Major League Baseball', 'baseball', ?, ?)", (ts, ts)
+        )
+        conn.execute(
+            "INSERT INTO seasons (season_id, league_id, year, label, phase, start_date, "
+            "created_at, updated_at) VALUES "
+            "('sn_mlb_2026_regular', 'lg_mlb', 2026, '2026', 'regular', '2026-03-26', ?, ?)",
+            (ts, ts),
+        )
+        for team, name, city, nick in [("tm_mlb_nyy", "New York Yankees", "New York", "Yankees"),
+                                       ("tm_mlb_bos", "Boston Red Sox", "Boston", "Red Sox")]:
+            conn.execute(
+                "INSERT INTO teams (team_id, league_id, canonical_name, city, nickname, "
+                "abbreviation, created_at, updated_at) VALUES (?, 'lg_mlb', ?, ?, ?, ?, ?, ?)",
+                (team, name, city, nick, team[-3:].upper(), ts, ts),
+            )
+        conn.execute(
+            "INSERT INTO games (game_id, league_id, season_id, home_team_id, away_team_id, "
+            "scheduled_start, original_start, game_date_local, game_number, is_neutral_site, "
+            "status, created_at, updated_at) VALUES "
+            "('gm_survivor', 'lg_mlb', 'sn_mlb_2026_regular', 'tm_mlb_nyy', 'tm_mlb_bos', "
+            "?, ?, '2026-07-04', 1, 0, 'scheduled', ?, ?)", (start, start, ts, ts),
+        )
+        conn.execute(
+            "INSERT INTO game_status_history (status_id, game_id, status, scheduled_start, "
+            "provider, observed_at, ingested_at, content_hash, created_at) VALUES "
+            "('gst_survivor', 'gm_survivor', 'scheduled', ?, 'mlb', ?, ?, 'hash-abc', ?)",
+            (start, ts, ts, ts),
+        )
+
+    # Now apply 003, which rebuilds game_status_history.
+    result = database.migrate()
+    assert [m.version for m in result.applied] == [3]
+
+    with database.connection() as conn:
+        rows = conn.execute(
+            "SELECT status_id, game_id, status, content_hash FROM game_status_history"
+        ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["status_id"] == "gst_survivor"
+    assert rows[0]["content_hash"] == "hash-abc"
 
 
 def test_append_only_trigger_blocks_update_and_delete(conn: sqlite3.Connection) -> None:

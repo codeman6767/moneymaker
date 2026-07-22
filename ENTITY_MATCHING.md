@@ -155,12 +155,39 @@ themselves "LA", so with canonical cities alone `"Los Angeles"` would have
 resolved cleanly — and wrongly — to the Lakers. Recording "Los Angeles" as an
 additional Clippers city makes the genuine ambiguity visible to the derivation.
 
-**Historical names are season-scoped.** `valid_from_season` / `valid_to_season`
-bound each alias, and `teams` carries `(first_season, last_season)`. Resolving
-"Washington Bullets" in a 1996 context yields the franchise correctly;
-resolving it in a 2026 context yields `UNMATCHED`, not a silent redirect to the
-Wizards. Provider aliases are additionally scoped by `provider`, so one
+**Historical names are season-scopable — and the scoping is not yet curated.**
+`valid_from_season` / `valid_to_season` bound each alias, and `teams` carries
+`(first_season, last_season)`. `TeamAliasRepository.resolve()` accepts a
+`season_year` argument and, when given one, excludes aliases whose window does
+not contain it. Provider aliases are additionally scoped by `provider`, so one
 provider's idiosyncratic spelling cannot pollute another's namespace.
+
+> ⚠️ **The seeded aliases carry no real validity years.** Every seeded alias —
+> including historical names such as "Cleveland Indians", "Washington Bullets"
+> and "Oakland Athletics" — is stored with the unbounded sentinels
+> `valid_from_season = 0`, `valid_to_season = 9999`, because verified validity
+> dates are not present in repository-controlled data and **inventing them
+> would be worse than leaving them open**. A wrong date silently excludes
+> correct matches, and nothing surfaces the error.
+>
+> So resolving "Washington Bullets" with `season_year=2026` currently
+> **matches** rather than returning `UNMATCHED`. The filtering mechanism works
+> and is enforced for any alias that does carry a curated window; populating
+> real windows for the seeded historical names is **Phase D curation work**.
+
+Because "matched under a season filter" and "verified as valid that season" are
+different claims, `AliasResolution` reports which one applies:
+
+| Field | Meaning |
+| --- | --- |
+| `season_year` | The season the caller asked about, or `None` |
+| `season_scoped` | Whether candidates were filtered by validity window at all |
+| `season_validity_verified` | Whether **every** surviving candidate carries a curated (non-sentinel) window |
+
+`season_validity_verified=False` means the match does not prove the alias was in
+use that season. A caller that needs a real historical guarantee must check it
+rather than assume the filter did the work — the API is built so that
+assumption cannot be made silently.
 
 ### 3.3 Alias resolution order
 
@@ -172,6 +199,11 @@ Strictly ordered; the first tier that yields exactly one candidate wins.
 | 2 | `exact_alias` | 0.99 | Raw string matches an alias verbatim, provider- and season-scoped. |
 | 3 | `normalized_alias` | 0.95 | Normalized forms match, provider- and season-scoped. |
 | 4 | `normalized_alias_unscoped` | 0.90 | Normalized match ignoring provider scope. |
+
+Season scoping is applied as a *filter* before these tiers run, not as a tier of
+its own: an alias outside its validity window is not a weaker candidate, it is
+not a candidate. Implemented in Phase A; see the caveat in §3.2 about seeded
+aliases still being unbounded.
 | 5 | `structured_key` | 0.85 | Games only — schedule-key match (§4). |
 
 If a tier yields **two or more** candidates: stop, emit `AMBIGUOUS`, record
@@ -410,6 +442,8 @@ sign of a position. A corpus containing either is not fit for research, and the
 | **Determinism** | Normalization is stable across repeated calls; resolution is order-independent under reversed candidate lists. | ✅ Phase A; extended to 100× shuffles in Phase D |
 | **Ambiguity refusal** | Two Jalen Williamses, shared cities, generational collisions — each asserts `AMBIGUOUS`, never a match. | ✅ Phase A (unit and through the database) |
 | **Suffix binding** | A present suffix is binding (`Guerrero Jr.` never resolves to the father); an absent one is permissive unless both generations exist. | ✅ Phase A |
+| **Season scoping** | A curated alias resolves inside its window and is excluded outside it (boundaries inclusive); an unbounded alias reports `season_validity_verified=False`. | ✅ Phase A (`test_season_scoped_aliases.py`) |
+| **League consistency** | An alias whose `league_id` disagrees with its team/player is rejected by the database on INSERT and UPDATE. | ✅ `a003` (`test_integrity_guards.py`) |
 | **Hard cases** | One fixture per §4.3 case: neutral site, postponement, reschedule, both doubleheader types, suspension. | Postponement/reschedule/doubleheader ✅ Phase A; the rest ◻ Phase D |
 | **Rules disagreement** | Kalshi market whose title and rules name different games ⇒ rejected. | ◻ Phase D |
 | **Decision completeness** | Property test: every matcher invocation writes exactly one decision row, and accepted rows always name an entity. | ◻ Phase D (`entity_match_decisions` is a Phase D table) |

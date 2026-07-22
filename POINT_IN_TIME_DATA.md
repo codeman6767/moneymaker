@@ -175,13 +175,41 @@ Phase A landed the temporal foundations these rules rest on. What exists today:
 | Append-only triggers (DQ-PIT-008) | ✅ on `game_status_history` |
 | As-of accessor filtering on `observed_at` | ✅ `GameRepository.status_as_of()` |
 | Deterministic tie-break by ULID | ✅ monotonic ULIDs, `ORDER BY observed_at DESC, status_id DESC` |
-| `games.original_start` never updated | ✅ written once at creation |
+| `games.original_start` never updated | ✅ enforced by trigger (`a003`), not convention |
+| Stale backfill cannot regress current state | ✅ `a003` patch — see below |
+| Transition-aware status deduplication | ✅ `a003` — a repeated state is a real transition, not a duplicate |
 | Full `pit/asof.py`, `pit/dataset.py`, adversarial leak fixtures | ◻ Phase E |
 
 `GameRepository.status_as_of()` is the first working instance of the §3
 pattern, and its tests already cover the DQ-PIT-004 shape: a status observed at
 T2 but back-dated by the provider to T0 is **not** returned by a query as of
 T1.
+
+#### The stale-backfill rule (`a003`)
+
+Backfill is where bitemporality earns its keep, and where it is easiest to get
+wrong. Before the a003 patch, `record_status()` copied the row it had just
+written into `games.status` — so a late-arriving observation describing an
+*earlier* moment overwrote a newer state. Replaying yesterday's feed would have
+rewound the corpus's idea of the present.
+
+The rule now:
+
+> **History is ordered by `observed_at`; current state is the newest
+> observation, not the most recently written one.**
+
+After every insert, `games.status` and `games.scheduled_start` are recomputed
+from `ORDER BY observed_at DESC, status_id DESC LIMIT 1`. An older observation
+is preserved in history — it is a genuine point-in-time fact — but it does not
+touch the present. Both halves happen in one transaction, so the history row
+and the current-state row can never disagree.
+
+This is the same ordering `status_as_of()` uses, which is deliberate: a query
+`as_of` "now" and a read of `games.status` must agree, and they only do if both
+sort the same way. `status_id` is a monotonic ULID, so observations sharing an
+`observed_at` resolve identically on every rebuild — without that second key,
+two rows with the same timestamp would order arbitrarily and a rebuilt corpus
+could disagree with the original.
 
 ### DQ-PIT-001 — Final scores in pregame features
 
