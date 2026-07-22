@@ -1,0 +1,19 @@
+{
+  "subject": "sports.nba.events",
+  "provider": "nbaprovider",
+  "game_id": "nba-9",
+  "events": [
+    {"event_type": "status", "sequence": 1, "event_time": "2026-07-01T23:00:00+00:00", "payload": {"game_id": "nba-9", "status": "live"}},
+    {"event_type": "period", "sequence": 2, "event_time": "2026-07-01T23:00:01+00:00", "payload": {"game_id": "nba-9", "period": 1, "clock_seconds": 720.0}},
+    {"event_type": "substitution", "sequence": 3, "event_time": "2026-07-01T23:00:02+00:00", "payload": {"game_id": "nba-9", "team": "home", "in": ["h1", "h2", "h3", "h4", "h5"]}},
+    {"event_type": "substitution", "sequence": 4, "event_time": "2026-07-01T23:00:03+00:00", "payload": {"game_id": "nba-9", "team": "away", "in": ["a1", "a2", "a3", "a4", "a5"]}},
+    {"event_type": "clock", "sequence": 5, "event_time": "2026-07-01T23:00:20+00:00", "payload": {"game_id": "nba-9", "clock_seconds": 700.0}},
+    {"event_type": "score", "sequence": 6, "event_time": "2026-07-01T23:00:21+00:00", "payload": {"game_id": "nba-9", "team": "home", "points": 2}},
+    {"event_type": "possession", "sequence": 7, "event_time": "2026-07-01T23:00:22+00:00", "payload": {"game_id": "nba-9", "team": "away"}},
+    {"event_type": "team_foul", "sequence": 8, "event_time": "2026-07-01T23:00:40+00:00", "payload": {"game_id": "nba-9", "team": "home"}},
+    {"event_type": "player_foul", "sequence": 9, "event_time": "2026-07-01T23:00:41+00:00", "payload": {"game_id": "nba-9", "player": "h1", "team": "home"}},
+    {"event_type": "timeout", "sequence": 10, "event_time": "2026-07-01T23:00:50+00:00", "payload": {"game_id": "nba-9", "team": "away"}},
+    {"event_type": "player_minutes", "sequence": 11, "event_time": "2026-07-01T23:01:00+00:00", "payload": {"game_id": "nba-9", "player": "h1", "minutes": 5.5}},
+    {"event_type": "clock", "sequence": 12, "event_time": "2026-07-01T23:01:10+00:00", "payload": {"game_id": "nba-9", "clock_seconds": 650.0}}
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "subject": "kalshi.orderbook",
+  "provider": "kalshi",
+  "market": "KXMLB",
+  "events": [
+    {"event_type": "snapshot", "sequence": 1, "event_time": "2026-07-01T19:00:00+00:00", "payload": {"market": "KXMLB", "yes": [[40, 100], [41, 50]], "no": [[55, 80], [54, 120]]}},
+    {"event_type": "delta", "sequence": 2, "event_time": "2026-07-01T19:00:01+00:00", "payload": {"market": "KXMLB", "side": "yes", "price": 42, "quantity": 70}},
+    {"event_type": "delta", "sequence": 3, "event_time": "2026-07-01T19:00:02+00:00", "payload": {"market": "KXMLB", "side": "no", "price": 56, "quantity": 30}},
+    {"event_type": "delta", "sequence": 4, "event_time": "2026-07-01T19:00:03+00:00", "payload": {"market": "KXMLB", "side": "yes", "price": 40, "quantity": 0}},
+    {"event_type": "delta", "sequence": 5, "event_time": "2026-07-01T19:00:04+00:00", "payload": {"market": "KXMLB", "side": "no", "price": 56, "quantity": 0}}
+  ]
+}

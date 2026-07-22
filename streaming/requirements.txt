@@ -1,0 +1,17 @@
+# Low-latency streaming backbone (Module 1) dependencies.
+#
+# Kept intentionally small. The core (envelope, trackers, dedup, latency,
+# replay, in-memory bus) needs only pydantic + the standard library; nats-py is
+# required only when using the NATS JetStream transport.
+#
+# No Kafka client and no Redis client here -- see rule 13 in CLAUDE.md.
+
+pydantic>=2.0,<3.0
+
+# NATS JetStream transport (streaming/nats_bus.py). Optional for unit tests,
+# which run against the in-memory bus.
+nats-py>=2.6.0
+
+# Test-only:
+pytest>=8.0
+pytest-asyncio>=0.23

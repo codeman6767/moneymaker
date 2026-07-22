@@ -1,0 +1,33 @@
+# NATS JetStream for the low-latency streaming backbone (Module 1).
+#
+# JetStream is the chosen transport for the first implementation. This brings up
+# a single-node NATS server with JetStream (file storage) enabled. No Kafka and
+# no Redis -- per rule 13 in CLAUDE.md, neither is introduced without a
+# demonstrated need JetStream cannot meet.
+#
+#   docker compose -f docker-compose.streaming.yml up -d
+#
+services:
+  nats:
+    image: nats:2.10-alpine
+    container_name: moneymaker-nats
+    command:
+      - "--jetstream"
+      - "--store_dir=/data"
+      - "--http_port=8222"     # monitoring/health endpoint
+    ports:
+      - "4222:4222"            # client connections
+      - "8222:8222"            # HTTP monitoring (http://localhost:8222/healthz)
+    volumes:
+      - nats-data:/data
+    healthcheck:
+      # NATS ships without curl/wget in the alpine image; use the built-in
+      # server check via the monitoring port instead.
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  nats-data:

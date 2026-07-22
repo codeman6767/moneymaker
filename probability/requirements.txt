@@ -1,0 +1,14 @@
+# Live probability updates (Module 5) dependencies.
+#
+# Core training + in-memory inference need only numpy + scikit-learn. The
+# default inference backend is numpy (a benchmarked, low-overhead runtime); no
+# pandas is used on the inference path, and no database is touched during
+# inference.
+
+numpy>=1.26
+scikit-learn>=1.3
+
+# Optional: ONNX export + ONNX Runtime backend. Not required for training,
+# numpy inference, or the unit tests (which skip the ONNX path when absent).
+# onnx>=1.15
+# onnxruntime>=1.17
