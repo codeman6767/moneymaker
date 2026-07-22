@@ -50,7 +50,9 @@ def make_directory() -> PlayerDirectory:
 
 
 def luka_key(d: PlayerDirectory) -> str:
-    return d.match("Luka Doncic", "DAL").player.key()
+    player = d.match("Luka Doncic", "DAL").matched_player()
+    assert player is not None, "Luka Doncic must resolve unambiguously in the test directory"
+    return player.key()
 
 
 def injury_report(published_at, players):

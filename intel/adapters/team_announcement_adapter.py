@@ -13,7 +13,6 @@ from datetime import datetime
 from typing import Optional
 
 from ..base import PlayerStatus, SourceType, make_snapshot
-from ..player_matching import MatchStatus
 from .base_adapter import ParseResult, SourceAdapter, UnresolvedEntry
 
 _STATUS_MAP = {
@@ -44,7 +43,8 @@ class TeamAnnouncementAdapter(SourceAdapter):
         status = _STATUS_MAP.get(str(raw.get("status", "")).strip().lower(), PlayerStatus.UNKNOWN)
 
         match = self._resolve(name, team, player_id=raw.get("player_id"))
-        if match.status is not MatchStatus.MATCHED:
+        player = match.matched_player()
+        if player is None:
             return ParseResult(
                 snapshots=[],
                 unresolved=[
@@ -55,7 +55,6 @@ class TeamAnnouncementAdapter(SourceAdapter):
                 ],
             )
 
-        player = match.player
         snap = make_snapshot(
             subject_key=player.key(),
             player=player,

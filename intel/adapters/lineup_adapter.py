@@ -13,7 +13,6 @@ from datetime import datetime
 from typing import List, Optional, Tuple
 
 from ..base import PlayerRef, PlayerStatus, SourceType, make_snapshot
-from ..player_matching import MatchStatus
 from .base_adapter import ParseResult, PollingReportAdapter, UnresolvedEntry
 
 
@@ -65,7 +64,8 @@ class LineupAdapter(PollingReportAdapter):
             name = row.get("name", "") if isinstance(row, dict) else str(row)
             player_id = row.get("player_id") if isinstance(row, dict) else None
             match = self._resolve(name, team, player_id=player_id)
-            if match.status is not MatchStatus.MATCHED:
+            player = match.matched_player()
+            if player is None:
                 unresolved.append(
                     UnresolvedEntry(
                         raw_name=name, team=team, match_status=match.status,
@@ -74,7 +74,6 @@ class LineupAdapter(PollingReportAdapter):
                     )
                 )
                 continue
-            player = match.player
             starters.append(player)
             snapshots.append(
                 make_snapshot(

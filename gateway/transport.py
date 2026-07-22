@@ -10,10 +10,15 @@ the demo environment. Live use additionally requires the arming controller.
 from __future__ import annotations
 
 import asyncio
-from typing import AsyncIterator, Dict, List, Optional, Protocol
+from typing import TYPE_CHECKING, AsyncIterator, Dict, List, Optional, Protocol
 
 from .orders import LimitOrderRequest, OrderAck, OrderStatusReport
 from .quarantine import ensure_execution_allowed
+
+if TYPE_CHECKING:
+    # Type-only: `websockets` is imported lazily inside `connect()` so the
+    # module stays importable without it.
+    from websockets.asyncio.client import ClientConnection
 
 
 class OrderTransport(Protocol):
@@ -156,7 +161,7 @@ class KalshiWsFeed:  # pragma: no cover - network path
 
     def __init__(self, ws_url: str) -> None:
         self._url = ws_url
-        self._ws = None
+        self._ws: Optional["ClientConnection"] = None
 
     async def connect(self) -> None:
         # Quarantined: the execution feed is part of the disabled execution lane.
@@ -168,8 +173,10 @@ class KalshiWsFeed:  # pragma: no cover - network path
     async def events(self) -> AsyncIterator[dict]:
         import json
 
-        assert self._ws is not None
-        async for raw in self._ws:
+        ws = self._ws
+        if ws is None:
+            raise RuntimeError("KalshiWsFeed.events() requires connect() first")
+        async for raw in ws:
             yield json.loads(raw)
 
     async def close(self) -> None:

@@ -61,21 +61,24 @@ def build_surface(
     for phase in range(1, n_phase + 1):
         X = np.empty((len(sds), buf.shape[0]), dtype=F32)
         for j, sd in enumerate(sds):
+            # MLB and NBA states are distinct types with distinct vector
+            # functions; keep them in separate variables so neither can be
+            # passed to the other sport's encoder.
             if sport == "mlb":
-                state = features.MLBLiveState(
+                mlb_state = features.MLBLiveState(
                     exp_runs_home=4.5, exp_runs_away=4.5, inning=phase, half="top",
                     outs=1, on_1b=False, on_2b=False, on_3b=False,
                     score_home=max(0, sd), score_away=max(0, -sd),
                 )
-                features.mlb_vector(state, out=buf)
+                features.mlb_vector(mlb_state, out=buf)
             else:
                 seconds_remaining = (4 - min(phase, 4)) * 12 * 60 + 6 * 60
-                state = features.NBALiveState(
+                nba_state = features.NBALiveState(
                     exp_margin=0.0, exp_total=220.0, period=min(phase, 4),
                     seconds_remaining=seconds_remaining,
                     score_home=max(0, sd), score_away=max(0, -sd),
                 )
-                features.nba_vector(state, out=buf)
+                features.nba_vector(nba_state, out=buf)
             X[j] = buf
         rows.append(proba_fn(X))
     grid = np.stack(rows, axis=0).astype(F32)

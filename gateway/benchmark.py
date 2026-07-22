@@ -14,9 +14,20 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, Optional, TypeAlias
 
-from streaming.latency import LatencyRegistry, monotonic_ns
+from streaming.latency import LatencyHistogram, LatencyRegistry, monotonic_ns
+
+#: One value in a per-stage statistics row.
+#:
+#: A narrowing of :data:`streaming.latency.SnapshotValue`: these rows carry only
+#: sample counts and nanosecond percentiles, never the snapshot's ``name``
+#: string, so the numeric comparisons in :meth:`GatewayReport.claims_sub_second`
+#: are well-typed without a cast.
+StatValue: TypeAlias = int | float | None
+
+#: One stage's statistics (``count`` / ``p50`` / ``p90`` / ``p95`` / ``p99`` / ``max``).
+StatsDict: TypeAlias = Dict[str, StatValue]
 
 
 class Stage(str, enum.Enum):
@@ -58,7 +69,7 @@ class StageTimer:
         return e2e
 
 
-def _stats(hist) -> Dict[str, Optional[float]]:
+def _stats(hist: LatencyHistogram) -> StatsDict:
     snap = hist.snapshot()
     return {
         "count": snap.count,
@@ -72,8 +83,8 @@ def _stats(hist) -> Dict[str, Optional[float]]:
 
 @dataclass
 class GatewayReport:
-    stages: Dict[str, Dict[str, Optional[float]]]
-    e2e: Dict[str, Optional[float]]
+    stages: Dict[str, StatsDict]
+    e2e: StatsDict
     failures: int
     reconnects: int
     rate_limit_events: int
@@ -128,7 +139,9 @@ class LatencyBenchmark:
 
     def report(self) -> GatewayReport:
         snap = self.registry.snapshot()
-        stages = {
+        # Annotated explicitly: ``Stage`` is a str-enum, so ``s.value`` would
+        # otherwise be inferred as a union of string literals rather than ``str``.
+        stages: Dict[str, StatsDict] = {
             s.value: _stats(self.registry.histogram(s.value))
             for s in Stage
             if s.value in snap

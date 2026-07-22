@@ -31,6 +31,7 @@ from .decision import (
     MarketSnapshot,
     SubmissionResult,
     SubmitStatus,
+    validate_trade,
 )
 from .latency_trace import LatencyTrace
 from .portfolio import Portfolio
@@ -204,6 +205,14 @@ class MarketEvaluator:
         if decision.action is not Action.BET:
             return SubmissionResult(SubmitStatus.NO_OP, cancels_executed=executed, reason="no order")
 
+        # A BET must carry complete, in-range trade parameters before anything
+        # downstream touches a price, a ladder or an order. An incomplete
+        # decision is rejected safely rather than coerced into a trade.
+        trade, invalid_reason = validate_trade(decision)
+        if trade is None:
+            return SubmissionResult(SubmitStatus.REJECTED_INCOMPLETE, cancels_executed=executed,
+                                    reason=invalid_reason)
+
         # Never act on an outdated state version.
         if decision.state_token != self._token.get(decision.market):
             return SubmissionResult(SubmitStatus.REJECTED_SUPERSEDED, cancels_executed=executed,
@@ -219,17 +228,17 @@ class MarketEvaluator:
 
         # Revalidate price immediately before submission; never sweep beyond the
         # approved limit.
-        best_now = current.book.best_ask(decision.side)
-        if best_now is None or best_now > decision.limit_price:
+        best_now = current.book.best_ask(trade.side)
+        if best_now is None or best_now > trade.limit_price:
             return SubmissionResult(SubmitStatus.REJECTED_PRICE, cancels_executed=executed,
                                     reason="price moved beyond approved limit")
-        filled, _avg = walk_ladder(current.book.ladder(decision.side), decision.size, decision.limit_price)
+        filled, _avg = walk_ladder(current.book.ladder(trade.side), trade.size, trade.limit_price)
         if filled == 0:
             return SubmissionResult(SubmitStatus.REJECTED_PRICE, cancels_executed=executed,
                                     reason="no fill available within limit")
 
-        order = LimitOrder(market=decision.market, side=decision.side,
-                           limit_price=decision.limit_price, size=filled)
+        order = LimitOrder(market=decision.market, side=trade.side,
+                           limit_price=trade.limit_price, size=filled)
         self.portfolio.apply_fill(order)
         return SubmissionResult(SubmitStatus.SUBMITTED, order=order, cancels_executed=executed)
 

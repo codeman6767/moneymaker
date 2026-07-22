@@ -15,11 +15,16 @@ budget (an acceptance criterion).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import numpy as np
 
 from streaming.latency import LatencyRegistry, monotonic_ns
+
+if TYPE_CHECKING:
+    # Type-only: ONNX Runtime stays an optional dependency, imported lazily in
+    # `_init_onnx` and never required for the default numpy backend.
+    from onnxruntime import InferenceSession
 
 from .features import FeatureSpec
 from .residual_model import ResidualWinProbModel
@@ -61,8 +66,8 @@ class InferenceEngine:
         self.latency = latency or LatencyRegistry()
         # Preallocated single-row buffer; reused every call (no per-event alloc).
         self._buf = np.empty((1, spec.size), dtype=F32)
-        self._session = None
-        self._input_name = None
+        self._session: Optional["InferenceSession"] = None
+        self._input_name: Optional[str] = None
         if backend == "onnx":
             self._init_onnx(onnx_path)
 
@@ -72,12 +77,31 @@ class InferenceEngine:
         if onnx_path is None:
             raise ValueError("backend='onnx' requires onnx_path")
         # Load the model exactly once, here at startup.
-        self._session = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
-        self._input_name = self._session.get_inputs()[0].name
+        session = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
+        inputs = session.get_inputs()
+        if not inputs:
+            raise ValueError(f"ONNX model at {onnx_path!r} declares no inputs")
+        self._session = session
+        self._input_name = inputs[0].name
+
+    def _require_onnx(self) -> Tuple["InferenceSession", str]:
+        """Return the loaded ONNX session and input name, or fail clearly.
+
+        The session is loaded once in ``_init_onnx``; this proves it is present
+        rather than letting a misconfigured engine fail on ``None``.
+        """
+
+        if self._session is None or self._input_name is None:
+            raise RuntimeError(
+                "ONNX backend selected but no session is loaded; "
+                "construct the engine with backend='onnx' and a valid onnx_path"
+            )
+        return self._session, self._input_name
 
     def _champion_proba(self, X: np.ndarray) -> np.ndarray:
         if self.backend == "onnx":
-            out = self._session.run(None, {self._input_name: X.astype(F32)})[0]
+            session, input_name = self._require_onnx()
+            out = session.run(None, {input_name: X.astype(F32)})[0]
             return out.reshape(-1)
         return self.model.champion.proba(X)
 

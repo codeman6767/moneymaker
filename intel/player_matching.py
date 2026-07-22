@@ -55,6 +55,20 @@ class MatchResult:
     def is_confident(self) -> bool:
         return self.status is MatchStatus.MATCHED
 
+    def matched_player(self) -> Optional[PlayerRef]:
+        """The resolved player, or ``None`` if this match is not usable.
+
+        ``status`` and ``player`` are separate fields, so checking the status
+        alone never proves the payload is present. This pairs them in a single
+        check: callers narrow to a real :class:`PlayerRef` or take the
+        unresolved path, and a MATCHED result that somehow carries no player is
+        treated as unresolved rather than crashing downstream.
+        """
+
+        if self.status is not MatchStatus.MATCHED:
+            return None
+        return self.player
+
 
 @dataclass
 class PlayerDirectory:

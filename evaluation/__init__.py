@@ -9,6 +9,9 @@ gates.
 """
 
 from .decision import (
+    MAX_PRICE_CENTS,
+    MIN_PRICE_CENTS,
+    VALID_SIDES,
     Action,
     Decision,
     LimitOrder,
@@ -17,6 +20,8 @@ from .decision import (
     OrderBookView,
     SubmissionResult,
     SubmitStatus,
+    ValidatedTrade,
+    validate_trade,
 )
 from .evaluator import EvaluationConfig, MarketEvaluator
 from .latency_trace import LatencyTrace
@@ -39,6 +44,11 @@ __all__ = [
     "LimitOrder",
     "SubmissionResult",
     "SubmitStatus",
+    "ValidatedTrade",
+    "validate_trade",
+    "VALID_SIDES",
+    "MIN_PRICE_CENTS",
+    "MAX_PRICE_CENTS",
     "MarketEvaluator",
     "EvaluationConfig",
     "LatencyTrace",

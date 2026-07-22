@@ -17,10 +17,18 @@ installed (e.g. unit tests that use the in-memory bus).
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from .event_bus import EventBus, EventProcessor, MessageContext, ProcessAction
 from .event_envelope import EventEnvelope
+
+if TYPE_CHECKING:
+    # Type-only imports: `nats-py` stays an optional runtime dependency, so
+    # these names must never be imported at run time. They give the client and
+    # JetStream attributes real declared types instead of a bare `None`.
+    from nats.aio.client import Client as NatsClient
+    from nats.aio.msg import Msg
+    from nats.js import JetStreamContext
 
 DEFAULT_STREAM_NAME = "MONEYMAKER"
 
@@ -49,21 +57,43 @@ class NatsEventBus(EventBus):
         self._subjects = list(subjects or SUBJECTS) + [DEAD_LETTER_SUBJECT]
         self._max_deliveries = max_deliveries
         self._ack_wait_seconds = ack_wait_seconds
-        self._nc = None  # nats.aio.client.Client
-        self._js = None  # JetStreamContext
+        self._nc: Optional["NatsClient"] = None
+        self._js: Optional["JetStreamContext"] = None
+
+    # -- Connection state -----------------------------------------------------
+    def _require_js(self, operation: str) -> "JetStreamContext":
+        """Return the JetStream context, or explain that connect() is required.
+
+        Every JetStream call goes through here so an un-connected bus fails with
+        a clear error instead of an ``AttributeError`` on ``None``.
+        """
+
+        if self._js is None:
+            raise RuntimeError(
+                f"NatsEventBus.{operation} requires an active connection; "
+                "call connect() first"
+            )
+        return self._js
 
     async def connect(self) -> None:
         # Lazy import: only require nats-py when actually connecting.
-        import nats  # type: ignore
+        import nats
 
-        self._nc = await nats.connect(self._servers)
-        self._js = self._nc.jetstream()
+        nc = await nats.connect(self._servers)
+        if nc is None:
+            raise RuntimeError(f"NATS connection to {self._servers!r} returned no client")
+        js = nc.jetstream()
+        if js is None:
+            raise RuntimeError("NATS client returned no JetStream context")
+        self._nc = nc
+        self._js = js
         await self._ensure_stream()
 
     async def _ensure_stream(self) -> None:
-        from nats.js.api import RetentionPolicy, StorageType, StreamConfig  # type: ignore
-        from nats.js.errors import NotFoundError  # type: ignore
+        from nats.js.api import RetentionPolicy, StorageType, StreamConfig
+        from nats.js.errors import NotFoundError
 
+        js = self._require_js("_ensure_stream")
         config = StreamConfig(
             name=self._stream_name,
             subjects=self._subjects,
@@ -72,9 +102,9 @@ class NatsEventBus(EventBus):
             retention=RetentionPolicy.LIMITS,
         )
         try:
-            await self._js.update_stream(config=config)
+            await js.update_stream(config=config)
         except NotFoundError:
-            await self._js.add_stream(config=config)
+            await js.add_stream(config=config)
 
     async def close(self) -> None:
         if self._nc is not None:
@@ -83,29 +113,27 @@ class NatsEventBus(EventBus):
             self._js = None
 
     async def publish(self, envelope: EventEnvelope) -> None:
-        if self._js is None:
-            raise RuntimeError("NatsEventBus.publish called before connect()")
+        js = self._require_js("publish")
         # Msg-Id enables JetStream's own publish-side dedup window as a second
         # line of defence; content_hash is stable across identical content.
         headers = {"Nats-Msg-Id": envelope.content_hash or envelope.envelope_id}
-        await self._js.publish(
+        await js.publish(
             envelope.subject,
             envelope.to_json().encode("utf-8"),
             headers=headers,
         )
 
     async def subscribe(self, subject: str, processor: EventProcessor) -> None:
-        if self._js is None:
-            raise RuntimeError("NatsEventBus.subscribe called before connect()")
+        js = self._require_js("subscribe")
 
-        from nats.js.api import ConsumerConfig, DeliverPolicy  # type: ignore
+        from nats.js.api import ConsumerConfig, DeliverPolicy
 
         durable = "c_" + subject.replace(".", "_")
 
-        async def _on_message(msg) -> None:
+        async def _on_message(msg: "Msg") -> None:
             await self._handle(msg, processor)
 
-        await self._js.subscribe(
+        await js.subscribe(
             subject,
             durable=durable,
             cb=_on_message,
@@ -118,7 +146,7 @@ class NatsEventBus(EventBus):
             ),
         )
 
-    async def _handle(self, msg, processor: EventProcessor) -> None:
+    async def _handle(self, msg: "Msg", processor: EventProcessor) -> None:
         meta = msg.metadata
         delivery_count = int(getattr(meta, "num_delivered", 1) or 1)
         ctx = MessageContext(
@@ -148,6 +176,8 @@ class NatsEventBus(EventBus):
             await msg.term()
 
     async def _publish_dead_letter(self, data: bytes) -> None:
+        # Best-effort: a dead letter must never mask the original failure, so a
+        # disconnected bus is skipped rather than raising here.
         if self._js is not None:
             await self._js.publish(DEAD_LETTER_SUBJECT, data)
 

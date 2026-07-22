@@ -74,6 +74,18 @@ class SideQuote:
     def tradeable(self) -> bool:
         return self.filled > 0 and self.avg_fill_cents is not None
 
+    def tradeable_limit_price(self) -> Optional[int]:
+        """The approved limit price, or ``None`` if this quote is not tradeable.
+
+        ``tradeable`` and ``limit_price`` are separate fields, so checking the
+        flag alone never proves a price is present. This pairs them, letting
+        callers narrow to a real ``int`` or take the no-trade path.
+        """
+
+        if not self.tradeable:
+            return None
+        return self.limit_price
+
 
 def quote_side(
     *,

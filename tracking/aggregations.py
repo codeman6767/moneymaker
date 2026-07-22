@@ -191,8 +191,9 @@ def lineup_spacing(frame: TrackingFrame, team: str) -> Optional[float]:
     ]
     if len(points) < 2:
         return None
-    dists = [_distance_2d(a[0], a[1], b[0], b[1]) for a, b in combinations(points, 2)]
-    dists = [d for d in dists if d is not None]
+    # Separate names: the raw list may contain None, the filtered one may not.
+    raw_dists = [_distance_2d(a[0], a[1], b[0], b[1]) for a, b in combinations(points, 2)]
+    dists = [d for d in raw_dists if d is not None]
     return sum(dists) / len(dists) if dists else None
 
 

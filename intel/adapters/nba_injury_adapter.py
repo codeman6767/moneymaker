@@ -13,7 +13,6 @@ from datetime import datetime
 from typing import Optional
 
 from ..base import PlayerStatus, SourceType, make_snapshot
-from ..player_matching import MatchStatus
 from .base_adapter import (
     ParseResult,
     PollingReportAdapter,
@@ -65,7 +64,8 @@ class NBAInjuryReportAdapter(PollingReportAdapter):
             reason = row.get("reason")
 
             match = self._resolve(name, team, player_id=row.get("player_id"))
-            if match.status is not MatchStatus.MATCHED:
+            player = match.matched_player()
+            if player is None:
                 # Do not guess: surface ambiguous/unmatched rows for review.
                 unresolved.append(
                     UnresolvedEntry(
@@ -75,7 +75,6 @@ class NBAInjuryReportAdapter(PollingReportAdapter):
                 )
                 continue
 
-            player = match.player
             snapshots.append(
                 make_snapshot(
                     subject_key=player.key(),

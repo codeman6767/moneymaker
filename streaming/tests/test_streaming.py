@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import random
 from datetime import datetime, timedelta, timezone
-from typing import List
+from pathlib import Path
+from typing import Awaitable, Callable, List
 
 from streaming import (
     CorrectionHandler,
@@ -197,7 +198,7 @@ async def test_consumer_restart_no_duplicate_after_redelivery(tmp_path):
 # --------------------------------------------------------------------------- #
 # 6. Replay is deterministic
 # --------------------------------------------------------------------------- #
-async def test_replay_is_deterministic(tmp_path):
+async def test_replay_is_deterministic(tmp_path: Path) -> None:
     store = JsonlRawEventStore(str(tmp_path / "raw.jsonl"))
     # Write events out of order; replay must impose a stable order regardless.
     events = [
@@ -213,7 +214,12 @@ async def test_replay_is_deterministic(tmp_path):
     def run_order() -> List[int]:
         s = JsonlRawEventStore(str(tmp_path / "raw.jsonl"))
         replayer = Replayer(s)
-        order = [e.sequence for e in replayer.ordered_events()]
+        order: List[int] = []
+        for e in replayer.ordered_events():
+            # Every replayed event in this fixture is sequenced; assert it
+            # rather than silently dropping a gap.
+            assert e.sequence is not None, "replayed event lost its sequence"
+            order.append(e.sequence)
         s.close()
         return order
 
@@ -222,8 +228,9 @@ async def test_replay_is_deterministic(tmp_path):
     assert order_a == order_b == list(range(10))
 
     # And the pipeline produces the same delivered order twice.
-    async def collect(target: List[int]):
+    async def collect(target: List[int]) -> Callable[[EventEnvelope], Awaitable[None]]:
         async def pipeline(env: EventEnvelope) -> None:
+            assert env.sequence is not None, "replayed event lost its sequence"
             target.append(env.sequence)
         return pipeline
 

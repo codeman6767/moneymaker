@@ -16,9 +16,23 @@ from __future__ import annotations
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Dict, Iterator, List, Optional
+from typing import Dict, Iterator, List, Optional, TypeAlias
 
 NS_PER_MS = 1_000_000
+
+#: One value in a flattened latency snapshot mapping.
+#:
+#: A snapshot row mixes three genuinely different value kinds, and the type has
+#: to say so rather than pretend they are all floats:
+#:
+#: * ``name`` is a ``str``;
+#: * ``count`` and the ``*_ns`` fields are integer nanosecond counts;
+#: * ``mean_ns`` is a ``float``, and every statistic is ``None`` until at least
+#:   one sample has been recorded.
+SnapshotValue: TypeAlias = str | int | float | None
+
+#: A single snapshot flattened to a mapping (see :meth:`LatencySnapshot.as_dict`).
+SnapshotDict: TypeAlias = Dict[str, SnapshotValue]
 
 
 def monotonic_ns() -> int:
@@ -54,7 +68,7 @@ class LatencySnapshot:
     def mean_ns(self) -> Optional[float]:
         return self.sum_ns / self.count if self.count else None
 
-    def as_dict(self) -> Dict[str, Optional[float]]:
+    def as_dict(self) -> SnapshotDict:
         return {
             "name": self.name,
             "count": self.count,
@@ -173,7 +187,7 @@ class LatencyRegistry:
     def snapshot(self) -> Dict[str, LatencySnapshot]:
         return {name: h.snapshot() for name, h in self._histograms.items()}
 
-    def snapshot_dict(self) -> Dict[str, Dict[str, Optional[float]]]:
+    def snapshot_dict(self) -> Dict[str, SnapshotDict]:
         return {name: snap.as_dict() for name, snap in self.snapshot().items()}
 
 

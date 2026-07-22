@@ -14,7 +14,7 @@ from typing import Dict, List, Optional, Tuple
 
 from evaluation.decision import OrderBookView
 
-from .events import EventType, ReplayEvent
+from .events import EventType, ReplayEvent, TimedMarketEvent, as_timed_market_event
 
 Ladder = Tuple[Tuple[int, int], ...]
 
@@ -53,21 +53,23 @@ def build_timelines(events: List[ReplayEvent]) -> Dict[str, MarketTimeline]:
     """Construct per-market timelines from market-data events."""
 
     # Group market-data events by market, ordered by event time (skip untimed).
-    by_market: Dict[str, List[ReplayEvent]] = {}
-    for e in events:
-        if e.market is None or e.event_time_ns is None:
+    by_market: Dict[str, List[TimedMarketEvent]] = {}
+    for event in events:
+        timed = as_timed_market_event(event)
+        if timed is None:
             continue
-        if e.event_type in (EventType.OB_SNAPSHOT, EventType.OB_DELTA, EventType.TRADE, EventType.MARKET_STATUS):
-            by_market.setdefault(e.market, []).append(e)
+        if event.event_type in (EventType.OB_SNAPSHOT, EventType.OB_DELTA, EventType.TRADE, EventType.MARKET_STATUS):
+            by_market.setdefault(timed.market, []).append(timed)
 
     timelines: Dict[str, MarketTimeline] = {}
     for market, evs in by_market.items():
-        evs.sort(key=lambda e: e.event_time_ns)
+        evs.sort(key=lambda t: t.event_time_ns)
         tl = MarketTimeline()
         cur_yes: Ladder = ()
         cur_no: Ladder = ()
         cur_status = "open"
-        for e in evs:
+        for timed in evs:
+            e = timed.event
             if e.event_type == EventType.OB_SNAPSHOT:
                 cur_yes = e.yes_ask_ladder or ()
                 cur_no = e.no_ask_ladder or ()
@@ -81,9 +83,9 @@ def build_timelines(events: List[ReplayEvent]) -> Dict[str, MarketTimeline]:
                 cur_status = e.market_status or cur_status
             elif e.event_type == EventType.TRADE:
                 if e.trade_side is not None and e.trade_price is not None:
-                    tl.trades.append((e.event_time_ns, e.trade_side, e.trade_price))
+                    tl.trades.append((timed.event_time_ns, e.trade_side, e.trade_price))
             view = OrderBookView.make(yes_ask_ladder=cur_yes, no_ask_ladder=cur_no)
-            tl.times.append(e.event_time_ns)
+            tl.times.append(timed.event_time_ns)
             tl.views.append(view)
             tl.statuses.append(cur_status)
         tl.final_view = OrderBookView.make(yes_ask_ladder=cur_yes, no_ask_ladder=cur_no)

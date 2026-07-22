@@ -68,3 +68,33 @@ class ReplayEvent:
     # Market-status payload: "open" | "paused" | "closed" | "suspended".
     market_status: Optional[str] = None
     payload: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class TimedMarketEvent:
+    """A :class:`ReplayEvent` proven to carry both a market id and an event time.
+
+    Historical rows legitimately arrive without a market or without a provider
+    timestamp -- that is a data-quality fact, not a crash. Rather than checking
+    for ``None`` at every use site (and losing the narrowing as soon as the
+    events are collected into a list), the check happens once in
+    :func:`as_timed_market_event` and the proven values are carried here.
+    """
+
+    event: ReplayEvent
+    market: str
+    event_time_ns: int
+
+
+def as_timed_market_event(event: ReplayEvent) -> Optional[TimedMarketEvent]:
+    """Return a :class:`TimedMarketEvent`, or ``None`` if the event is untimed.
+
+    An event missing either its market id or its provider event time cannot be
+    placed on a timeline, so it is skipped rather than defaulted.
+    """
+
+    market = event.market
+    event_time_ns = event.event_time_ns
+    if market is None or event_time_ns is None:
+        return None
+    return TimedMarketEvent(event=event, market=market, event_time_ns=event_time_ns)

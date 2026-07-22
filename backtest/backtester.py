@@ -22,7 +22,7 @@ from evaluation.pricing import FeeModel, quote_side
 
 from .book_timeline import MarketTimeline, build_timelines
 from .data_quality import DataQualityReport, grade_dataset
-from .events import DECISION_TRIGGERS, ReplayEvent
+from .events import DECISION_TRIGGERS, ReplayEvent, as_timed_market_event
 from .fill_model import clv_cents, expected_profit_cents, resolve_fill
 from .latency_model import LatencyModel
 from .metrics import LatencyMetrics, break_even_latency, build_distributions
@@ -78,8 +78,12 @@ class EdgeStrategy:
         best = max(tradeable, key=lambda q: q.edge_cents)
         if best.edge_cents < self.min_edge_cents:
             return None
+        limit_price = best.tradeable_limit_price()
+        if limit_price is None:
+            # A quote without an approved ceiling is not actionable.
+            return None
         return StrategyDecision(
-            side=best.side, limit_price=best.limit_price, size=self.base_size,
+            side=best.side, limit_price=limit_price, size=self.base_size,
             fair_value_cents=best.fair_value_cents, model_prob=p,
         )
 
@@ -213,32 +217,35 @@ class ReplayBacktester:
         )
 
     def _collect_decisions(self, timelines: Dict[str, MarketTimeline]) -> List[DecisionPoint]:
+        # Only events carrying both a market id and a provider event time can be
+        # placed on a timeline; the rest are counted as data-quality gaps.
         triggers = sorted(
-            [e for e in self.events
-             if e.event_type in DECISION_TRIGGERS and e.event_time_ns is not None and e.market],
-            key=lambda e: e.event_time_ns,
+            [timed for timed in
+             (as_timed_market_event(e) for e in self.events if e.event_type in DECISION_TRIGGERS)
+             if timed is not None],
+            key=lambda timed: timed.event_time_ns,
         )
         # Next same-market trigger time, for staleness.
         next_by_market: Dict[str, List[int]] = {}
-        for e in triggers:
-            next_by_market.setdefault(e.market, []).append(e.event_time_ns)
+        for timed in triggers:
+            next_by_market.setdefault(timed.market, []).append(timed.event_time_ns)
 
         points: List[DecisionPoint] = []
-        for e in triggers:
-            tl = timelines.get(e.market)
+        for timed in triggers:
+            tl = timelines.get(timed.market)
             if tl is None:
                 continue
-            view = tl.view_at(e.event_time_ns)
-            status = tl.status_at(e.event_time_ns)
+            view = tl.view_at(timed.event_time_ns)
+            status = tl.status_at(timed.event_time_ns)
             if view is None:
                 continue
-            decision = self.strategy.decide(e, view, status)
+            decision = self.strategy.decide(timed.event, view, status)
             if decision is None:
                 continue
-            times = next_by_market[e.market]
-            nxt = next((t for t in times if t > e.event_time_ns), None)
+            times = next_by_market[timed.market]
+            nxt = next((t for t in times if t > timed.event_time_ns), None)
             points.append(DecisionPoint(
-                market=e.market, t0_ns=e.event_time_ns, side=decision.side,
+                market=timed.market, t0_ns=timed.event_time_ns, side=decision.side,
                 limit_price=decision.limit_price, size=decision.size,
                 fair_value_cents=decision.fair_value_cents,
                 next_trigger_ns=nxt, closing_price=tl.closing_price(decision.side),

@@ -11,7 +11,6 @@ from datetime import datetime
 from typing import Optional
 
 from ..base import PlayerStatus, SourceType, make_snapshot
-from ..player_matching import MatchStatus
 from .base_adapter import (
     ParseResult,
     PollingReportAdapter,
@@ -51,7 +50,8 @@ class MLBProbablePitcherAdapter(PollingReportAdapter):
             status = _STATUS_MAP.get(str(row.get("status", "")).strip().lower(), PlayerStatus.UNKNOWN)
 
             match = self._resolve(name, team, player_id=row.get("player_id"))
-            if match.status is not MatchStatus.MATCHED:
+            player = match.matched_player()
+            if player is None:
                 unresolved.append(
                     UnresolvedEntry(
                         raw_name=name, team=team, match_status=match.status,
@@ -60,7 +60,6 @@ class MLBProbablePitcherAdapter(PollingReportAdapter):
                 )
                 continue
 
-            player = match.player
             enriched = dict(row)
             enriched["role"] = "starting_pitcher"
             enriched["game_id"] = game_id

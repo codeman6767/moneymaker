@@ -57,7 +57,9 @@ class OrderBookState(LiveState):
         else:
             book[price] = qty
             # New/raised level at or above current best updates best in O(1).
-            if self._best[side] is None or price > self._best[side]:
+            # Bound to a local so the None check actually narrows the value.
+            current_best = self._best[side]
+            if current_best is None or price > current_best:
                 self._best[side] = price
 
     def _recompute_best(self, side: str) -> None:

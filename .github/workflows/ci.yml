@@ -1,0 +1,50 @@
+name: CI
+
+# No secrets are used anywhere in this workflow.
+#
+# In particular the live `python -m sports_quant providers-check` is NOT run
+# here: it requires a private Odds API key, and no API key belongs in GitHub
+# Actions. Provider behaviour is covered by unit tests that use mocked HTTP
+# transports (see `sports_quant/tests/`), so CI exercises the same code paths
+# without any credential and without any outbound request.
+
+on:
+  push:
+  pull_request:
+
+# Read-only checkout; this workflow never writes to the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Ruff, mypy, pytest (Python 3.11)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install the project with development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Ruff
+        run: python -m ruff check .
+
+      - name: mypy
+        run: python -m mypy .
+
+      - name: pytest
+        run: python -m pytest -q

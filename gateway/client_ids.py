@@ -12,6 +12,8 @@ import threading
 import uuid
 from typing import Dict, Optional
 
+from .orders import OrderAck
+
 
 class ClientOrderIdFactory:
     def __init__(self, prefix: str = "mm") -> None:
@@ -31,10 +33,10 @@ class IdempotencyRegistry:
     """Maps client_order_id -> the ack we already got for it."""
 
     def __init__(self) -> None:
-        self._acks: Dict[str, object] = {}
+        self._acks: Dict[str, OrderAck] = {}
         self._lock = threading.Lock()
 
-    def get(self, client_order_id: str) -> Optional[object]:
+    def get(self, client_order_id: str) -> Optional[OrderAck]:
         with self._lock:
             return self._acks.get(client_order_id)
 
@@ -42,6 +44,6 @@ class IdempotencyRegistry:
         with self._lock:
             return client_order_id in self._acks
 
-    def record(self, client_order_id: str, ack: object) -> None:
+    def record(self, client_order_id: str, ack: OrderAck) -> None:
         with self._lock:
             self._acks[client_order_id] = ack

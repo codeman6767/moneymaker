@@ -95,6 +95,11 @@ class ExecutionGateway:
         if etype != "orderbook":
             return None
 
+        # A book event without a usable market id cannot be keyed into state.
+        # Skip it rather than indexing the book cache with None.
+        if not isinstance(market, str) or not market:
+            return None
+
         book = OrderBookView.make(
             yes_ask_ladder=tuple(map(tuple, raw.get("yes", ()))),
             no_ask_ladder=tuple(map(tuple, raw.get("no", ()))),

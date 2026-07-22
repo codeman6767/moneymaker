@@ -28,6 +28,17 @@ class SubmitStatus(str, enum.Enum):
     REJECTED_PRICE = "rejected_price"
     REJECTED_SEQUENCE = "rejected_sequence"
     REJECTED_STALE = "rejected_stale"
+    #: A BET decision whose trade parameters are missing or out of range.
+    REJECTED_INCOMPLETE = "rejected_incomplete"
+
+
+#: Valid sides of a binary contract.
+VALID_SIDES: Tuple[str, ...] = ("yes", "no")
+
+#: Binary-contract prices are integer cents strictly inside (0, 100): a
+#: contract can never be worth 0 or 100 cents while it is still tradeable.
+MIN_PRICE_CENTS = 1
+MAX_PRICE_CENTS = 99
 
 
 def _hash(*parts) -> str:
@@ -138,6 +149,50 @@ class Decision:
     @property
     def is_bet(self) -> bool:
         return self.action is Action.BET
+
+
+@dataclass(frozen=True)
+class ValidatedTrade:
+    """A BET decision's trade parameters, proven complete and in range.
+
+    :class:`Decision` carries ``side`` / ``limit_price`` as ``Optional`` because
+    WATCH and SKIP decisions legitimately have neither. This type is the result
+    of proving they are present and sane, so downstream code never has to pass
+    an ``Optional`` into a price/ladder/order API.
+    """
+
+    side: str
+    limit_price: int
+    size: int
+
+
+def validate_trade(decision: "Decision") -> Tuple[Optional[ValidatedTrade], Optional[str]]:
+    """Validate a BET decision's trade parameters.
+
+    Returns ``(trade, None)`` when every parameter is present and in range, or
+    ``(None, reason)`` describing the first problem found. Callers must treat a
+    ``None`` trade as a safe rejection -- never as something to submit.
+    """
+
+    side = decision.side
+    if side is None:
+        return None, "incomplete decision: side is not set"
+    if side not in VALID_SIDES:
+        return None, f"invalid side {side!r}: expected one of {VALID_SIDES}"
+
+    limit_price = decision.limit_price
+    if limit_price is None:
+        return None, "incomplete decision: limit_price is not set"
+    if not MIN_PRICE_CENTS <= limit_price <= MAX_PRICE_CENTS:
+        return None, (
+            f"limit_price {limit_price} outside the valid range "
+            f"[{MIN_PRICE_CENTS}, {MAX_PRICE_CENTS}] cents"
+        )
+
+    if decision.size <= 0:
+        return None, f"size {decision.size} is not greater than zero"
+
+    return ValidatedTrade(side=side, limit_price=limit_price, size=decision.size), None
 
 
 @dataclass

@@ -9,6 +9,9 @@ import numpy as np
 import pytest
 
 from evaluation import (
+    MAX_PRICE_CENTS,
+    MIN_PRICE_CENTS,
+    VALID_SIDES,
     Action,
     EvaluationConfig,
     LimitOrder,
@@ -19,6 +22,7 @@ from evaluation import (
     Portfolio,
     PortfolioLimits,
     SubmitStatus,
+    validate_trade,
     walk_ladder,
 )
 
@@ -255,3 +259,58 @@ def test_latency_trace_and_budget():
     assert snap.count >= 500
     assert snap.p50_ns is not None and snap.p95_ns is not None and snap.p99_ns is not None
     assert ev.within_budget()
+
+
+# --------------------------------------------------------------------------- #
+# Incomplete BET decisions are rejected, never coerced into a trade
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "field,value,expect_in_reason",
+    [
+        ("side", None, "side is not set"),
+        ("side", "maybe", "invalid side"),
+        ("limit_price", None, "limit_price is not set"),
+        ("limit_price", 0, "outside the valid range"),
+        ("limit_price", 100, "outside the valid range"),
+        ("size", 0, "not greater than zero"),
+        ("size", -5, "not greater than zero"),
+    ],
+)
+def test_incomplete_bet_is_rejected(field, value, expect_in_reason):
+    ev = evaluator(prob=0.8)
+    dec = ev.evaluate(make_event(), make_snapshot(), now_ns=NOW)
+    assert dec.action is Action.BET
+    setattr(dec, field, value)
+
+    result = ev.submit(dec, make_snapshot(), now_ns=NOW)
+
+    assert result.status is SubmitStatus.REJECTED_INCOMPLETE
+    assert result.order is None
+    assert expect_in_reason in (result.reason or "")
+    # Nothing was filled: an incomplete decision never reaches the portfolio.
+    assert "KX1" not in ev.portfolio.positions
+
+
+def test_validate_trade_accepts_a_complete_decision():
+    ev = evaluator(prob=0.8)
+    dec = ev.evaluate(make_event(), make_snapshot(), now_ns=NOW)
+    trade, reason = validate_trade(dec)
+    assert reason is None
+    assert trade is not None
+    assert trade.side in VALID_SIDES
+    assert MIN_PRICE_CENTS <= trade.limit_price <= MAX_PRICE_CENTS
+    assert trade.size > 0
+
+
+def test_incomplete_bet_still_runs_risk_reducing_cancels():
+    """A rejection must not strand risk-reducing cancels."""
+
+    ev = evaluator(prob=0.8)
+    dec = ev.evaluate(make_event(), make_snapshot(), now_ns=NOW)
+    dec.limit_price = None
+    dec.cancels = ["order-to-cancel"]
+
+    result = ev.submit(dec, make_snapshot(), now_ns=NOW)
+
+    assert result.status is SubmitStatus.REJECTED_INCOMPLETE
+    assert result.cancels_executed == ["order-to-cancel"]
