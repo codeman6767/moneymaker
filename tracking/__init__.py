@@ -28,6 +28,7 @@ from .aggregations import (
 from .base import (
     FRAME_COLUMNS,
     PARTITION_COLUMNS,
+    PYARROW_REQUIRED_MESSAGE,
     Coordinates,
     EventCoordinate,
     FrameDataUnavailable,
@@ -38,6 +39,7 @@ from .base import (
     InvalidCoordinateAccess,
     Kinematics,
     ManifestRepository,
+    MissingTrackingDependencyError,
     PlayerFrameSample,
     PostgresManifestRepository,
     TrackingError,
@@ -46,6 +48,7 @@ from .base import (
     TrackingNotConfigured,
     assert_frame_level,
     is_frame_level,
+    pyarrow_available,
 )
 from .mlb_hawkeye_adapter import MLBHawkEyeAdapter
 from .mlb_statcast_adapter import MLBStatcastAdapter, StatcastBattedBall, StatcastPitch
@@ -74,7 +77,10 @@ __all__ = [
     "InvalidCoordinateAccess",
     # sources + storage
     "FrameSource",
+    "PYARROW_REQUIRED_MESSAGE",
     "FrameParquetStore",
+    "MissingTrackingDependencyError",
+    "pyarrow_available",
     "FRAME_COLUMNS",
     "PARTITION_COLUMNS",
     "FrameManifest",

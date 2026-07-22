@@ -23,6 +23,12 @@ dependencies = [
 # the package is absent, so they are not required for the test suite.
 streaming = ["nats-py>=2.6.0"]
 onnx = ["onnx>=1.15", "onnxruntime>=1.17"]
+# Frame-level optical/Statcast Parquet storage only. Deliberately NOT a core
+# dependency and NOT part of `dev`: `CLAUDE.md` keeps frame-level tracking an
+# optional adapter, and the read-only recommendation application never touches
+# it. CI installs `.[dev]` only, so the large Arrow wheel stays out of the
+# standard job.
+tracking = ["pyarrow>=15"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
@@ -132,6 +138,8 @@ module = [
     "nats.*",
     "onnx",
     "onnxruntime",
+    "pyarrow",
+    "pyarrow.*",
     "websockets",
     "websockets.*",
 ]

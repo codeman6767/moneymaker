@@ -304,19 +304,76 @@ def _frame_to_rows(frame: TrackingFrame) -> List[Dict[str, Any]]:
     return rows
 
 
+#: Actionable message for the optional frame-storage dependency. A bare
+#: ModuleNotFoundError names the missing module but not the extra that supplies
+#: it, which leaves the reader to guess.
+PYARROW_REQUIRED_MESSAGE = (
+    "PyArrow is required for frame-level Parquet storage. "
+    "Install sports-quant[tracking]."
+)
+
+
+class MissingTrackingDependencyError(ImportError):
+    """Raised when frame-level Parquet storage is used without pyarrow.
+
+    Subclasses :class:`ImportError` so existing ``except ImportError`` handlers
+    keep working, while the message names the extra to install.
+    """
+
+
+def pyarrow_available() -> bool:
+    """Whether pyarrow can be imported.
+
+    Lets tests skip frame-storage cases cleanly rather than failing in an
+    environment that deliberately omits the optional dependency -- the same
+    pattern ``probability.onnx_export.onnx_available`` already uses for ONNX.
+    """
+
+    try:
+        import pyarrow  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _require_pyarrow() -> Any:
+    """Import pyarrow, or explain which extra provides it."""
+
+    try:
+        import pyarrow as pa
+    except ImportError as exc:
+        raise MissingTrackingDependencyError(PYARROW_REQUIRED_MESSAGE) from exc
+    return pa
+
+
+def _require_pyarrow_dataset() -> Any:
+    """Import pyarrow.dataset, or explain which extra provides it."""
+
+    try:
+        import pyarrow.dataset as ds
+    except ImportError as exc:
+        raise MissingTrackingDependencyError(PYARROW_REQUIRED_MESSAGE) from exc
+    return ds
+
+
 class FrameParquetStore:
     """Writes/reads frame-level data as partitioned Parquet.
 
     pyarrow is imported lazily so importing this module never requires it; only
-    actually writing/reading frames does.
+    actually writing/reading frames does. It is an optional dependency
+    (``sports-quant[tracking]``) because ``CLAUDE.md`` keeps frame-level
+    tracking an optional adapter -- the read-only recommendation application
+    never reads a frame. Using this class without it raises
+    :class:`MissingTrackingDependencyError`, which names the extra rather than
+    leaving a bare ``ModuleNotFoundError`` for the reader to decode.
     """
 
     def __init__(self, root_path: str) -> None:
         self.root_path = root_path
 
     @staticmethod
-    def _arrow_schema():
-        import pyarrow as pa
+    def _arrow_schema() -> Any:
+        pa = _require_pyarrow()
 
         # Explicit schema so optional coordinate/motion columns that happen to
         # be entirely null in a batch still get a concrete type (not Arrow's
@@ -344,8 +401,8 @@ class FrameParquetStore:
         )
 
     def write_frames(self, frames: Sequence[TrackingFrame]) -> int:
-        import pyarrow as pa
-        import pyarrow.dataset as ds
+        pa = _require_pyarrow()
+        ds = _require_pyarrow_dataset()
 
         rows: List[Dict[str, Any]] = []
         for f in frames:
@@ -364,7 +421,7 @@ class FrameParquetStore:
         return len(rows)
 
     def read_frames(self, game_id: str, sport: Optional[str] = None) -> List[TrackingFrame]:
-        import pyarrow.dataset as ds
+        ds = _require_pyarrow_dataset()
 
         dataset = ds.dataset(self.root_path, format="parquet", partitioning="hive")
         filt = ds.field("game_id") == game_id

@@ -7,12 +7,15 @@ player tracking -- is exercised first and hardest, in
 
 from __future__ import annotations
 
+import sys
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from pydantic import ValidationError
 
 from tracking import (
+    PYARROW_REQUIRED_MESSAGE,
     Coordinates,
     EventCoordinate,
     FrameDataUnavailable,
@@ -21,6 +24,7 @@ from tracking import (
     InMemoryManifestRepository,
     InvalidCoordinateAccess,
     Kinematics,
+    MissingTrackingDependencyError,
     MLBHawkEyeAdapter,
     MLBStatcastAdapter,
     NBAOpticalAdapter,
@@ -37,6 +41,7 @@ from tracking import (
     movement_speed,
     movement_speed_between,
     pitch_measures,
+    pyarrow_available,
     shot_distance,
     shot_zone,
 )
@@ -254,6 +259,7 @@ def test_movement_speed_between_rejects_event_data():
 # --------------------------------------------------------------------------- #
 # Partitioned Parquet storage round-trip + manifest metadata
 # --------------------------------------------------------------------------- #
+@pytest.mark.skipif(not pyarrow_available(), reason="pyarrow not installed (optional extra)")
 def test_frame_parquet_roundtrip_and_manifest(tmp_path):
     store = FrameParquetStore(str(tmp_path / "frames"))
     frames = [
@@ -303,6 +309,7 @@ def test_frame_parquet_roundtrip_and_manifest(tmp_path):
     assert [m.manifest_id for m in repo.list_for_game("nba-77")] == ["m1"]
 
 
+@pytest.mark.skipif(not pyarrow_available(), reason="pyarrow not installed (optional extra)")
 def test_configured_optical_adapter_reads_store(tmp_path):
     store = FrameParquetStore(str(tmp_path / "frames"))
     store.write_frames([make_frame(game_id="nba-5", h1=("home", 0.0, 0.0, 3.0))])
@@ -311,3 +318,91 @@ def test_configured_optical_adapter_reads_store(tmp_path):
     frames = list(adapter.iter_frames("nba-5"))
     assert len(frames) == 1
     assert movement_speed(frames[0].player("h1")) == 3.0
+
+
+# --------------------------------------------------------------------------- #
+# pyarrow is optional: importing must work without it, and using frame storage
+# without it must explain which extra supplies it.
+#
+# `sys.modules[name] = None` makes a subsequent `import name` raise ImportError,
+# so these run identically whether or not pyarrow is actually installed.
+# --------------------------------------------------------------------------- #
+@contextmanager
+def pyarrow_hidden():
+    """Make pyarrow un-importable for the duration of the block."""
+
+    blocked = {name: None for name in ("pyarrow", "pyarrow.dataset")}
+    saved = {name: sys.modules.get(name) for name in blocked}
+    sys.modules.update(blocked)
+    try:
+        yield
+    finally:
+        for name, module in saved.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+
+
+def test_tracking_base_imports_without_pyarrow():
+    """The module must import in an environment that omits the optional extra."""
+
+    with pyarrow_hidden():
+        for name in [m for m in sys.modules if m.startswith("tracking")]:
+            sys.modules.pop(name, None)
+        import tracking.base as reimported
+
+        assert reimported.FrameParquetStore is not None
+        assert reimported.pyarrow_available() is False
+
+
+def test_constructing_the_store_without_pyarrow_is_allowed(tmp_path):
+    """Construction is cheap and import-free; only I/O needs pyarrow."""
+
+    with pyarrow_hidden():
+        assert FrameParquetStore(str(tmp_path / "frames")) is not None
+
+
+def test_write_frames_without_pyarrow_raises_a_clear_error(tmp_path):
+    store = FrameParquetStore(str(tmp_path / "frames"))
+    frames = [make_frame(game_id="nba-9", h1=("home", 0.0, 0.0))]
+
+    with pyarrow_hidden():
+        with pytest.raises(MissingTrackingDependencyError) as exc_info:
+            store.write_frames(frames)
+
+    message = str(exc_info.value)
+    assert message == PYARROW_REQUIRED_MESSAGE
+    # The message names the extra, not just the missing module.
+    assert "sports-quant[tracking]" in message
+
+
+def test_read_frames_without_pyarrow_raises_a_clear_error(tmp_path):
+    store = FrameParquetStore(str(tmp_path / "frames"))
+
+    with pyarrow_hidden():
+        with pytest.raises(MissingTrackingDependencyError) as exc_info:
+            store.read_frames("nba-9")
+
+    assert "sports-quant[tracking]" in str(exc_info.value)
+
+
+def test_missing_dependency_error_is_an_import_error():
+    """Existing `except ImportError` handlers keep working."""
+
+    assert issubclass(MissingTrackingDependencyError, ImportError)
+
+
+def test_missing_dependency_error_chains_the_original_cause(tmp_path):
+    """The underlying ImportError is preserved for debugging."""
+
+    store = FrameParquetStore(str(tmp_path / "frames"))
+    with pyarrow_hidden():
+        with pytest.raises(MissingTrackingDependencyError) as exc_info:
+            store.read_frames("nba-9")
+    assert isinstance(exc_info.value.__cause__, ImportError)
+
+
+def test_pyarrow_available_reports_absence():
+    with pyarrow_hidden():
+        assert pyarrow_available() is False
