@@ -30,17 +30,25 @@ else. It must never place, cancel, or manage a bet.
 ## Startup safety invariants
 
 `sports_quant.config.load_settings()` refuses to start the application unless
-every one of these holds (loaded from the repository-root `.env`, with
-`.env.txt` accepted as a fallback for the current checkout):
+every one of these holds. Settings are loaded from the repository-root `.env`,
+which is the **only** environment file the application reads. `.env` is
+git-ignored; `.env.example` is the only committed template. (`.env.txt` was
+previously read as a fallback — that support has been removed and the file
+deleted, because it had leaked a real API key into git history.)
 
-| Variable                   | Required value |
-| -------------------------- | -------------- |
-| `READ_ONLY_MODE`           | `true`         |
-| `ORDER_SUBMISSION_ENABLED` | `false`        |
-| `PAPER_TRADING`            | `false`        |
-| `LIVE_TRADING`             | `false`        |
-| `MANUAL_LIVE_ARMING`       | `false`        |
-| `KALSHI_ENVIRONMENT`       | `production`   |
+| Variable                   | Required value                                    |
+| -------------------------- | ------------------------------------------------- |
+| `READ_ONLY_MODE`           | `true`                                            |
+| `ORDER_SUBMISSION_ENABLED` | `false`                                           |
+| `PAPER_TRADING`            | `false`                                           |
+| `LIVE_TRADING`             | `false`                                           |
+| `MANUAL_LIVE_ARMING`       | `false`                                           |
+| `KALSHI_ENVIRONMENT`       | `production`                                      |
+| `KALSHI_PUBLIC_REST_URL`   | `https://external-api.kalshi.com/trade-api/v2`    |
+
+`KALSHI_PUBLIC_REST_URL` is pinned to that exact value: arbitrary Kalshi hosts
+and demo hosts are rejected at startup, before any network I/O, in addition to
+being rejected by the transport policy below.
 
 If any invariant is violated, startup raises `ReadOnlyStartupError` and the
 process exits without doing any network I/O.
@@ -86,10 +94,21 @@ python -m sports_quant providers-check
 
 A safe, GET-only smoke test. It confirms the Odds API key is present (without
 displaying it), calls the Odds API sports endpoint, fetches MLB/NBA odds **only
-when those sports are active** (reporting clearly when out of season), calls the
-Kalshi exchange-status endpoint, retrieves five open Kalshi markets, and prints
-sanitized record counts and API-credit headers. It never places or simulates an
-order.
+when those sports are active**, calls the Kalshi exchange-status endpoint,
+retrieves five open Kalshi markets, and prints sanitized record counts and
+API-credit headers. It never places or simulates an order.
+
+Every check is classified and printed as one of:
+
+| Status    | Meaning                                                      | Affects exit code |
+| --------- | ------------------------------------------------------------ | ----------------- |
+| `OK`      | The provider responded successfully.                          | no                |
+| `SKIPPED` | Not active: league out of season, or provider not configured. | no                |
+| `FAILED`  | Something genuinely active failed.                            | **yes**           |
+
+The process exits `1` if any check is `FAILED`, `0` otherwise, and `2` if the
+read-only startup invariants are violated. An out-of-season league is a
+successful skip, never a failure.
 
 ## Quarantine
 

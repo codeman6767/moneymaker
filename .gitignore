@@ -1,10 +1,26 @@
-# Secrets: never commit a real .env (the Odds API key lives here).
+# Secrets: never commit a real environment file or any private key material.
+# `.env.example` is the only committed environment template.
 .env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
 
-# Python
+# Virtual environments
+venv/
+.venv/
+
+# Python build / bytecode artifacts
 __pycache__/
 *.py[cod]
-.mypy_cache/
+
+# Tool caches
 .pytest_cache/
+.mypy_cache/
 .ruff_cache/
-venv/
+
+# Coverage
+.coverage
+htmlcov/

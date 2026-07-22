@@ -41,9 +41,9 @@ from .base import (
     PlayerFrameSample,
     PostgresManifestRepository,
     TrackingError,
+    TrackingFrame,
     TrackingLevel,
     TrackingNotConfigured,
-    TrackingFrame,
     assert_frame_level,
     is_frame_level,
 )

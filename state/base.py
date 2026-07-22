@@ -21,6 +21,7 @@ the network (a hard rule for the hot path; see ``CLAUDE.md``).
 from __future__ import annotations
 
 import enum
+import hashlib
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -28,8 +29,6 @@ from types import MappingProxyType
 from typing import Any, Mapping, Optional
 
 from streaming.event_envelope import EventEnvelope, canonical_json
-
-import hashlib
 
 
 def now_ns() -> int:

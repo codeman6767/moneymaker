@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import pytest
 
+from gateway.orders import LimitOrderRequest
 from gateway.quarantine import (
     EXECUTION_QUARANTINED,
     ExecutionQuarantinedError,
     ensure_execution_allowed,
 )
 from gateway.transport import KalshiRestTransport, KalshiWsFeed
-from gateway.orders import LimitOrderRequest
 
 
 def test_execution_is_quarantined_by_default() -> None:

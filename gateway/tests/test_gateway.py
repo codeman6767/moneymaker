@@ -5,21 +5,21 @@ from __future__ import annotations
 import pytest
 
 from gateway import (
+    LIVE_ARM_TOKEN,
     ArmError,
     ArmingController,
     ClientOrderIdFactory,
     ExecutionGateway,
+    FakeOrderTransport,
     Fill,
     GatewayConfig,
     GatewayReport,
     KalshiLimits,
     LimitOrderRequest,
-    LIVE_ARM_TOKEN,
     OrderIntent,
     OrderState,
     Stage,
     StaticLimitsProvider,
-    FakeOrderTransport,
 )
 
 MARKET = "KX1"

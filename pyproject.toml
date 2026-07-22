@@ -1,0 +1,134 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sports-quant"
+version = "0.1.0"
+description = "Read-only MLB and NBA betting recommendation engine (no order execution)."
+readme = "READ_ONLY_ARCHITECTURE.md"
+requires-python = ">=3.11"
+
+# Active runtime dependencies actually imported by the packages in this repo.
+dependencies = [
+    "httpx>=0.27",           # sports_quant providers (async GET-only HTTP)
+    "pydantic>=2.0,<3.0",    # typed models across sports_quant / streaming / state
+    "pydantic-settings>=2.0",# sports_quant.config (.env loading, SecretStr)
+    "numpy>=1.26",           # probability features / inference
+    "scikit-learn>=1.3",     # probability residual + calibration models
+]
+
+[project.optional-dependencies]
+# Optional transports / runtimes. Code paths that use these degrade or skip when
+# the package is absent, so they are not required for the test suite.
+streaming = ["nats-py>=2.6.0"]
+onnx = ["onnx>=1.15", "onnxruntime>=1.17"]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+sports-quant = "sports_quant.cli:main"
+
+[tool.setuptools]
+packages = [
+    "sports_quant",
+    "sports_quant.providers",
+    "streaming",
+    "state",
+    "probability",
+    "intel",
+    "intel.adapters",
+    "tracking",
+    "evaluation",
+    "backtest",
+    "gateway",
+]
+
+# --------------------------------------------------------------------------- #
+# pytest
+# --------------------------------------------------------------------------- #
+[tool.pytest.ini_options]
+# asyncio_mode=auto lets async test functions run without a per-test marker.
+asyncio_mode = "auto"
+python_files = ["test_*.py"]
+# Project test directories only -- never venv/ or site-packages.
+testpaths = [
+    "sports_quant/tests",
+    "streaming/tests",
+    "state/tests",
+    "tracking/tests",
+    "intel/tests",
+    "probability/tests",
+    "evaluation/tests",
+    "backtest/tests",
+    "gateway/tests",
+]
+norecursedirs = ["venv", ".venv", "*.egg-info", ".git", "build", "dist"]
+
+# --------------------------------------------------------------------------- #
+# Ruff
+# --------------------------------------------------------------------------- #
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+exclude = [
+    "venv",
+    ".venv",
+    "__pycache__",
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "build",
+    "dist",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "W",   # pycodestyle warnings
+    "I",   # import sorting
+    "B",   # bugbear
+]
+# Rules deliberately NOT enforced, and why:
+#
+# * `E501` (line-too-long): line length is a formatter concern, and Ruff's own
+#   default rule set excludes it for that reason. `line-length` above is still
+#   honoured by `ruff format`. 40 pre-existing source lines exceed 100 columns;
+#   none is a correctness problem. Run `ruff check --select E501` to see them.
+# * `UP` (pyupgrade): the codebase consistently uses `Optional[X]` style.
+#   Enabling it would demand a ~740-finding repo-wide rewrite of working code
+#   for no correctness gain.
+ignore = ["E501"]
+
+# --------------------------------------------------------------------------- #
+# mypy
+# --------------------------------------------------------------------------- #
+[tool.mypy]
+python_version = "3.11"
+files = ["sports_quant", "streaming", "state", "probability", "intel", "tracking", "evaluation", "backtest", "gateway"]
+exclude = "^(venv|\\.venv|build|dist)/"
+# No global ignore_missing_imports: genuine source errors must stay visible.
+ignore_missing_imports = false
+warn_unused_configs = true
+warn_redundant_casts = true
+no_implicit_optional = true
+show_error_codes = true
+
+# Third-party packages that ship no type information. Scoped per-module so a
+# missing stub is silenced only for that dependency, never repo-wide.
+[[tool.mypy.overrides]]
+module = [
+    "sklearn.*",
+    "nats.*",
+    "onnx",
+    "onnxruntime",
+    "websockets",
+    "websockets.*",
+]
+ignore_missing_imports = true

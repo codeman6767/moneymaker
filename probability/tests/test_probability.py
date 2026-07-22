@@ -9,9 +9,9 @@ import pytest
 
 from probability import (
     DEFAULT_THRESHOLDS,
-    InferenceEngine,
     MLB_SPEC,
     NBA_SPEC,
+    InferenceEngine,
     build_mlb_dataset,
     build_nba_dataset,
     onnx_available,

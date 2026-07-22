@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from pydantic import ValidationError
 
 from tracking import (
     Coordinates,
@@ -100,7 +101,7 @@ def test_event_coordinate_has_no_frame_structure():
     assert not hasattr(coord, "player")
     # level is a read-only property; it cannot be set to FRAME, and passing it
     # as a field is rejected by the (extra=forbid) model.
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         EventCoordinate(
             sport="nba", event_id="e1", event_type="shot",
             coordinates=Coordinates(x=1.0, y=2.0), source="pbp",

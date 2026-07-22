@@ -5,8 +5,6 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from evaluation.decision import OrderBookView
-
 from backtest import (
     BacktestConfig,
     EdgeStrategy,
@@ -19,6 +17,7 @@ from backtest import (
     grade_dataset,
     resolve_fill,
 )
+from evaluation.decision import OrderBookView
 
 MS = 1_000_000
 

@@ -8,9 +8,9 @@ sources that require authorization enforce it here.
 
 from .base_adapter import (
     ParseResult,
+    PollingReportAdapter,
     PollResult,
     PollSchedule,
-    PollingReportAdapter,
     SourceAdapter,
     UnresolvedEntry,
 )

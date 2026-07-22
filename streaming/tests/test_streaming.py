@@ -17,11 +17,10 @@ import random
 from datetime import datetime, timedelta, timezone
 from typing import List
 
-
 from streaming import (
     CorrectionHandler,
-    Deduplicator,
     DeadLetterQueue,
+    Deduplicator,
     Delivery,
     EventEnvelope,
     EventProcessor,

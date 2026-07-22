@@ -12,7 +12,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-
 from . import features
 from .calibration import CalibrationReport, calibration_report
 from .datasets import GameStateDataset, build_mlb_dataset, build_nba_dataset

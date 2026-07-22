@@ -21,6 +21,8 @@ imported on the startup path of this package.
 from __future__ import annotations
 
 from .config import (
+    PRODUCTION_ENVIRONMENT,
+    PRODUCTION_KALSHI_REST_URL,
     ReadOnlyStartupError,
     Settings,
     load_settings,
@@ -33,12 +35,14 @@ from .http_policy import (
     odds_api_host_rule,
 )
 from .providers.kalshi import KalshiClient, KalshiOrderBook
-from .providers.odds_api import OddsApiClient, OddsApiResult, NormalizedEvent
+from .providers.odds_api import NormalizedEvent, OddsApiClient, OddsApiResult
 
 __all__ = [
     "Settings",
     "load_settings",
     "ReadOnlyStartupError",
+    "PRODUCTION_ENVIRONMENT",
+    "PRODUCTION_KALSHI_REST_URL",
     "ReadOnlyHTTPPolicy",
     "ReadOnlyPolicyError",
     "ReadOnlyPolicyTransport",

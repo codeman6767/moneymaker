@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from streaming.event_envelope import EventEnvelope
-
 from state import (
     ApplyStatus,
     DataQuality,
@@ -15,6 +13,7 @@ from state import (
     OrderBookState,
 )
 from state.benchmark import benchmark_orderbook_deltas
+from streaming.event_envelope import EventEnvelope
 
 BASE_TIME = datetime(2026, 7, 1, 12, 0, 0, tzinfo=timezone.utc)
 

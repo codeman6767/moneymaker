@@ -10,6 +10,22 @@ See ``CLAUDE.md``: no unauthorized scraping, and speed/automation never bypass
 confirmation and risk gates.
 """
 
+from .adapters import (
+    NBA_INJURY_REPORT_SCHEDULE,
+    LineupAdapter,
+    LineupObservation,
+    MLBProbablePitcherAdapter,
+    NBAInjuryReportAdapter,
+    ParseResult,
+    PollingReportAdapter,
+    PollResult,
+    PollSchedule,
+    SocialNewsAdapter,
+    SourceAdapter,
+    TeamAnnouncementAdapter,
+    UnauthorizedSourceError,
+    UnresolvedEntry,
+)
 from .base import (
     Alert,
     ChangeType,
@@ -21,22 +37,6 @@ from .base import (
     SourceType,
     StatusSnapshot,
     make_snapshot,
-)
-from .adapters import (
-    LineupAdapter,
-    LineupObservation,
-    MLBProbablePitcherAdapter,
-    NBA_INJURY_REPORT_SCHEDULE,
-    NBAInjuryReportAdapter,
-    ParseResult,
-    PollResult,
-    PollSchedule,
-    PollingReportAdapter,
-    SocialNewsAdapter,
-    SourceAdapter,
-    TeamAnnouncementAdapter,
-    UnauthorizedSourceError,
-    UnresolvedEntry,
 )
 from .confidence import (
     ACTIONABLE_THRESHOLD,

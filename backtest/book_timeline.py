@@ -41,7 +41,7 @@ class MarketTimeline:
 
     def closing_price(self, side: str) -> Optional[int]:
         # Prefer the last trade on the requested side; else the final best ask.
-        for t, s, price in reversed(self.trades):
+        for _t, s, price in reversed(self.trades):
             if s == side:
                 return price
         if self.final_view is not None:

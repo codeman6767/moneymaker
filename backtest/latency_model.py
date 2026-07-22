@@ -14,7 +14,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict
 
-
 STAGES: tuple = (
     "provider_publication",
     "network_delivery",

@@ -15,9 +15,9 @@ import pytest
 from intel import (
     ChangeType,
     LineupAdapter,
-    MLBProbablePitcherAdapter,
-    MaterialChangeDetector,
     MatchStatus,
+    MaterialChangeDetector,
+    MLBProbablePitcherAdapter,
     NBAInjuryReportAdapter,
     PlayerDirectory,
     PlayerStatus,

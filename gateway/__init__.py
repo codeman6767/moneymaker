@@ -12,12 +12,11 @@ latency benchmarking. Phase 2 (Rust/Tokio) and Phase 3 (Kalshi FIX) were gated
 and never implemented. See ``READ_ONLY_ARCHITECTURE.md``.
 """
 
-from .arming import ArmError, ArmingController, LIVE_ARM_TOKEN
+from .arming import LIVE_ARM_TOKEN, ArmError, ArmingController
 from .benchmark import E2E, GatewayReport, LatencyBenchmark, Stage, StageTimer
 from .client_ids import ClientOrderIdFactory, IdempotencyRegistry
 from .config import GatewayConfig
 from .gateway import ExecutionGateway, Strategy
-from .quarantine import EXECUTION_QUARANTINED, ExecutionQuarantinedError, ensure_execution_allowed
 from .limits import (
     DEFAULT_LIMITS,
     KalshiLimits,
@@ -34,6 +33,7 @@ from .orders import (
     OrderState,
     OrderStatusReport,
 )
+from .quarantine import EXECUTION_QUARANTINED, ExecutionQuarantinedError, ensure_execution_allowed
 from .token_budget import TokenBucket, TokenBudgetManager
 from .transport import (
     FakeMarketDataFeed,

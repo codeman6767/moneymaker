@@ -100,7 +100,7 @@ def build_empirical_table(dataset: GameStateDataset, *, n_phase: int) -> Empiric
     rate = np.full((n_phase, 2 * SD_CAP + 1), np.nan, dtype=F32)
     count = np.zeros((n_phase, 2 * SD_CAP + 1), dtype=np.int32)
     total = np.zeros_like(rate)
-    for sd, phase, y in zip(dataset.score_diff, dataset.phase, dataset.y):
+    for sd, phase, y in zip(dataset.score_diff, dataset.phase, dataset.y, strict=True):
         pi = int(np.clip(phase - 1, 0, n_phase - 1))
         si = _sd_index(int(sd))
         count[pi, si] += 1

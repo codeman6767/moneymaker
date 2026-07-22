@@ -1,8 +1,8 @@
 """Configuration + read-only startup invariants.
 
-Loads the provider/safety settings from the repository-root ``.env`` file (with
-``.env.txt`` accepted as a fallback for the current checkout) and refuses to
-start the application unless the read-only invariants hold:
+Loads the provider/safety settings from the repository-root ``.env`` file --
+the *only* environment file the application reads -- and refuses to start unless
+the read-only invariants hold:
 
 * ``READ_ONLY_MODE=true``
 * ``ORDER_SUBMISSION_ENABLED=false``
@@ -10,6 +10,8 @@ start the application unless the read-only invariants hold:
 * ``LIVE_TRADING=false``
 * ``MANUAL_LIVE_ARMING=false``
 * ``KALSHI_ENVIRONMENT=production``
+* ``KALSHI_PUBLIC_REST_URL`` exactly equal to the canonical production
+  public-data URL (see :data:`PRODUCTION_KALSHI_REST_URL`)
 
 The Odds API key is stored as a :class:`~pydantic.SecretStr` so it never leaks
 through ``repr``/``str``; nothing in this module prints or logs it.
@@ -25,9 +27,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Repository root = parent of the ``sports_quant`` package directory.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# ``.env`` is canonical; ``.env.txt`` is accepted as a fallback so the existing
-# checkout works unchanged. Later files win, so ``.env`` overrides ``.env.txt``.
-_ENV_FILES = (str(REPO_ROOT / ".env.txt"), str(REPO_ROOT / ".env"))
+# ``.env`` is the single supported environment file. ``.env.txt`` is no longer
+# read: it leaked a real API key into git history and support for it was removed.
+_ENV_FILE = str(REPO_ROOT / ".env")
+
+# The one Kalshi REST base URL production read-only mode will accept. Any other
+# host (including Kalshi demo) is rejected at startup.
+PRODUCTION_KALSHI_REST_URL = "https://external-api.kalshi.com/trade-api/v2"
+
+# Environment name that means "real, production, read-only public data".
+PRODUCTION_ENVIRONMENT = "production"
 
 
 class ReadOnlyStartupError(RuntimeError):
@@ -50,7 +59,7 @@ class Settings(BaseSettings):
     """Typed application settings loaded from the environment / ``.env``."""
 
     model_config = SettingsConfigDict(
-        env_file=_ENV_FILES,
+        env_file=_ENV_FILE,
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -61,8 +70,8 @@ class Settings(BaseSettings):
     odds_api_key: SecretStr = Field(default=SecretStr(""))
 
     # Kalshi public REST (no authentication is used).
-    kalshi_public_rest_url: str = "https://external-api.kalshi.com/trade-api/v2"
-    kalshi_environment: str = "production"
+    kalshi_public_rest_url: str = PRODUCTION_KALSHI_REST_URL
+    kalshi_environment: str = PRODUCTION_ENVIRONMENT
 
     # Safety flags -- all must hold their read-only values (see below).
     read_only_mode: bool = True
@@ -86,8 +95,19 @@ class Settings(BaseSettings):
             violations.append("LIVE_TRADING must be false")
         if self.manual_live_arming:
             violations.append("MANUAL_LIVE_ARMING must be false")
-        if self.kalshi_environment != "production":
-            violations.append("KALSHI_ENVIRONMENT must be 'production'")
+        if self.kalshi_environment != PRODUCTION_ENVIRONMENT:
+            violations.append(
+                f"KALSHI_ENVIRONMENT must be {PRODUCTION_ENVIRONMENT!r} "
+                f"(got {self.kalshi_environment!r}; demo environments are rejected)"
+            )
+        # Pin the Kalshi base URL: an arbitrary or demo host must never be
+        # reachable, even though the transport policy would also reject it.
+        if self.kalshi_public_rest_url.rstrip("/") != PRODUCTION_KALSHI_REST_URL:
+            violations.append(
+                "KALSHI_PUBLIC_REST_URL must be exactly "
+                f"{PRODUCTION_KALSHI_REST_URL!r} in production read-only mode "
+                f"(got {self.kalshi_public_rest_url!r})"
+            )
         return violations
 
     def enforce_read_only(self) -> None:
