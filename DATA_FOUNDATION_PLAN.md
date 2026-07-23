@@ -11,7 +11,9 @@ repair: raw-response storage, ingestion-run tracking, sportsbook
 events/markets/outcomes, point-in-time price snapshots, the Odds API ingestion
 service, and the `ingest-odds` CLI now exist, with team/sport validation,
 stale-metadata protection, transition-aware price deduplication, and correct
-failed-request counting. All 470 tests pass under Ruff and mypy.
+failed-request counting, and the `b006` price-snapshot uniqueness rule
+(`UNIQUE (sb_outcome_id, observed_at, content_hash)`). All 479 tests pass under
+Ruff and mypy.
 
 Phases C–E below remain planning; each begins only on explicit instruction.
 
@@ -181,9 +183,13 @@ one `raw_responses` row plus derived events/markets/outcomes/price snapshots.
 - **Exit `0`:** success, **including an out-of-season sport** — a `SKIPPED`
   result, consistent with the existing `providers-check` semantics.
 - **Exit `1`:** the sport is active but the fetch or write failed.
-- **Idempotency:** `UNIQUE (sb_outcome_id, content_hash)` + `INSERT OR IGNORE`.
-  Re-running with unchanged prices writes zero snapshot rows. Raw responses are
-  deduplicated on `content_hash`.
+- **Idempotency:** transition-aware — `UNIQUE (sb_outcome_id, observed_at,
+  content_hash)` plus an immediate-temporal-predecessor comparison in the
+  repository (migration `b006`; see `DATA_ARCHITECTURE.md` §3.6.1). Re-running
+  with unchanged prices writes zero snapshot rows, an unchanged re-poll
+  collapses, and a price that reverts to an earlier value is still preserved.
+  Raw responses are kept per observation (not deduplicated), so every run can
+  name the exact response it received.
 - **Failure:** the raw response is persisted **before** parsing, so a parse
   failure never loses the bytes — it marks the run `partial`, records a
   `data_quality_issues` row, and exits `1`. The corpus keeps the response for a
@@ -337,11 +343,11 @@ insert. See §5.1 below.
 foreign key to `game_status_history` and consolidated `intel/base.py` onto the
 shared `canonical_json`.
 
-**Created:** `sports_quant/db/migrations/{b004_raw_responses,b005_sportsbook}.sql`;
+**Created:** `sports_quant/db/migrations/{b004_raw_responses,b005_sportsbook,b006_sportsbook_transition_dedup}.sql`;
 `sports_quant/db/repositories/{raw_responses,ingestion_runs,sportsbook}.py`;
 `sports_quant/ingest/{__init__,runner,odds_ingestor}.py`;
 `sports_quant/ingest/tests/{__init__,conftest,test_runner,test_odds_ingestor,test_no_secrets}.py`;
-`sports_quant/db/tests/test_sportsbook_repositories.py`;
+`sports_quant/db/tests/{test_sportsbook_repositories,test_price_snapshot_schema}.py`;
 `sports_quant/tests/test_ingest_cli.py`.
 
 **Modified:** `sports_quant/cli.py` (`ingest-odds`); `sports_quant/providers/odds_api.py`
@@ -384,7 +390,7 @@ appears in any stored column or any output.
 | 1 | Migrations are `b004`/`b005`, not `b001`/`b002` | Migration numbers are a single global sequence (§3.1); `b001` would parse to version 1 and collide with `a001`. Phase A ended at 003, so Phase B continues at 004. |
 | 2 | `game_status_history.raw_response_id` gains its FK but stays **nullable**; `raw_response_hash` stays nullable | The sketch tightened both to `NOT NULL` here. Phase A's `record_status()` creates status rows from schedule data with no owning provider response, and the official-provider ingestion that would supply one is Phase D. A column made `NOT NULL` before it has a producer is filled with an invented value — worse than an honest NULL. The FK still rejects a *dangling* pointer. |
 | 3 | `InMemory*` repositories were **not** built | They still have no consumer: the ingestor writes through the SQLite repositories against a temporary database in tests, exactly as Phase A does, and an in-memory repository cannot reproduce SQLite's constraint/trigger semantics — an unverified reimplementation gives false test confidence. Deferred until something actually needs one. |
-| 4 | `raw_responses` is **not** deduplicated on `content_hash` | Two fetches returning identical bytes are two distinct observations, each owned by its own run; collapsing them would leave the second run unable to name the response it received. `content_hash` is indexed for traceability, but idempotency is enforced where it matters — on the derived price snapshots (`UNIQUE (sb_outcome_id, content_hash)`). |
+| 4 | `raw_responses` is **not** deduplicated on `content_hash` | Two fetches returning identical bytes are two distinct observations, each owned by its own run; collapsing them would leave the second run unable to name the response it received. `content_hash` is indexed for traceability, but idempotency is enforced where it matters — on the derived price snapshots (transition-aware `UNIQUE (sb_outcome_id, observed_at, content_hash)`, migration `b006`). |
 | 5 | Added `RawExchange` + `fetch_odds_raw()` to the existing adapter | The ingestor needs the raw bytes *and* the exchange metadata before parsing, and must survive one malformed record. `get_odds()` normalizes eagerly and can raise mid-parse, so a raw fetch that normalizes per-event downstream is the required feature — added additively to the one client, never a second one. |
 | 6 | Outcome identity key is `(market, normalized_name, point_key)` with a NOT NULL `point_key` sentinel | The line is part of the identity ("Over 8.5" ≠ "Over 9.5"); a nullable point would let an h2h outcome insert twice, since SQLite treats two NULLs as distinct in a UNIQUE constraint. |
 | 7 | `implied_probability` is stored (raw, vig-inclusive) | An exact arithmetic transform of the preserved American price, stored for convenience. **No de-vigging** — fair value is a later phase. The original price is preserved exactly regardless. |

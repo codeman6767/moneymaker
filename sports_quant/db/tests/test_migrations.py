@@ -21,7 +21,7 @@ EXPECTED_MIGRATIONS = (
     (3, "a003_integrity_guards"),
     (4, "b004_raw_responses"),
     (5, "b005_sportsbook"),
-    (6, "b006_price_transition_dedup"),
+    (6, "b006_sportsbook_transition_dedup"),
 )
 
 
@@ -275,6 +275,125 @@ def test_migration_003_rebuild_preserves_existing_history_rows(tmp_path: Path) -
     assert len(rows) == 1
     assert rows[0]["status_id"] == "gst_survivor"
     assert rows[0]["content_hash"] == "hash-abc"
+
+
+def _seed_price_chain(conn: sqlite3.Connection) -> list[dict[str, object]]:
+    """Insert one ingestion run -> raw response -> event -> market -> outcome and
+    three price snapshots. Returns the snapshot rows inserted, for comparison."""
+
+    ts = "2026-07-22T18:00:00.000000Z"
+    conn.execute(
+        "INSERT INTO ingestion_runs (run_id, command, provider, operation, args_json, status, "
+        "requested_at, started_at, started_monotonic_ns, tool_version, created_at) VALUES "
+        "('run_seed', 'ingest-odds', 'the_odds_api', 'get_odds', '{}', 'started', ?, ?, 0, "
+        "'test', ?)",
+        (ts, ts, ts),
+    )
+    conn.execute(
+        "UPDATE ingestion_runs SET status = 'succeeded', completed_at = ?, duration_ns = 1 "
+        "WHERE run_id = 'run_seed'",
+        (ts,),
+    )
+    conn.execute(
+        "INSERT INTO raw_responses (raw_response_id, run_id, provider, endpoint, "
+        "request_params_json, http_status, response_headers_json, requested_at, received_at, "
+        "elapsed_ns, body, body_bytes, body_hash, content_hash, created_at) VALUES "
+        "('raw_seed', 'run_seed', 'the_odds_api', '/v4/sports/baseball_mlb/odds', '{}', 200, "
+        "'{}', ?, ?, 1, '[]', 2, 'bh', 'ch-raw', ?)",
+        (ts, ts, ts),
+    )
+    conn.execute(
+        "INSERT INTO sportsbook_events (sb_event_id, provider, provider_event_id, sport_key, "
+        "commence_time, home_team_raw, away_team_raw, raw_response_id, first_observed_at, "
+        "last_observed_at, created_at, updated_at) VALUES "
+        "('sbe_seed', 'the_odds_api', 'e1', 'baseball_mlb', ?, 'NYY', 'BOS', 'raw_seed', ?, ?, "
+        "?, ?)",
+        (ts, ts, ts, ts, ts),
+    )
+    conn.execute(
+        "INSERT INTO sportsbook_markets (sb_market_id, sb_event_id, bookmaker_key, market_key, "
+        "raw_response_id, first_observed_at, last_observed_at, created_at, updated_at) VALUES "
+        "('sbm_seed', 'sbe_seed', 'dk', 'h2h', 'raw_seed', ?, ?, ?, ?)",
+        (ts, ts, ts, ts),
+    )
+    conn.execute(
+        "INSERT INTO sportsbook_outcomes (sb_outcome_id, sb_market_id, outcome_name, "
+        "provider_outcome_name, outcome_role, point_key, created_at) VALUES "
+        "('sbo_seed', 'sbm_seed', 'nyy', 'NYY', 'home', '', ?)",
+        (ts,),
+    )
+    # Three snapshots with DISTINCT content hashes (the old b005 UNIQUE
+    # (sb_outcome_id, content_hash) permits only distinct-content rows).
+    rows: list[dict[str, object]] = []
+    for sid, price, obs, ch in [
+        ("sbp_1", -110, "2026-07-22T18:00:00.000000Z", "ch-a"),
+        ("sbp_2", -120, "2026-07-22T19:00:00.000000Z", "ch-b"),
+        ("sbp_3", -115, "2026-07-22T20:00:00.000000Z", "ch-c"),
+    ]:
+        conn.execute(
+            "INSERT INTO sportsbook_price_snapshots (snapshot_id, sb_outcome_id, price_american, "
+            "observed_at, ingested_at, raw_response_id, raw_response_hash, run_id, content_hash, "
+            "created_at) VALUES (?, 'sbo_seed', ?, ?, ?, 'raw_seed', 'ch-raw', 'run_seed', ?, ?)",
+            (sid, price, obs, ts, ch, ts),
+        )
+        rows.append(
+            {"snapshot_id": sid, "price_american": price, "observed_at": obs, "content_hash": ch}
+        )
+    return rows
+
+
+def test_migration_b006_rebuild_preserves_every_price_snapshot(tmp_path: Path) -> None:
+    """The b006 rebuild copies every snapshot verbatim -- ids, provenance, and all.
+
+    Applies 001-005, writes a full sportsbook chain with three price snapshots
+    under the old UNIQUE (sb_outcome_id, content_hash) rule, then applies b006
+    and confirms row count and row contents are unchanged.
+    """
+
+    partial_dir = tmp_path / "partial"
+    partial_dir.mkdir()
+    all_migrations = discover_migrations()
+    assert all_migrations[-1].name == "b006_sportsbook_transition_dedup"
+    for migration in all_migrations[:5]:  # 001..b005
+        (partial_dir / f"{migration.name}.sql").write_text(migration.sql, encoding="utf-8")
+
+    db_path = tmp_path / "corpus.db"
+    Database(db_path, migrations_dir=partial_dir).migrate()
+
+    database = Database(db_path)
+    with database.connection() as conn:
+        conn.execute("BEGIN")
+        expected = _seed_price_chain(conn)
+        conn.execute("COMMIT")
+        # Sanity: the old UNIQUE is still active here (pre-b006).
+        old_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'sportsbook_price_snapshots'"
+        ).fetchone()[0]
+        assert "UNIQUE (sb_outcome_id, content_hash)" in old_sql
+        assert "observed_at, content_hash" not in old_sql
+
+    # Apply b006.
+    result = database.migrate()
+    assert [m.version for m in result.applied] == [6]
+
+    with database.connection() as conn:
+        after = conn.execute(
+            "SELECT snapshot_id, sb_outcome_id, price_american, observed_at, ingested_at, "
+            "raw_response_id, raw_response_hash, run_id, content_hash "
+            "FROM sportsbook_price_snapshots ORDER BY observed_at"
+        ).fetchall()
+
+    assert len(after) == len(expected) == 3
+    for row, exp in zip(after, expected, strict=True):
+        assert row["snapshot_id"] == exp["snapshot_id"]
+        assert row["price_american"] == exp["price_american"]
+        assert row["observed_at"] == exp["observed_at"]
+        assert row["content_hash"] == exp["content_hash"]
+        # Provenance and references preserved exactly.
+        assert row["sb_outcome_id"] == "sbo_seed"
+        assert row["raw_response_id"] == "raw_seed"
+        assert row["raw_response_hash"] == "ch-raw"
+        assert row["run_id"] == "run_seed"
 
 
 def test_append_only_trigger_blocks_update_and_delete(conn: sqlite3.Connection) -> None:

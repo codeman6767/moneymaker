@@ -209,7 +209,7 @@ version 1 and collide. Applied so far:
 | 003 | `a003_integrity_guards` | league-consistency triggers, `original_start` immutability, `game_status_history` rebuild (§3.4.1) |
 | 004 | `b004_raw_responses` | ingestion_runs, raw_responses (append-only), `game_status_history` rebuilt to add the `raw_response_id` FK |
 | 005 | `b005_sportsbook` | sportsbook_events, sportsbook_markets, sportsbook_outcomes, sportsbook_price_snapshots (append-only), identity-immutability triggers |
-| 006 | `b006_price_transition_dedup` | `sportsbook_price_snapshots` rebuilt: `UNIQUE (sb_outcome_id, content_hash)` → `UNIQUE (sb_outcome_id, observed_at, content_hash)` for transition-aware dedup (§3.6.1) |
+| 006 | `b006_sportsbook_transition_dedup` | `sportsbook_price_snapshots` rebuilt: `UNIQUE (sb_outcome_id, content_hash)` → `UNIQUE (sb_outcome_id, observed_at, content_hash)` for transition-aware dedup (§3.6.1) |
 
 **Migrations are applied statement-by-statement, not via `executescript`.**
 `sqlite3.Cursor.executescript` issues an implicit `COMMIT` before running,
