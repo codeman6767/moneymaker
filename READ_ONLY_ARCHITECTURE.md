@@ -108,6 +108,16 @@ and never contacts a private fill endpoint. Order-book snapshots and trades are
 append-only historical records; a book returning to an earlier state is
 preserved (transition-aware), and re-ingesting the same trade is idempotent.
 
+Provider records are validated before storage (migration `c008`): a blank
+ticker, a non-Boolean `mutually_exclusive`, a malformed supplied timestamp, or an
+anonymous trade with no stable identity is rejected and counted, never coerced or
+silently nulled — while its raw response is still preserved. The mutable
+`kalshi_events`/`kalshi_markets` current metadata is explicitly traceable to the
+raw response that supplied it (`current_raw_response_id`), distinct from the one
+that first created the row (`first_raw_response_id`). None of this uses or
+requires a Kalshi credential; the read-only, GET-only, public-only guarantees
+above are unchanged.
+
 ## Providers check
 
 ```

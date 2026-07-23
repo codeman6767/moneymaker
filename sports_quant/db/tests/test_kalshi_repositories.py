@@ -13,6 +13,7 @@ import sqlite3
 from sports_quant.db.repositories.ingestion_runs import SqliteIngestionRunRepository
 from sports_quant.db.repositories.kalshi import (
     SqliteKalshiRepository,
+    UpsertOutcome,
     orderbook_content_hash,
     trade_content_hash,
 )
@@ -51,6 +52,21 @@ def _repo(conn: sqlite3.Connection) -> tuple[SqliteKalshiRepository, str, str, s
     return repo, run_id, raw_id, str(raw_hash)
 
 
+def _extra_raw(conn: sqlite3.Connection, run_id: str, marker: str) -> tuple[str, str]:
+    """A second raw response under the same run, to exercise current provenance."""
+
+    body = '{"m":"%s"}' % marker
+    ch = response_content_hash(
+        provider="kalshi_public", endpoint="/markets", request_params={}, body=body
+    )
+    raw = SqliteRawResponseRepository(conn).store(
+        run_id=run_id, provider="kalshi_public", endpoint="/markets", request_params_json="{}",
+        http_status=200, response_headers_json="{}", requested_at=T0, received_at=T0, elapsed_ns=1,
+        body=body, content_hash=ch,
+    )
+    return raw.raw_response_id, ch
+
+
 def _append_book(repo, run_id, raw_id, raw_hash, *, yes, no, observed_at, market="MKT-1"):
     ch = orderbook_content_hash(yes_bids=yes, no_bids=no)
     return repo.append_orderbook_snapshot(
@@ -60,41 +76,103 @@ def _append_book(repo, run_id, raw_id, raw_hash, *, yes, no, observed_at, market
 
 
 # --------------------------------------------------------------------------- #
-# Events / markets: stale-metadata protection
+# Events / markets: stale-metadata protection + first/current provenance
 # --------------------------------------------------------------------------- #
 def test_older_event_backfill_does_not_regress(conn: sqlite3.Connection) -> None:
-    repo, _run, raw_id, _h = _repo(conn)
-    repo.upsert_event(event_ticker="EV-1", raw_response_id=raw_id, observed_at=T2, title="Newest",
-                      status="closed")
-    after = repo.upsert_event(event_ticker="EV-1", raw_response_id=raw_id, observed_at=T0,
-                              title="Stale", status="open")
+    repo, run_id, raw_id, raw_hash = _repo(conn)
+    _e, o1 = repo.upsert_event(event_ticker="EV-1", raw_response_id=raw_id,
+                               raw_response_hash=raw_hash, observed_at=T2, title="Newest",
+                               status="closed")
+    assert o1 is UpsertOutcome.INSERTED
+    stale_id, stale_hash = _extra_raw(conn, run_id, "stale")
+    after, o2 = repo.upsert_event(event_ticker="EV-1", raw_response_id=stale_id,
+                                  raw_response_hash=stale_hash, observed_at=T0, title="Stale",
+                                  status="open")
+    assert o2 is UpsertOutcome.UNCHANGED
     assert after.title == "Newest"
     assert after.status == "closed"
     assert after.last_observed_at == T2
+    # Current provenance is NOT moved by a stale backfill.
+    assert after.current_raw_response_id == raw_id
+    assert after.current_raw_response_hash == raw_hash
     assert repo.count_events() == 1
 
 
-def test_newer_event_updates_and_equal_is_deterministic(conn: sqlite3.Connection) -> None:
-    repo, _run, raw_id, _h = _repo(conn)
-    repo.upsert_event(event_ticker="EV-1", raw_response_id=raw_id, observed_at=T1, title="First")
-    # Newer wins.
-    a = repo.upsert_event(event_ticker="EV-1", raw_response_id=raw_id, observed_at=T2, title="Second")
+def test_newer_event_updates_current_provenance(conn: sqlite3.Connection) -> None:
+    repo, run_id, raw_id, raw_hash = _repo(conn)
+    created, o1 = repo.upsert_event(event_ticker="EV-1", raw_response_id=raw_id,
+                                    raw_response_hash=raw_hash, observed_at=T1, title="First")
+    assert o1 is UpsertOutcome.INSERTED
+    new_id, new_hash = _extra_raw(conn, run_id, "newer")
+    a, o2 = repo.upsert_event(event_ticker="EV-1", raw_response_id=new_id,
+                              raw_response_hash=new_hash, observed_at=T2, title="Second")
+    assert o2 is UpsertOutcome.UPDATED
     assert a.title == "Second"
-    # Equal observed_at retains the earlier-recorded value.
-    b = repo.upsert_event(event_ticker="EV-1", raw_response_id=raw_id, observed_at=T2, title="Third")
+    # first_raw_response_id is immutable; current moves to the newer response.
+    assert a.first_raw_response_id == created.first_raw_response_id == raw_id
+    assert a.current_raw_response_id == new_id
+    assert a.current_raw_response_hash == new_hash
+    # Equal observed_at retains the earlier-recorded value and does not change.
+    eq_id, eq_hash = _extra_raw(conn, run_id, "equal")
+    b, o3 = repo.upsert_event(event_ticker="EV-1", raw_response_id=eq_id,
+                              raw_response_hash=eq_hash, observed_at=T2, title="Third")
+    assert o3 is UpsertOutcome.UNCHANGED
     assert b.title == "Second"
+    assert b.current_raw_response_id == new_id
 
 
 def test_older_market_backfill_does_not_regress(conn: sqlite3.Connection) -> None:
-    repo, _run, raw_id, _h = _repo(conn)
-    repo.upsert_market(market_ticker="MKT-1", raw_response_id=raw_id, observed_at=T2,
-                       status="closed", title="Newest")
-    after = repo.upsert_market(market_ticker="MKT-1", raw_response_id=raw_id, observed_at=T0,
-                               status="open", title="Stale")
+    repo, run_id, raw_id, raw_hash = _repo(conn)
+    repo.upsert_market(market_ticker="MKT-1", raw_response_id=raw_id, raw_response_hash=raw_hash,
+                       observed_at=T2, status="closed", title="Newest")
+    stale_id, stale_hash = _extra_raw(conn, run_id, "mstale")
+    after, outcome = repo.upsert_market(market_ticker="MKT-1", raw_response_id=stale_id,
+                                        raw_response_hash=stale_hash, observed_at=T0,
+                                        status="open", title="Stale")
+    assert outcome is UpsertOutcome.UNCHANGED
     assert after.title == "Newest"
     assert after.status == "closed"
     assert after.last_observed_at == T2
+    assert after.current_raw_response_id == raw_id
     assert repo.count_markets() == 1
+
+
+def test_newer_market_updates_current_provenance(conn: sqlite3.Connection) -> None:
+    repo, run_id, raw_id, raw_hash = _repo(conn)
+    repo.upsert_market(market_ticker="MKT-1", raw_response_id=raw_id, raw_response_hash=raw_hash,
+                       observed_at=T1, title="First")
+    new_id, new_hash = _extra_raw(conn, run_id, "mnew")
+    a, outcome = repo.upsert_market(market_ticker="MKT-1", raw_response_id=new_id,
+                                    raw_response_hash=new_hash, observed_at=T2, title="Second")
+    assert outcome is UpsertOutcome.UPDATED
+    assert a.title == "Second"
+    assert a.first_raw_response_id == raw_id
+    assert a.current_raw_response_id == new_id
+    assert a.current_raw_response_hash == new_hash
+
+
+def test_current_provenance_joins_to_raw_response(conn: sqlite3.Connection) -> None:
+    """The current metadata is always traceable to a real raw response."""
+
+    repo, run_id, raw_id, raw_hash = _repo(conn)
+    repo.upsert_event(event_ticker="EV-1", raw_response_id=raw_id, raw_response_hash=raw_hash,
+                      observed_at=T1, title="First")
+    new_id, new_hash = _extra_raw(conn, run_id, "join")
+    repo.upsert_event(event_ticker="EV-1", raw_response_id=new_id, raw_response_hash=new_hash,
+                      observed_at=T2, title="Second")
+    row = conn.execute(
+        "SELECT e.current_raw_response_hash, r.content_hash "
+        "FROM kalshi_events e JOIN raw_responses r "
+        "ON e.current_raw_response_id = r.raw_response_id WHERE e.event_ticker = 'EV-1'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == row[1] == new_hash
+    # No dangling current pointer anywhere.
+    dangling = conn.execute(
+        "SELECT COUNT(*) FROM kalshi_events e LEFT JOIN raw_responses r "
+        "ON e.current_raw_response_id = r.raw_response_id WHERE r.raw_response_id IS NULL"
+    ).fetchone()[0]
+    assert dangling == 0
 
 
 # --------------------------------------------------------------------------- #

@@ -23,6 +23,7 @@ from .ingestion_runs import (
 from .kalshi import (
     KalshiRepositoryProtocol,
     SqliteKalshiRepository,
+    UpsertOutcome,
     orderbook_content_hash,
     trade_content_hash,
 )
@@ -82,6 +83,7 @@ __all__ = [
     "SqliteTeamRepository",
     "TeamAliasRepositoryProtocol",
     "TeamRepositoryProtocol",
+    "UpsertOutcome",
     "body_hash",
     "orderbook_content_hash",
     "point_key",

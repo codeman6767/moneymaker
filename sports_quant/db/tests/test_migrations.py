@@ -28,6 +28,7 @@ EXPECTED_MIGRATIONS = (
     (5, "b005_sportsbook"),
     (6, "b006_sportsbook_transition_dedup"),
     (7, "c007_kalshi"),
+    (8, "c008_kalshi_metadata_integrity"),
 )
 
 
@@ -274,7 +275,7 @@ def test_migration_003_rebuild_preserves_existing_history_rows(tmp_path: Path) -
 
     # Now apply the rest: 003 (and b004, which both rebuild game_status_history).
     result = database.migrate()
-    assert [m.version for m in result.applied] == [3, 4, 5, 6, 7]
+    assert [m.version for m in result.applied] == [3, 4, 5, 6, 7, 8]
 
     with database.connection() as conn:
         rows = conn.execute(
@@ -383,7 +384,7 @@ def test_migration_b006_rebuild_preserves_every_price_snapshot(tmp_path: Path) -
     # Apply the remaining migrations (b006 rebuilds the snapshot table; c007
     # adds the Kalshi tables and touches nothing here).
     result = database.migrate()
-    assert [m.version for m in result.applied] == [6, 7]
+    assert [m.version for m in result.applied] == [6, 7, 8]
 
     with database.connection() as conn:
         after = conn.execute(
@@ -403,6 +404,100 @@ def test_migration_b006_rebuild_preserves_every_price_snapshot(tmp_path: Path) -
         assert row["raw_response_id"] == "raw_seed"
         assert row["raw_response_hash"] == "ch-raw"
         assert row["run_id"] == "run_seed"
+
+
+def _seed_kalshi_entities(conn: sqlite3.Connection) -> None:
+    """A run + raw response + one kalshi_event + one kalshi_market (pre-c008 shape)."""
+
+    ts = "2026-07-22T18:00:00.000000Z"
+    conn.execute(
+        "INSERT INTO ingestion_runs (run_id, command, provider, operation, args_json, status, "
+        "requested_at, started_at, started_monotonic_ns, tool_version, created_at) VALUES "
+        "('run_kc', 'ingest-kalshi', 'kalshi_public', 'list_markets', '{}', 'started', ?, ?, 0, "
+        "'t', ?)",
+        (ts, ts, ts),
+    )
+    conn.execute(
+        "UPDATE ingestion_runs SET status='succeeded', completed_at=?, duration_ns=1 "
+        "WHERE run_id='run_kc'",
+        (ts,),
+    )
+    conn.execute(
+        "INSERT INTO raw_responses (raw_response_id, run_id, provider, endpoint, "
+        "request_params_json, http_status, response_headers_json, requested_at, received_at, "
+        "elapsed_ns, body, body_bytes, body_hash, content_hash, created_at) VALUES "
+        "('raw_kc', 'run_kc', 'kalshi_public', '/markets', '{}', 200, '{}', ?, ?, 1, '{}', 2, "
+        "'bh', 'chr-kc', ?)",
+        (ts, ts, ts),
+    )
+    conn.execute(
+        "INSERT INTO kalshi_events (kalshi_event_id, event_ticker, title, status, raw_response_id, "
+        "first_observed_at, last_observed_at, created_at, updated_at) VALUES "
+        "('kev_kc', 'EV-KC', 'Seed Event', 'open', 'raw_kc', ?, ?, ?, ?)",
+        (ts, ts, ts, ts),
+    )
+    conn.execute(
+        "INSERT INTO kalshi_markets (kalshi_market_id, market_ticker, event_ticker, status, "
+        "raw_response_id, first_observed_at, last_observed_at, created_at, updated_at) VALUES "
+        "('kmk_kc', 'MKT-KC', 'EV-KC', 'open', 'raw_kc', ?, ?, ?, ?)",
+        (ts, ts, ts, ts),
+    )
+
+
+def test_migration_c008_preserves_rows_and_builds_provenance(tmp_path: Path) -> None:
+    """c008 preserves every Kalshi entity row and derives first/current provenance.
+
+    Applies 001-007, seeds an event + market under the old single-raw_response_id
+    shape, then applies c008 and confirms the rows survive with first == current
+    provenance and a current hash joined from raw_responses.
+    """
+
+    partial_dir = tmp_path / "partial"
+    partial_dir.mkdir()
+    all_migrations = discover_migrations()
+    assert all_migrations[6].name == "c007_kalshi"
+    assert all_migrations[7].name == "c008_kalshi_metadata_integrity"
+    for migration in all_migrations[:7]:  # 001..c007
+        (partial_dir / f"{migration.name}.sql").write_text(migration.sql, encoding="utf-8")
+
+    db_path = tmp_path / "corpus.db"
+    Database(db_path, migrations_dir=partial_dir).migrate()
+
+    database = Database(db_path)
+    with database.connection() as conn:
+        conn.execute("BEGIN")
+        _seed_kalshi_entities(conn)
+        conn.execute("COMMIT")
+        # Pre-c008: the ambiguous single column is present.
+        pre = conn.execute("SELECT sql FROM sqlite_master WHERE name = 'kalshi_events'").fetchone()[0]
+        assert "raw_response_id" in pre and "current_raw_response_id" not in pre
+
+    result = database.migrate()
+    assert [m.version for m in result.applied] == [8]
+
+    with database.connection() as conn:
+        for table, ident, ident_val in (
+            ("kalshi_events", "kalshi_event_id", "kev_kc"),
+            ("kalshi_markets", "kalshi_market_id", "kmk_kc"),
+        ):
+            row = conn.execute(
+                f"SELECT {ident}, first_raw_response_id, current_raw_response_id, "
+                f"current_raw_response_hash FROM {table}"
+            ).fetchall()
+            assert len(row) == 1, f"{table} lost rows"
+            r = row[0]
+            assert r[ident] == ident_val
+            # first and current both point at the original response.
+            assert r["first_raw_response_id"] == "raw_kc"
+            assert r["current_raw_response_id"] == "raw_kc"
+            # current hash joined from raw_responses.
+            assert r["current_raw_response_hash"] == "chr-kc"
+            # the ambiguous column is gone.
+            cols = [c[1] for c in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+            assert "raw_response_id" not in cols
+        # ingestion_runs gained records_updated.
+        run_cols = [c[1] for c in conn.execute("PRAGMA table_info(ingestion_runs)").fetchall()]
+        assert "records_updated" in run_cols
 
 
 def test_append_only_trigger_blocks_update_and_delete(conn: sqlite3.Connection) -> None:

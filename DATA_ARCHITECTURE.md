@@ -211,6 +211,7 @@ version 1 and collide. Applied so far:
 | 005 | `b005_sportsbook` | sportsbook_events, sportsbook_markets, sportsbook_outcomes, sportsbook_price_snapshots (append-only), identity-immutability triggers |
 | 006 | `b006_sportsbook_transition_dedup` | `sportsbook_price_snapshots` rebuilt: `UNIQUE (sb_outcome_id, content_hash)` → `UNIQUE (sb_outcome_id, observed_at, content_hash)` for transition-aware dedup (§3.6.1) |
 | 007 | `c007_kalshi` | kalshi_events, kalshi_markets (mutable current-state), kalshi_orderbook_snapshots + kalshi_orderbook_levels (append-only, transition-aware), kalshi_public_trades (append-only); identity-immutability triggers (§3.7) |
+| 008 | `c008_kalshi_metadata_integrity` | `kalshi_events`/`kalshi_markets` split `raw_response_id` into `first_raw_response_id` (immutable) + `current_raw_response_id`/`current_raw_response_hash`; `ingestion_runs.records_updated` added (§3.7.1) |
 
 **Migrations are applied statement-by-statement, not via `executescript`.**
 `sqlite3.Cursor.executescript` issues an implicit `COMMIT` before running,
@@ -531,10 +532,12 @@ implementation:
 
 - `ingestion_runs` statuses are `started | succeeded | partially_succeeded |
   failed` (the requirement's vocabulary), and the run carries `sport`,
-  `operation`, `requested_at`, and **five** record counters —
-  `records_received`, `records_normalized`, `records_inserted`,
-  `records_deduplicated`, `records_rejected` — because "1000 received, 0
-  inserted" and "0 received" are different incidents. A completion `CHECK`
+  `operation`, `requested_at`, and record counters — `records_received`,
+  `records_normalized`, `records_inserted`, `records_updated` (added by
+  migration `c008`, §3.7.1), `records_deduplicated`, `records_rejected` —
+  because "1000 received, 0 inserted" and "0 received" are different incidents,
+  and a metadata refresh of an existing entity (`records_updated`) is not a new
+  insert. A completion `CHECK`
   binds `completed_at` to any terminal status. It is deliberately **not**
   append-only: a run is opened `started` and closed with its counters.
   **`requests_made` counts completed HTTP round-trips.** A 4xx/5xx response is a
@@ -734,7 +737,11 @@ CREATE TABLE kalshi_events (
     series_ticker    TEXT, title TEXT, sub_title TEXT, category TEXT, status TEXT,
     mutually_exclusive INTEGER,                  -- 0/1 or NULL
     game_id          TEXT REFERENCES games(game_id),   -- NULL in Phase C
-    raw_response_id  TEXT NOT NULL REFERENCES raw_responses(raw_response_id),
+    -- Provenance (migration c008): first is the creating response (immutable);
+    -- current names the response that supplied the current mutable metadata.
+    first_raw_response_id   TEXT REFERENCES raw_responses(raw_response_id),
+    current_raw_response_id TEXT REFERENCES raw_responses(raw_response_id),
+    current_raw_response_hash TEXT,
     first_observed_at TEXT NOT NULL, last_observed_at TEXT NOT NULL,
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
@@ -749,7 +756,9 @@ CREATE TABLE kalshi_markets (
     settlement_time TEXT, result TEXT,
     rules_primary TEXT, rules_secondary TEXT, rules_hash TEXT,  -- sha256; Phase D acts on a change
     game_id          TEXT REFERENCES games(game_id),   -- NULL in Phase C
-    raw_response_id  TEXT NOT NULL REFERENCES raw_responses(raw_response_id),
+    first_raw_response_id   TEXT REFERENCES raw_responses(raw_response_id),  -- c008
+    current_raw_response_id TEXT REFERENCES raw_responses(raw_response_id),
+    current_raw_response_hash TEXT,
     first_observed_at TEXT NOT NULL, last_observed_at TEXT NOT NULL,
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
@@ -825,6 +834,38 @@ asserts this against `PRAGMA table_info` for every Kalshi table.
 `kalshi_public_trades` records the *public* trade-print feed — anonymous
 market-wide prints, not our fills, because we have none. No credential, private
 key, or request signing is used to reach any of this data.
+
+#### 3.7.1 First-vs-current metadata provenance (migration `c008`)
+
+`kalshi_events` and `kalshi_markets` are mutable current-state: a strictly-newer
+observation refreshes their title/status/timing/rules columns. `c007` carried a
+single `raw_response_id` frozen by the identity trigger, so after an update the
+current metadata still pointed at the *creating* response — the current values
+were untraceable to the response that actually supplied them. `c008` replaces it
+with an explicit model:
+
+| Column | Meaning | Mutability |
+| --- | --- | --- |
+| `first_raw_response_id` | the response that **created** the row | immutable (identity trigger) |
+| `current_raw_response_id` | the response that supplied the **current** metadata | moves only on a strictly-newer observation |
+| `current_raw_response_hash` | content hash of that current response | moves with `current_raw_response_id` |
+
+The current pointers advance only when a strictly-newer observation *becomes
+current*; a stale or equal-time backfill leaves both current state and current
+provenance untouched — the same deterministic stale-backfill rule the mutable
+metadata already obeyed. Because `kalshi_events`/`kalshi_markets` are referenced
+by child tables, `c008` rewrites them in place with `ALTER TABLE ADD COLUMN` +
+`DROP COLUMN` (SQLite ≥ 3.35) rather than a DROP+RENAME rebuild, which would trip
+a foreign-key violation on the populated corpus; every row, every inbound FK, and
+every CHECK is preserved. A migration test proves the rows survive with
+`first == current` provenance and a current hash joined from `raw_responses`.
+
+**Accurate ingestion counters.** `c008` also adds `ingestion_runs.records_updated`.
+The event/market upserts return an explicit outcome (`INSERTED` / `UPDATED` /
+`UNCHANGED`), so a metadata refresh is counted as an update, an unchanged
+backfill as a dedup, and only a genuinely new row as an insert — an update is
+never miscounted as an insert. Every valid observation still counts as
+normalized.
 
 ### 3.8 Injuries, lineups, probable pitchers, weather
 
@@ -1139,7 +1180,8 @@ sports_quant/
 ✅    b005_sportsbook.sql
 ✅    b006_sportsbook_transition_dedup.sql
 ✅    c007_kalshi.sql
-◻     d008_matching.sql ...
+✅    c008_kalshi_metadata_integrity.sql
+◻     d009_matching.sql ...
     repositories/
 ✅    __init__.py  base.py
 ✅    leagues.py           # LeagueRepository + SeasonRepository

@@ -50,6 +50,7 @@ class IngestionRunRepositoryProtocol(Protocol):
         records_received: int = 0,
         records_normalized: int = 0,
         records_inserted: int = 0,
+        records_updated: int = 0,
         records_deduplicated: int = 0,
         records_rejected: int = 0,
         error_type: Optional[str] = None,
@@ -70,7 +71,7 @@ class SqliteIngestionRunRepository(Repository):
         "run_id, command, provider, sport, operation, args_json, status, "
         "requested_at, started_at, completed_at, started_monotonic_ns, duration_ns, "
         "requests_made, records_received, records_normalized, records_inserted, "
-        "records_deduplicated, records_rejected, error_type, error_message, "
+        "records_updated, records_deduplicated, records_rejected, error_type, error_message, "
         "tool_version, created_at"
     )
 
@@ -135,6 +136,7 @@ class SqliteIngestionRunRepository(Repository):
         records_received: int = 0,
         records_normalized: int = 0,
         records_inserted: int = 0,
+        records_updated: int = 0,
         records_deduplicated: int = 0,
         records_rejected: int = 0,
         error_type: Optional[str] = None,
@@ -144,6 +146,8 @@ class SqliteIngestionRunRepository(Repository):
 
         ``status`` must be a terminal value (not ``started``); the schema's
         completion CHECK requires ``completed_at`` whenever it is.
+        ``records_updated`` counts refreshes of existing mutable entities,
+        distinct from ``records_inserted`` (new rows).
         """
 
         if status not in INGESTION_RUN_STATUSES or status == "started":
@@ -156,7 +160,8 @@ class SqliteIngestionRunRepository(Repository):
             "UPDATE ingestion_runs SET "
             "status = ?, completed_at = ?, duration_ns = ?, requests_made = ?, "
             "records_received = ?, records_normalized = ?, records_inserted = ?, "
-            "records_deduplicated = ?, records_rejected = ?, error_type = ?, error_message = ? "
+            "records_updated = ?, records_deduplicated = ?, records_rejected = ?, "
+            "error_type = ?, error_message = ? "
             "WHERE run_id = ?",
             (
                 status,
@@ -166,6 +171,7 @@ class SqliteIngestionRunRepository(Repository):
                 records_received,
                 records_normalized,
                 records_inserted,
+                records_updated,
                 records_deduplicated,
                 records_rejected,
                 error_type,
@@ -217,6 +223,7 @@ class SqliteIngestionRunRepository(Repository):
             records_received=int(row["records_received"]),
             records_normalized=int(row["records_normalized"]),
             records_inserted=int(row["records_inserted"]),
+            records_updated=int(row["records_updated"]),
             records_deduplicated=int(row["records_deduplicated"]),
             records_rejected=int(row["records_rejected"]),
             error_type=self._opt_str(row, "error_type"),

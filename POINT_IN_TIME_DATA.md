@@ -188,6 +188,7 @@ Phase A landed the temporal foundations these rules rest on. What exists today:
 | Kalshi order books append-only, transition-aware, with as-of reads | ✅ **Phase C** `c007_kalshi`: `UNIQUE (market_ticker, observed_at, content_hash)` + immediate-predecessor comparison; `KalshiRepository.orderbook_as_of()` / `latest_orderbook()` |
 | Kalshi public trades append-only + idempotent, with range reads | ✅ **Phase C** `UNIQUE (market_ticker, content_hash)`; `KalshiRepository.trades_in_range()` |
 | Kalshi event/market current metadata never regressed by a stale backfill | ✅ **Phase C** — upserts refresh only on a strictly-newer `observed_at`, equal retains earlier (deterministic) |
+| Kalshi current-metadata provenance is explicit and traceable | ✅ **Phase C** `c008` — `first_raw_response_id` (creating) vs `current_raw_response_id`/`current_raw_response_hash` (supplied the current values); current pointers move only on a strictly-newer observation |
 | Full `pit/asof.py`, `pit/dataset.py`, adversarial leak fixtures | ◻ Phase E |
 
 `GameRepository.status_as_of()` is the first working instance of the §3

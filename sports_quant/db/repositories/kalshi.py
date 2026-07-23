@@ -24,6 +24,7 @@ yields identical answers and nothing observed after the cutoff is exposed.
 
 from __future__ import annotations
 
+import enum
 import hashlib
 import sqlite3
 from typing import Any, Optional, Protocol
@@ -48,6 +49,21 @@ from ..schema import KALSHI_PRICE_COMPLEMENT, utc_now_iso
 from .base import Repository, to_db_bool
 
 Level = tuple[int, int]  # (price_cents, quantity)
+
+
+class UpsertOutcome(str, enum.Enum):
+    """The result of a mutable-entity upsert, so the ingestor counts accurately.
+
+    * ``INSERTED`` -- a new row was created.
+    * ``UPDATED``  -- an existing row's current metadata was refreshed because a
+      strictly-newer observation won.
+    * ``UNCHANGED`` -- an existing row was left untouched (older-or-equal
+      observation); the observation is a genuine no-op for current state.
+    """
+
+    INSERTED = "inserted"
+    UPDATED = "updated"
+    UNCHANGED = "unchanged"
 
 
 # --------------------------------------------------------------------------- #
@@ -108,11 +124,15 @@ def trade_content_hash(
 class KalshiRepositoryProtocol(Protocol):
     """Operations the Kalshi ingestor and the historical queries need."""
 
-    def upsert_event(self, *, event_ticker: str, raw_response_id: str, observed_at: str,
-                     **meta: object) -> KalshiEvent: ...
+    def upsert_event(
+        self, *, event_ticker: str, raw_response_id: str, raw_response_hash: str,
+        observed_at: str, **meta: object,
+    ) -> tuple[KalshiEvent, UpsertOutcome]: ...
 
-    def upsert_market(self, *, market_ticker: str, raw_response_id: str, observed_at: str,
-                      **meta: object) -> KalshiMarket: ...
+    def upsert_market(
+        self, *, market_ticker: str, raw_response_id: str, raw_response_hash: str,
+        observed_at: str, **meta: object,
+    ) -> tuple[KalshiMarket, UpsertOutcome]: ...
 
     def append_orderbook_snapshot(
         self, *, market_ticker: str, yes_bids: list[Level], no_bids: list[Level],
@@ -132,14 +152,15 @@ class SqliteKalshiRepository(Repository):
 
     _EVENT_COLUMNS = (
         "kalshi_event_id, event_ticker, series_ticker, title, sub_title, category, status, "
-        "mutually_exclusive, game_id, raw_response_id, first_observed_at, last_observed_at, "
-        "created_at, updated_at"
+        "mutually_exclusive, game_id, first_raw_response_id, current_raw_response_id, "
+        "current_raw_response_hash, first_observed_at, last_observed_at, created_at, updated_at"
     )
     _MARKET_COLUMNS = (
         "kalshi_market_id, market_ticker, event_ticker, kalshi_event_id, series_ticker, title, "
         "subtitle, yes_sub_title, no_sub_title, status, open_time, close_time, expiration_time, "
         "settlement_time, result, rules_primary, rules_secondary, rules_hash, game_id, "
-        "raw_response_id, first_observed_at, last_observed_at, created_at, updated_at"
+        "first_raw_response_id, current_raw_response_id, current_raw_response_hash, "
+        "first_observed_at, last_observed_at, created_at, updated_at"
     )
     _BOOK_COLUMNS = (
         "snapshot_id, kalshi_market_id, market_ticker, best_yes_bid, best_no_bid, "
@@ -160,6 +181,7 @@ class SqliteKalshiRepository(Repository):
         *,
         event_ticker: str,
         raw_response_id: str,
+        raw_response_hash: str,
         observed_at: str,
         series_ticker: Optional[str] = None,
         title: Optional[str] = None,
@@ -167,14 +189,20 @@ class SqliteKalshiRepository(Repository):
         category: Optional[str] = None,
         status: Optional[str] = None,
         mutually_exclusive: Optional[bool] = None,
-    ) -> KalshiEvent:
+    ) -> tuple[KalshiEvent, UpsertOutcome]:
         """Insert an event, or refresh its mutable current-state if newer.
 
-        Identity is ``event_ticker``. Mutable metadata (title, status, ...) and
-        ``last_observed_at`` are refreshed only when ``observed_at`` is strictly
-        newer than the stored value; an older backfill is preserved but never
-        regresses newer current metadata (equal ``observed_at`` retains the
-        earlier-recorded value -- deterministic under ordered replay).
+        Returns ``(event, outcome)`` so the ingestor can count inserts,
+        updates, and unchanged observations distinctly.
+
+        Identity is ``event_ticker``. Mutable metadata (title, status, ...),
+        ``last_observed_at`` **and the current-provenance pointers**
+        (``current_raw_response_id`` / ``current_raw_response_hash``) are
+        refreshed only when ``observed_at`` is strictly newer than the stored
+        value. ``first_raw_response_id`` is set once at creation and never
+        changes. An older-or-equal backfill leaves current state and current
+        provenance untouched (equal retains the earlier-recorded value --
+        deterministic under ordered replay).
         """
 
         existing = self.get_event_by_ticker(event_ticker)
@@ -185,29 +213,34 @@ class SqliteKalshiRepository(Repository):
             self._conn.execute(
                 "INSERT INTO kalshi_events "
                 "(kalshi_event_id, event_ticker, series_ticker, title, sub_title, category, "
-                " status, mutually_exclusive, game_id, raw_response_id, first_observed_at, "
+                " status, mutually_exclusive, game_id, first_raw_response_id, "
+                " current_raw_response_id, current_raw_response_hash, first_observed_at, "
                 " last_observed_at, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     kalshi_event_id, event_ticker, series_ticker, title, sub_title, category,
-                    status, me, raw_response_id, observed_at, observed_at, now, now,
+                    status, me, raw_response_id, raw_response_id, raw_response_hash,
+                    observed_at, observed_at, now, now,
                 ),
             )
             fetched = self.get_event(kalshi_event_id)
             assert fetched is not None  # noqa: S101
-            return fetched
+            return fetched, UpsertOutcome.INSERTED
 
         if observed_at > existing.last_observed_at:
             self._conn.execute(
                 "UPDATE kalshi_events SET series_ticker = ?, title = ?, sub_title = ?, "
-                "category = ?, status = ?, mutually_exclusive = ?, last_observed_at = ?, "
-                "updated_at = ? WHERE kalshi_event_id = ?",
-                (series_ticker, title, sub_title, category, status, me, observed_at, now,
-                 existing.kalshi_event_id),
+                "category = ?, status = ?, mutually_exclusive = ?, current_raw_response_id = ?, "
+                "current_raw_response_hash = ?, last_observed_at = ?, updated_at = ? "
+                "WHERE kalshi_event_id = ?",
+                (series_ticker, title, sub_title, category, status, me, raw_response_id,
+                 raw_response_hash, observed_at, now, existing.kalshi_event_id),
             )
-        refreshed = self.get_event(existing.kalshi_event_id)
-        assert refreshed is not None  # noqa: S101
-        return refreshed
+            refreshed = self.get_event(existing.kalshi_event_id)
+            assert refreshed is not None  # noqa: S101
+            return refreshed, UpsertOutcome.UPDATED
+
+        return existing, UpsertOutcome.UNCHANGED
 
     def get_event(self, kalshi_event_id: str) -> Optional[KalshiEvent]:
         row = self._fetch_one(
@@ -232,6 +265,7 @@ class SqliteKalshiRepository(Repository):
         *,
         market_ticker: str,
         raw_response_id: str,
+        raw_response_hash: str,
         observed_at: str,
         event_ticker: Optional[str] = None,
         kalshi_event_id: Optional[str] = None,
@@ -249,11 +283,12 @@ class SqliteKalshiRepository(Repository):
         rules_primary: Optional[str] = None,
         rules_secondary: Optional[str] = None,
         rules_hash: Optional[str] = None,
-    ) -> KalshiMarket:
+    ) -> tuple[KalshiMarket, UpsertOutcome]:
         """Insert a market, or refresh its mutable current-state if newer.
 
-        Same stale-backfill protection as :meth:`upsert_event`. ``game_id`` is
-        never attached in Phase C.
+        Returns ``(market, outcome)``. Same first-vs-current provenance and
+        stale-backfill protection as :meth:`upsert_event`. ``game_id`` is never
+        attached in Phase C.
         """
 
         existing = self.get_market_by_ticker(market_ticker)
@@ -265,20 +300,22 @@ class SqliteKalshiRepository(Repository):
                 "(kalshi_market_id, market_ticker, event_ticker, kalshi_event_id, series_ticker, "
                 " title, subtitle, yes_sub_title, no_sub_title, status, open_time, close_time, "
                 " expiration_time, settlement_time, result, rules_primary, rules_secondary, "
-                " rules_hash, game_id, raw_response_id, first_observed_at, last_observed_at, "
+                " rules_hash, game_id, first_raw_response_id, current_raw_response_id, "
+                " current_raw_response_hash, first_observed_at, last_observed_at, "
                 " created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, "
-                " ?, ?)",
+                " ?, ?, ?, ?)",
                 (
                     kalshi_market_id, market_ticker, event_ticker, kalshi_event_id, series_ticker,
                     title, subtitle, yes_sub_title, no_sub_title, status, open_time, close_time,
                     expiration_time, settlement_time, result, rules_primary, rules_secondary,
-                    rules_hash, raw_response_id, observed_at, observed_at, now, now,
+                    rules_hash, raw_response_id, raw_response_id, raw_response_hash,
+                    observed_at, observed_at, now, now,
                 ),
             )
             fetched = self.get_market(kalshi_market_id)
             assert fetched is not None  # noqa: S101
-            return fetched
+            return fetched, UpsertOutcome.INSERTED
 
         if observed_at > existing.last_observed_at:
             self._conn.execute(
@@ -286,19 +323,22 @@ class SqliteKalshiRepository(Repository):
                 "series_ticker = ?, title = ?, subtitle = ?, yes_sub_title = ?, no_sub_title = ?, "
                 "status = ?, open_time = ?, close_time = ?, expiration_time = ?, "
                 "settlement_time = ?, result = ?, rules_primary = ?, rules_secondary = ?, "
-                "rules_hash = ?, last_observed_at = ?, updated_at = ? WHERE kalshi_market_id = ?",
+                "rules_hash = ?, current_raw_response_id = ?, current_raw_response_hash = ?, "
+                "last_observed_at = ?, updated_at = ? WHERE kalshi_market_id = ?",
                 (
                     event_ticker if event_ticker is not None else existing.event_ticker,
                     kalshi_event_id if kalshi_event_id is not None else existing.kalshi_event_id,
                     series_ticker, title, subtitle, yes_sub_title, no_sub_title, status,
                     open_time, close_time, expiration_time, settlement_time, result,
-                    rules_primary, rules_secondary, rules_hash, observed_at, now,
-                    existing.kalshi_market_id,
+                    rules_primary, rules_secondary, rules_hash, raw_response_id,
+                    raw_response_hash, observed_at, now, existing.kalshi_market_id,
                 ),
             )
-        refreshed = self.get_market(existing.kalshi_market_id)
-        assert refreshed is not None  # noqa: S101
-        return refreshed
+            refreshed = self.get_market(existing.kalshi_market_id)
+            assert refreshed is not None  # noqa: S101
+            return refreshed, UpsertOutcome.UPDATED
+
+        return existing, UpsertOutcome.UNCHANGED
 
     def get_market(self, kalshi_market_id: str) -> Optional[KalshiMarket]:
         row = self._fetch_one(
@@ -538,7 +578,9 @@ class SqliteKalshiRepository(Repository):
         return KalshiEvent(
             kalshi_event_id=str(row["kalshi_event_id"]),
             event_ticker=str(row["event_ticker"]),
-            raw_response_id=str(row["raw_response_id"]),
+            first_raw_response_id=str(row["first_raw_response_id"]),
+            current_raw_response_id=str(row["current_raw_response_id"]),
+            current_raw_response_hash=str(row["current_raw_response_hash"]),
             first_observed_at=str(row["first_observed_at"]),
             last_observed_at=str(row["last_observed_at"]),
             created_at=str(row["created_at"]),
@@ -556,7 +598,9 @@ class SqliteKalshiRepository(Repository):
         return KalshiMarket(
             kalshi_market_id=str(row["kalshi_market_id"]),
             market_ticker=str(row["market_ticker"]),
-            raw_response_id=str(row["raw_response_id"]),
+            first_raw_response_id=str(row["first_raw_response_id"]),
+            current_raw_response_id=str(row["current_raw_response_id"]),
+            current_raw_response_hash=str(row["current_raw_response_hash"]),
             first_observed_at=str(row["first_observed_at"]),
             last_observed_at=str(row["last_observed_at"]),
             created_at=str(row["created_at"]),

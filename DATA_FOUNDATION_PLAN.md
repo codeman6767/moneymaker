@@ -14,14 +14,18 @@ stale-metadata protection, transition-aware price deduplication, and correct
 failed-request counting, and the `b006` price-snapshot uniqueness rule
 (`UNIQUE (sb_outcome_id, observed_at, content_hash)`).
 
-**Phase C is complete** (migration `c007_kalshi`, schema v7): the public,
-GET-only, unauthenticated Kalshi surface is ingested into `kalshi_events`,
-`kalshi_markets`, `kalshi_orderbook_snapshots`, `kalshi_orderbook_levels`, and
-`kalshi_public_trades`, with derived executable asks, transition-aware
-order-book history, trade idempotency, point-in-time queries, and the
-`ingest-kalshi` CLI. No Kalshi credential, private key, or signing is used
-anywhere; there is no account/balance/position/fill/order column in the schema.
-All 534 tests pass under Ruff and mypy.
+**Phase C is complete** (migrations `c007_kalshi` + `c008_kalshi_metadata_integrity`,
+schema v8): the public, GET-only, unauthenticated Kalshi surface is ingested into
+`kalshi_events`, `kalshi_markets`, `kalshi_orderbook_snapshots`,
+`kalshi_orderbook_levels`, and `kalshi_public_trades`, with derived executable
+asks, transition-aware order-book history, trade idempotency, point-in-time
+queries, and the `ingest-kalshi` CLI. The `c008` integrity repair adds explicit
+first-vs-current metadata provenance, strict event/market/trade validation,
+accurate insert/update/dedup counters (including a new `ingestion_runs.records_updated`),
+and a single validation path shared by persisted and dry-run ingestion. No
+Kalshi credential, private key, or signing is used anywhere; there is no
+account/balance/position/fill/order column in the schema. All 559 tests pass
+under Ruff and mypy.
 
 Phases D–E below remain planning; each begins only on explicit instruction.
 
@@ -29,7 +33,7 @@ Phases D–E below remain planning; each begins only on explicit instruction.
 | --- | --- | --- |
 | A | Database engine, migrations, core entities, `db-init` | ✅ Complete (schema v3) |
 | B | Raw responses, ingestion runs, sportsbook odds | ✅ Complete (schema v6, incl. `b006` integrity repair) |
-| C | Kalshi public events, markets, books, trades | ✅ Complete (schema v7) |
+| C | Kalshi public events, markets, books, trades | ✅ Complete (schema v8, incl. `c008` integrity repair) |
 | D | Official providers, canonical matching | ◻ Not started |
 | E | Point-in-time builder, quality rules, leakage tests | ◻ Not started |
 
@@ -508,6 +512,32 @@ MLB/NBA games (`game_id` / `match_decision_id`), `rules_hash`-change detection
 across an accepted match, and series/ticker sports classification. Phase C stores
 `rules_hash` but does not yet act on a change, because there is no accepted match
 to invalidate until Phase D.
+
+#### Phase C integrity repair (migration `c008`)
+
+Five correctness issues were found after the initial Phase C landing and repaired
+before Phase D. `c007` is immutable; the schema change is the additive migration
+`c008_kalshi_metadata_integrity`, the rest are repository/ingestor fixes.
+
+| # | Root cause | Fix |
+| --- | --- | --- |
+| 1 | **Current metadata was untraceable.** `kalshi_events`/`kalshi_markets` are mutable current-state, but their single `raw_response_id` was frozen by the identity trigger, so after an update it still pointed at the *creating* response, not the one that supplied the current values. | `c008` splits it into `first_raw_response_id` (immutable), `current_raw_response_id`, and `current_raw_response_hash`. The current pointers move only when a strictly-newer observation becomes current; a stale/equal backfill leaves them untouched. The ambiguous `raw_response_id` column is dropped. A query proves current metadata joins to its current raw response. |
+| 2 | **Event metadata was loosely validated.** `bool(value)` was applied to `mutually_exclusive`, so the string `"false"` became `True`; a non-string status was accepted. | `validate_event` rejects a blank ticker, a supplied non-string/blank status, and a supplied `mutually_exclusive` that is not an actual Boolean. Rejected events are counted and their raw response preserved; valid events still process. |
+| 3 | **Malformed timestamps were silently nulled.** A supplied-but-malformed `open_time`/`close_time`/… was collapsed to `None`, indistinguishable from a missing field. | `validate_market` distinguishes absent (→ `None`), supplied-and-valid (→ normalized), and supplied-but-malformed (→ reject). It also rejects a close before open and a settlement before close, and honours `expected_expiration_time` as a fallback. |
+| 4 | **Anonymous trade identity was weak.** A trade without a provider id could be persisted on a field-identity that included no timestamp, and `observed_at` (our clock) risked leaking into identity. | `validate_trade` uses the provider `trade_id` when present; otherwise it requires a valid provider timestamp, at least one valid price, and a positive count, and derives identity from provider fields only. A trade with neither an id nor enough valid fields is rejected. `observed_at` is never part of identity. |
+| 5 | **Updates were counted as inserts.** Every valid event/market incremented `records_inserted` even when the row already existed. | The event/market upserts return an explicit `UpsertOutcome` (`INSERTED` / `UPDATED` / `UNCHANGED`); the ingestor counts a refresh as `records_updated` (new column via `c008`), a no-op backfill as `records_deduplicated`, and only a genuinely new row as `records_inserted`. Every valid observation still counts as normalized. |
+
+Additionally, the **dry-run path now calls the same `validate_event` /
+`validate_market` / `validate_trade` / `validate_orderbook` helpers** as
+persisted ingestion, so it reports identical rejections while still persisting
+nothing — there is one validation rule set, not two.
+
+**Counter semantics (precise).** A strictly-newer observation of an existing
+entity is an `UPDATED` (it advances `last_observed_at` and the current-provenance
+pointers), counted in `records_updated`. An older-or-equal observation is
+`UNCHANGED`, counted in `records_deduplicated`. A routine re-poll therefore
+counts as an update, because it genuinely moves current provenance forward — it
+is never miscounted as a new insert.
 
 ---
 

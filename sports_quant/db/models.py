@@ -150,9 +150,10 @@ class GameStatusRecord:
 class IngestionRun:
     """One invocation of an ingest command, from request to terminal status.
 
-    ``records_*`` are five separate counters on purpose: "1000 received, 0
-    inserted" and "0 received" are different incidents and must stay
-    distinguishable after the fact.
+    ``records_*`` are separate counters on purpose: "1000 received, 0 inserted"
+    and "0 received" are different incidents and must stay distinguishable after
+    the fact. ``records_updated`` (migration c008) counts a metadata refresh of
+    an existing mutable entity, distinct from a genuine ``records_inserted``.
     """
 
     run_id: str
@@ -173,6 +174,7 @@ class IngestionRun:
     records_received: int = 0
     records_normalized: int = 0
     records_inserted: int = 0
+    records_updated: int = 0
     records_deduplicated: int = 0
     records_rejected: int = 0
     error_type: Optional[str] = None
@@ -286,11 +288,19 @@ class SportsbookPriceSnapshot:
 @dataclass(frozen=True)
 class KalshiEvent:
     """Public Kalshi event. ``event_ticker`` is the stable provider identity;
-    ``game_id`` (canonical, Phase D) stays NULL in Phase C."""
+    ``game_id`` (canonical, Phase D) stays NULL in Phase C.
+
+    Provenance is explicit (migration c008): ``first_raw_response_id`` is the
+    response that created the row (immutable); ``current_raw_response_id`` /
+    ``current_raw_response_hash`` name the response that supplied the *current*
+    mutable metadata and move only when a strictly-newer observation wins.
+    """
 
     kalshi_event_id: str
     event_ticker: str
-    raw_response_id: str
+    first_raw_response_id: str
+    current_raw_response_id: str
+    current_raw_response_hash: str
     first_observed_at: str
     last_observed_at: str
     created_at: str
@@ -306,11 +316,19 @@ class KalshiEvent:
 
 @dataclass(frozen=True)
 class KalshiMarket:
-    """Public Kalshi market. ``market_ticker`` is the stable provider identity."""
+    """Public Kalshi market. ``market_ticker`` is the stable provider identity.
+
+    Provenance is explicit (migration c008), mirroring :class:`KalshiEvent`:
+    ``first_raw_response_id`` created the row; ``current_raw_response_id`` /
+    ``current_raw_response_hash`` name the response that supplied the current
+    mutable metadata.
+    """
 
     kalshi_market_id: str
     market_ticker: str
-    raw_response_id: str
+    first_raw_response_id: str
+    current_raw_response_id: str
+    current_raw_response_hash: str
     first_observed_at: str
     last_observed_at: str
     created_at: str

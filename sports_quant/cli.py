@@ -427,8 +427,12 @@ def _report_kalshi(result: KalshiIngestResult, out: Printer) -> None:
     if result.events_seen == 0 and result.markets_seen == 0:
         out("  0 matching events/markets (not a failure)")
     out(
-        f"  events={result.events_seen} (rejected {result.events_rejected}) "
-        f"markets={result.markets_seen} (rejected {result.markets_rejected})"
+        f"  events={result.events_seen} "
+        f"(new {result.events_inserted}, updated {result.events_updated}, "
+        f"rejected {result.events_rejected}) "
+        f"markets={result.markets_seen} "
+        f"(new {result.markets_inserted}, updated {result.markets_updated}, "
+        f"rejected {result.markets_rejected})"
     )
     out(
         f"  order books: {result.orderbook_snapshots_inserted} new, "

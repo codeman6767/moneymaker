@@ -32,6 +32,7 @@ from ..db.models import RawResponse
 from ..db.repositories.ingestion_runs import SqliteIngestionRunRepository
 from ..db.repositories.kalshi import (
     SqliteKalshiRepository,
+    UpsertOutcome,
     orderbook_content_hash,
     trade_content_hash,
 )
@@ -98,6 +99,262 @@ def _valid_price(value: Any) -> bool:
     )
 
 
+# Sentinel distinguishing "field supplied but malformed" from "field absent".
+_INVALID_TIME = object()
+
+
+def _validated_time(value: Any) -> Any:
+    """Classify a supplied timestamp.
+
+    Returns the normalized ISO string when supplied-and-valid, ``None`` when the
+    field is absent or blank (an allowed missing value), or :data:`_INVALID_TIME`
+    when it is supplied but malformed -- so a malformed timestamp is never
+    silently collapsed into an indistinguishable missing value.
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    normalized = normalize_provider_time(value)
+    return _INVALID_TIME if normalized is None else normalized
+
+
+# --------------------------------------------------------------------------- #
+# Validation + normalization (shared by the persisted and dry-run paths)
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class _NormEvent:
+    event_ticker: str
+    series_ticker: Optional[str]
+    title: Optional[str]
+    sub_title: Optional[str]
+    category: Optional[str]
+    status: Optional[str]
+    mutually_exclusive: Optional[bool]
+
+
+@dataclass(frozen=True)
+class _NormMarket:
+    market_ticker: str
+    event_ticker: Optional[str]
+    series_ticker: Optional[str]
+    title: Optional[str]
+    subtitle: Optional[str]
+    yes_sub_title: Optional[str]
+    no_sub_title: Optional[str]
+    status: Optional[str]
+    open_time: Optional[str]
+    close_time: Optional[str]
+    expiration_time: Optional[str]
+    settlement_time: Optional[str]
+    result: Optional[str]
+    rules_primary: Optional[str]
+    rules_secondary: Optional[str]
+    rules_hash: Optional[str]
+
+
+@dataclass(frozen=True)
+class _NormTrade:
+    market_ticker: str
+    provider_trade_id: Optional[str]
+    taker_side: Optional[str]
+    yes_price: Optional[int]
+    no_price: Optional[int]
+    count: int
+    trade_time: Optional[str]
+    content_hash: str
+
+
+def validate_event(event: dict[str, Any]) -> tuple[Optional[_NormEvent], Optional[str]]:
+    """Validate and normalize one raw Kalshi event.
+
+    Rejects a missing/blank event ticker; a supplied ``status`` that is not a
+    non-blank string; and a supplied ``mutually_exclusive`` that is not an actual
+    Boolean (never ``bool(value)`` on an arbitrary string/number -- ``"false"``
+    must not become ``True``).
+    """
+
+    ticker = str(event.get("event_ticker") or "").strip()
+    if not ticker:
+        return None, "event missing event_ticker"
+
+    if "status" in event and event["status"] is not None:
+        status_val = event["status"]
+        if not isinstance(status_val, str) or not status_val.strip():
+            return None, "event status supplied but not a non-blank string"
+        status: Optional[str] = status_val.strip()
+    else:
+        status = None
+
+    if "mutually_exclusive" in event and event["mutually_exclusive"] is not None:
+        me_val = event["mutually_exclusive"]
+        if not isinstance(me_val, bool):
+            return None, f"event mutually_exclusive supplied but not a Boolean: {me_val!r}"
+        mutually_exclusive: Optional[bool] = me_val
+    else:
+        mutually_exclusive = None
+
+    return _NormEvent(
+        event_ticker=ticker,
+        series_ticker=_opt_str(event.get("series_ticker")),
+        title=_opt_str(event.get("title")),
+        sub_title=_opt_str(event.get("sub_title") or event.get("subtitle")),
+        category=_opt_str(event.get("category")),
+        status=status,
+        mutually_exclusive=mutually_exclusive,
+    ), None
+
+
+def validate_market(market: dict[str, Any]) -> tuple[Optional[_NormMarket], Optional[str]]:
+    """Validate and normalize one raw Kalshi market.
+
+    Rejects a missing/blank ticker; a supplied ``status`` that is not a non-blank
+    string; a supplied-but-malformed timestamp on any of ``open_time``,
+    ``close_time``, ``expiration_time``/``expected_expiration_time``,
+    ``settlement_time``; a close before open; and a settlement before close. An
+    absent timestamp is stored as ``None``; only a supplied-and-invalid one is a
+    rejection, so a malformed time is never indistinguishable from a missing one.
+    """
+
+    ticker = str(market.get("ticker") or market.get("market_ticker") or "").strip()
+    if not ticker:
+        return None, "market missing ticker"
+
+    if "status" in market and market["status"] is not None:
+        status_val = market["status"]
+        if not isinstance(status_val, str) or not status_val.strip():
+            return None, "market status supplied but not a non-blank string"
+        status: Optional[str] = status_val.strip()
+    else:
+        status = None
+
+    open_time = _validated_time(market.get("open_time"))
+    if open_time is _INVALID_TIME:
+        return None, "market open_time supplied but malformed"
+    close_time = _validated_time(market.get("close_time"))
+    if close_time is _INVALID_TIME:
+        return None, "market close_time supplied but malformed"
+    # expiration_time preferred, else expected_expiration_time; both validated.
+    expiration_time = _validated_time(market.get("expiration_time"))
+    if expiration_time is _INVALID_TIME:
+        return None, "market expiration_time supplied but malformed"
+    if expiration_time is None:
+        expiration_time = _validated_time(market.get("expected_expiration_time"))
+        if expiration_time is _INVALID_TIME:
+            return None, "market expected_expiration_time supplied but malformed"
+    settlement_time = _validated_time(market.get("settlement_time"))
+    if settlement_time is _INVALID_TIME:
+        return None, "market settlement_time supplied but malformed"
+
+    # Cross-field ordering (ISO strings sort chronologically).
+    if open_time is not None and close_time is not None and close_time < open_time:
+        return None, "market close_time is before open_time"
+    if close_time is not None and settlement_time is not None and settlement_time < close_time:
+        return None, "market settlement_time is before close_time"
+
+    rules_primary = _opt_str(market.get("rules_primary"))
+    rules_secondary = _opt_str(market.get("rules_secondary"))
+    return _NormMarket(
+        market_ticker=ticker,
+        event_ticker=_opt_str(market.get("event_ticker")),
+        series_ticker=_opt_str(market.get("series_ticker")),
+        title=_opt_str(market.get("title")),
+        subtitle=_opt_str(market.get("subtitle") or market.get("sub_title")),
+        yes_sub_title=_opt_str(market.get("yes_sub_title")),
+        no_sub_title=_opt_str(market.get("no_sub_title")),
+        status=status,
+        open_time=open_time,
+        close_time=close_time,
+        expiration_time=expiration_time,
+        settlement_time=settlement_time,
+        result=_opt_str(market.get("result")),
+        rules_primary=rules_primary,
+        rules_secondary=rules_secondary,
+        rules_hash=_rules_hash(rules_primary, rules_secondary),
+    ), None
+
+
+def validate_trade(
+    trade: dict[str, Any], default_ticker: str
+) -> tuple[Optional[_NormTrade], Optional[str]]:
+    """Validate and normalize one raw public trade, with a strengthened identity.
+
+    A present ``trade_id`` is the strongest provider identity. When it is absent,
+    a stable identity is derived only from provider-supplied fields, so the trade
+    must carry a valid provider timestamp, at least one valid price, and a
+    positive count. ``observed_at`` (our local clock) is never used as a
+    substitute provider identity. A trade with neither a provider id nor enough
+    valid provider fields is rejected.
+    """
+
+    market_ticker = str(trade.get("ticker") or default_ticker or "").strip()
+    if not market_ticker:
+        return None, "trade missing market ticker"
+
+    yes_price = trade.get("yes_price")
+    no_price = trade.get("no_price")
+    if yes_price is not None and not _valid_price(yes_price):
+        return None, f"trade with invalid yes_price {yes_price!r}"
+    if no_price is not None and not _valid_price(no_price):
+        return None, f"trade with invalid no_price {no_price!r}"
+    if not (_valid_price(yes_price) or _valid_price(no_price)):
+        return None, "trade has no valid price representation"
+
+    count = trade.get("count")
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return None, f"trade with invalid count {count!r}"
+
+    taker_side = _opt_str(trade.get("taker_side"))
+    if taker_side is not None and taker_side not in ("yes", "no"):
+        taker_side = None
+
+    trade_time_val = _validated_time(trade.get("created_time") or trade.get("trade_time"))
+    if trade_time_val is _INVALID_TIME:
+        return None, "trade timestamp supplied but malformed"
+    trade_time: Optional[str] = trade_time_val
+
+    provider_trade_id = _opt_str(trade.get("trade_id"))
+    if not provider_trade_id and trade_time is None:
+        return None, "anonymous trade has no provider id and no valid timestamp for identity"
+
+    content_hash = trade_content_hash(
+        provider_trade_id=provider_trade_id,
+        market_ticker=market_ticker,
+        trade_time=trade_time,
+        yes_price=yes_price,
+        no_price=no_price,
+        count=count,
+        taker_side=taker_side,
+    )
+    return _NormTrade(
+        market_ticker=market_ticker,
+        provider_trade_id=provider_trade_id,
+        taker_side=taker_side,
+        yes_price=yes_price if yes_price is not None else None,
+        no_price=no_price if no_price is not None else None,
+        count=count,
+        trade_time=trade_time,
+        content_hash=content_hash,
+    ), None
+
+
+def validate_orderbook(
+    body: dict[str, Any], market_ticker: str
+) -> tuple[Optional[KalshiOrderBook], Optional[str]]:
+    """Validate and parse one raw order book, returning ``(book, reason)``."""
+
+    try:
+        book = KalshiOrderBook.from_raw(market_ticker, body)
+    except (TypeError, ValueError):
+        return None, f"order book for {market_ticker} could not be parsed"
+    if not _valid_ladder(book.yes_bids) or not _valid_ladder(book.no_bids):
+        return None, f"order book for {market_ticker} has an invalid level"
+    if _has_duplicate_prices(book.yes_bids) or _has_duplicate_prices(book.no_bids):
+        return None, f"order book for {market_ticker} has duplicate price levels"
+    return book, None
+
+
 # --------------------------------------------------------------------------- #
 # Result
 # --------------------------------------------------------------------------- #
@@ -110,8 +367,12 @@ class KalshiIngestResult:
     run_id: Optional[str] = None
     requests_made: int = 0
     events_seen: int = 0
+    events_inserted: int = 0
+    events_updated: int = 0
     events_rejected: int = 0
     markets_seen: int = 0
+    markets_inserted: int = 0
+    markets_updated: int = 0
     markets_rejected: int = 0
     orderbook_snapshots_inserted: int = 0
     orderbook_snapshots_duplicate: int = 0
@@ -124,6 +385,7 @@ class KalshiIngestResult:
     records_received: int = 0
     records_normalized: int = 0
     records_inserted: int = 0
+    records_updated: int = 0
     records_deduplicated: int = 0
     records_rejected: int = 0
     rejections: list[str] = field(default_factory=list)
@@ -225,93 +487,102 @@ def _store_raw(ctx: _Ctx, exchange: RawExchange) -> RawResponse:
     )
 
 
+def _record_upsert(ctx: _Ctx, outcome: UpsertOutcome, *, is_event: bool) -> None:
+    """Translate an upsert outcome into accurate run counters.
+
+    A refresh of an existing entity is ``records_updated``, never a new insert;
+    an older-or-equal observation is a genuine no-op counted as deduplicated.
+    Every valid observation is normalized regardless.
+    """
+
+    ctx.result.records_normalized += 1
+    if outcome is UpsertOutcome.INSERTED:
+        ctx.result.records_inserted += 1
+        if is_event:
+            ctx.result.events_inserted += 1
+        else:
+            ctx.result.markets_inserted += 1
+    elif outcome is UpsertOutcome.UPDATED:
+        ctx.result.records_updated += 1
+        if is_event:
+            ctx.result.events_updated += 1
+        else:
+            ctx.result.markets_updated += 1
+    else:  # UNCHANGED
+        ctx.result.records_deduplicated += 1
+
+
 def _ingest_events(ctx: _Ctx, page_items: list[dict[str, Any]], raw: RawResponse) -> None:
     for event in page_items:
         ctx.result.records_received += 1
-        ticker = str(event.get("event_ticker") or "").strip()
-        if not ticker:
+        norm, reason = validate_event(event)
+        if norm is None:
             ctx.result.records_rejected += 1
             ctx.result.events_rejected += 1
-            ctx.result.note("event missing event_ticker")
+            ctx.result.note(reason or "invalid event")
             continue
-        me = event.get("mutually_exclusive")
-        ctx.kalshi.upsert_event(
-            event_ticker=ticker,
+        _entity, outcome = ctx.kalshi.upsert_event(
+            event_ticker=norm.event_ticker,
             raw_response_id=raw.raw_response_id,
+            raw_response_hash=raw.content_hash,
             observed_at=raw.received_at,
-            series_ticker=_opt_str(event.get("series_ticker")),
-            title=_opt_str(event.get("title")),
-            sub_title=_opt_str(event.get("sub_title") or event.get("subtitle")),
-            category=_opt_str(event.get("category")),
-            status=_opt_str(event.get("status")),
-            mutually_exclusive=None if me is None else bool(me),
+            series_ticker=norm.series_ticker,
+            title=norm.title,
+            sub_title=norm.sub_title,
+            category=norm.category,
+            status=norm.status,
+            mutually_exclusive=norm.mutually_exclusive,
         )
         ctx.result.events_seen += 1
-        ctx.result.records_normalized += 1
-        ctx.result.records_inserted += 1
+        _record_upsert(ctx, outcome, is_event=True)
 
 
 def _ingest_markets(ctx: _Ctx, page_items: list[dict[str, Any]], raw: RawResponse) -> None:
     for market in page_items:
         ctx.result.records_received += 1
-        ticker = str(market.get("ticker") or market.get("market_ticker") or "").strip()
-        if not ticker:
+        norm, reason = validate_market(market)
+        if norm is None:
             ctx.result.records_rejected += 1
             ctx.result.markets_rejected += 1
-            ctx.result.note("market missing ticker")
+            ctx.result.note(reason or "invalid market")
             continue
-        event_ticker = _opt_str(market.get("event_ticker"))
         kalshi_event_id = None
-        if event_ticker:
-            owning = ctx.kalshi.get_event_by_ticker(event_ticker)
+        if norm.event_ticker:
+            owning = ctx.kalshi.get_event_by_ticker(norm.event_ticker)
             kalshi_event_id = owning.kalshi_event_id if owning else None
-        rules_primary = _opt_str(market.get("rules_primary"))
-        ctx.kalshi.upsert_market(
-            market_ticker=ticker,
+        _entity, outcome = ctx.kalshi.upsert_market(
+            market_ticker=norm.market_ticker,
             raw_response_id=raw.raw_response_id,
+            raw_response_hash=raw.content_hash,
             observed_at=raw.received_at,
-            event_ticker=event_ticker,
+            event_ticker=norm.event_ticker,
             kalshi_event_id=kalshi_event_id,
-            series_ticker=_opt_str(market.get("series_ticker")),
-            title=_opt_str(market.get("title")),
-            subtitle=_opt_str(market.get("subtitle") or market.get("sub_title")),
-            yes_sub_title=_opt_str(market.get("yes_sub_title")),
-            no_sub_title=_opt_str(market.get("no_sub_title")),
-            status=_opt_str(market.get("status")),
-            open_time=normalize_provider_time(market.get("open_time")),
-            close_time=normalize_provider_time(market.get("close_time")),
-            expiration_time=normalize_provider_time(
-                market.get("expiration_time") or market.get("expected_expiration_time")
-            ),
-            settlement_time=normalize_provider_time(market.get("settlement_time")),
-            result=_opt_str(market.get("result")),
-            rules_primary=rules_primary,
-            rules_secondary=_opt_str(market.get("rules_secondary")),
-            rules_hash=_rules_hash(rules_primary, _opt_str(market.get("rules_secondary"))),
+            series_ticker=norm.series_ticker,
+            title=norm.title,
+            subtitle=norm.subtitle,
+            yes_sub_title=norm.yes_sub_title,
+            no_sub_title=norm.no_sub_title,
+            status=norm.status,
+            open_time=norm.open_time,
+            close_time=norm.close_time,
+            expiration_time=norm.expiration_time,
+            settlement_time=norm.settlement_time,
+            result=norm.result,
+            rules_primary=norm.rules_primary,
+            rules_secondary=norm.rules_secondary,
+            rules_hash=norm.rules_hash,
         )
         ctx.result.markets_seen += 1
-        ctx.result.records_normalized += 1
-        ctx.result.records_inserted += 1
+        _record_upsert(ctx, outcome, is_event=False)
 
 
 def _ingest_orderbook(ctx: _Ctx, market_ticker: str, body: dict[str, Any], raw: RawResponse) -> None:
     ctx.result.records_received += 1
-    try:
-        book = KalshiOrderBook.from_raw(market_ticker, body)
-    except (TypeError, ValueError):
+    book, reason = validate_orderbook(body, market_ticker)
+    if book is None:
         ctx.result.records_rejected += 1
         ctx.result.orderbooks_rejected += 1
-        ctx.result.note(f"order book for {market_ticker} could not be parsed")
-        return
-    if not _valid_ladder(book.yes_bids) or not _valid_ladder(book.no_bids):
-        ctx.result.records_rejected += 1
-        ctx.result.orderbooks_rejected += 1
-        ctx.result.note(f"order book for {market_ticker} has an invalid level")
-        return
-    if _has_duplicate_prices(book.yes_bids) or _has_duplicate_prices(book.no_bids):
-        ctx.result.records_rejected += 1
-        ctx.result.orderbooks_rejected += 1
-        ctx.result.note(f"order book for {market_ticker} has duplicate price levels")
+        ctx.result.note(reason or f"invalid order book for {market_ticker}")
         return
 
     content_hash = orderbook_content_hash(yes_bids=book.yes_bids, no_bids=book.no_bids)
@@ -341,60 +612,27 @@ def _ingest_orderbook(ctx: _Ctx, market_ticker: str, body: dict[str, Any], raw: 
 def _ingest_trades(ctx: _Ctx, default_ticker: str, page_items: list[dict[str, Any]], raw: RawResponse) -> None:
     for trade in page_items:
         ctx.result.records_received += 1
-        market_ticker = str(trade.get("ticker") or default_ticker or "").strip()
-        if not market_ticker:
+        norm, reason = validate_trade(trade, default_ticker)
+        if norm is None:
             ctx.result.records_rejected += 1
             ctx.result.trades_rejected += 1
-            ctx.result.note("trade missing market ticker")
+            ctx.result.note(reason or "invalid trade")
             continue
-        yes_price = trade.get("yes_price")
-        no_price = trade.get("no_price")
-        if yes_price is not None and not _valid_price(yes_price):
-            ctx.result.records_rejected += 1
-            ctx.result.trades_rejected += 1
-            ctx.result.note(f"trade with invalid yes_price {yes_price!r}")
-            continue
-        if no_price is not None and not _valid_price(no_price):
-            ctx.result.records_rejected += 1
-            ctx.result.trades_rejected += 1
-            ctx.result.note(f"trade with invalid no_price {no_price!r}")
-            continue
-        count = trade.get("count")
-        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
-            ctx.result.records_rejected += 1
-            ctx.result.trades_rejected += 1
-            ctx.result.note(f"trade with invalid count {count!r}")
-            continue
-
-        taker_side = _opt_str(trade.get("taker_side"))
-        if taker_side is not None and taker_side not in ("yes", "no"):
-            taker_side = None
-        provider_trade_id = _opt_str(trade.get("trade_id"))
-        trade_time = normalize_provider_time(trade.get("created_time") or trade.get("trade_time"))
-        content_hash = trade_content_hash(
-            provider_trade_id=provider_trade_id,
-            market_ticker=market_ticker,
-            trade_time=trade_time,
-            yes_price=yes_price,
-            no_price=no_price,
-            count=count,
-            taker_side=taker_side,
-        )
-        market = ctx.kalshi.get_market_by_ticker(market_ticker)
+        market = ctx.kalshi.get_market_by_ticker(norm.market_ticker)
         _trade, inserted = ctx.kalshi.append_trade(
-            market_ticker=market_ticker,
-            count=count,
+            market_ticker=norm.market_ticker,
+            count=norm.count,
             observed_at=raw.received_at,
             run_id=ctx.run_id,
             raw_response_id=raw.raw_response_id,
-            content_hash=content_hash,
-            provider_trade_id=provider_trade_id,
+            content_hash=norm.content_hash,
+            provider_trade_id=norm.provider_trade_id,
             kalshi_market_id=market.kalshi_market_id if market else None,
-            taker_side=taker_side,
-            yes_price=yes_price if yes_price is not None else None,
-            no_price=no_price if no_price is not None else None,
-            trade_time=trade_time,
-            provider_timestamp=trade_time,
+            taker_side=norm.taker_side,
+            yes_price=norm.yes_price,
+            no_price=norm.no_price,
+            trade_time=norm.trade_time,
+            provider_timestamp=norm.trade_time,
         )
         ctx.result.records_normalized += 1
         if inserted:
@@ -465,6 +703,7 @@ async def _ingest_persisting(
                 records_received=result.records_received,
                 records_normalized=result.records_normalized,
                 records_inserted=result.records_inserted,
+                records_updated=result.records_updated,
                 records_deduplicated=result.records_deduplicated,
                 records_rejected=result.records_rejected,
             )
@@ -567,6 +806,7 @@ def _finish_failed(
             records_received=result.records_received,
             records_normalized=result.records_normalized,
             records_inserted=result.records_inserted,
+            records_updated=result.records_updated,
             records_deduplicated=result.records_deduplicated,
             records_rejected=result.records_rejected,
             error_type=error_type,
@@ -594,12 +834,16 @@ async def _ingest_dry_run(
             result.requests_made += len(events_page.exchanges)
             for event in events_page.items:
                 result.records_received += 1
-                if str(event.get("event_ticker") or "").strip():
-                    result.events_seen += 1
-                    result.records_normalized += 1
-                else:
+                norm_event, _reason = validate_event(event)
+                if norm_event is None:
                     result.events_rejected += 1
                     result.records_rejected += 1
+                else:
+                    # Dry-run cannot know insert/update without writing; it counts
+                    # a valid observation as normalized, which is exactly the
+                    # "records_normalized still includes valid observations" rule.
+                    result.events_seen += 1
+                    result.records_normalized += 1
 
         markets_page = await client.fetch_markets(
             status=None if market_ticker else status, event_ticker=event_ticker,
@@ -609,37 +853,47 @@ async def _ingest_dry_run(
         market_tickers = []
         for market in markets_page.items:
             result.records_received += 1
-            ticker = str(market.get("ticker") or market.get("market_ticker") or "").strip()
-            if ticker:
-                result.markets_seen += 1
-                result.records_normalized += 1
-                market_tickers.append(ticker)
-            else:
+            norm_market, _reason = validate_market(market)
+            if norm_market is None:
                 result.markets_rejected += 1
                 result.records_rejected += 1
+            else:
+                result.markets_seen += 1
+                result.records_normalized += 1
+                market_tickers.append(norm_market.market_ticker)
         market_tickers = market_tickers[:limit]
 
         if include_orderbooks and market_tickers:
             for ticker in market_tickers:
-                _book, _exchange = await client.fetch_market_orderbook(ticker)
+                body, _exchange = await client.fetch_market_orderbook_raw(ticker)
                 result.requests_made += 1
                 result.records_received += 1
-                result.records_normalized += 1
+                book, _reason = validate_orderbook(body, ticker)
+                if book is None:
+                    result.orderbooks_rejected += 1
+                    result.records_rejected += 1
+                else:
+                    result.records_normalized += 1
         if include_trades and market_tickers:
             for ticker in market_tickers:
                 trades_page = await client.fetch_trades(
                     ticker=ticker, limit=limit, max_pages=max_pages
                 )
                 result.requests_made += len(trades_page.exchanges)
-                result.records_received += len(trades_page.items)
-                result.records_normalized += len(trades_page.items)
+                for trade in trades_page.items:
+                    result.records_received += 1
+                    norm_trade, _reason = validate_trade(trade, ticker)
+                    if norm_trade is None:
+                        result.trades_rejected += 1
+                        result.records_rejected += 1
+                    else:
+                        result.records_normalized += 1
     except Exception as exc:  # noqa: BLE001
         result.status = "failed"
         result.error_type, result.error_message = sanitize_error(exc)
         return result
 
-    if result.records_rejected:
-        result.status = "partially_succeeded"
+    result.status = _terminal_status(result)
     return result
 
 
