@@ -27,27 +27,35 @@ Kalshi credential, private key, or signing is used anywhere; there is no
 account/balance/position/fill/order column in the schema. All 559 tests pass
 under Ruff and mypy.
 
-**Phase D provider selection and implementation design are complete;
-implementation is not started.** The providers are chosen (MLB StatsAPI;
-**BALLDONTLIE at the GOAT tier** for NBA — the free tier does *not* supply box
-scores, player stats, injuries, plays, or lineups; NWS primary + Open-Meteo
-secondary/historical-forecast for weather; hoopR as an offline-only NBA history
-supplement; Chadwick crosswalk; the official NBA injury report as an optional
-cross-check; SportsDataIO Discovery Lab as an optional delayed comparison;
-Sportradar/SportsDataIO commercial/Stats Perform as the professional path). The
-full schema/migration/CLI/staging plan, a typed provider-capability system, a
-`provider-audit` command, a corrected dry-run contract (dry-run persists
-absolutely nothing), and the venue-aware local-date hierarchy are written — see
-`PHASE_D_PROVIDER_DECISIONS.md` and `PHASE_D_IMPLEMENTATION_PLAN.md`. No Phase D
-provider client, migration, or repository has been written, and no live provider
-call was made. Phase E remains planning.
+**Phase D provider selection and implementation design are complete, and D1
+provider infrastructure is implemented (schema v10).** The providers are chosen
+(MLB StatsAPI; **BALLDONTLIE at the GOAT tier** for NBA — the free tier does
+*not* supply box scores, player stats, injuries, plays, or lineups; NWS primary
++ Open-Meteo secondary/historical-forecast for weather; hoopR as an offline-only
+NBA history supplement; Chadwick crosswalk; the official NBA injury report as an
+optional cross-check; SportsDataIO Discovery Lab as an optional delayed
+comparison; Sportradar/SportsDataIO commercial/Stats Perform as the professional
+path). D1 has shipped the GET-only provider clients (MLB StatsAPI, BALLDONTLIE,
+NWS, Open-Meteo), a typed provider-capability system, the `provider-audit` and
+`ingest-venues` commands, and a corrected dry-run contract (dry-run persists
+absolutely nothing) — see `PHASE_D_PROVIDER_DECISIONS.md` and
+`PHASE_D_IMPLEMENTATION_PLAN.md`. A D1 **integrity repair** (migration
+`d010_provider_audit_integrity`) then hardened the audit: a static capability
+*declaration* is never persisted as an externally *observed* result; the audit
+runs one minimal approved GET **per capability group** and records only what a
+probe verified (with the probe, endpoint, HTTP status, error classification, and
+raw-response evidence), leaving unprobed capabilities declared-only; provider
+403s are only ever classified as tier-restricted with explicit plan evidence;
+and the BALLDONTLIE allow-list is tightened to explicit documented endpoints.
+D2–D5 are not started. Every D1 test uses mocked transports; no live provider
+call was made for this work. Phase E remains planning.
 
 | Phase | Scope | Status |
 | --- | --- | --- |
 | A | Database engine, migrations, core entities, `db-init` | ✅ Complete (schema v3) |
 | B | Raw responses, ingestion runs, sportsbook odds | ✅ Complete (schema v6, incl. `b006` integrity repair) |
 | C | Kalshi public events, markets, books, trades | ✅ Complete (schema v8, incl. `c008` integrity repair) |
-| D | Official providers, weather, canonical matching | ◧ **D1 provider infrastructure complete (schema v9); D2–D5 not started** |
+| D | Official providers, weather, canonical matching | ◧ **D1 provider infrastructure complete (schema v10, incl. `d010` audit-integrity repair); D2–D5 not started** |
 | E | Point-in-time builder, quality rules, leakage tests | ◻ Not started |
 
 Companion documents:
@@ -558,12 +566,13 @@ is never miscounted as a new insert.
 
 ### Phase D — Official providers, weather, and canonical matching
 
-> **Provider selection and implementation design complete; implementation not
-> started.** The authoritative, up-to-date Phase D plan lives in two dedicated
-> documents — `PHASE_D_PROVIDER_DECISIONS.md` (provider evaluation, selection,
-> credentials, cost/coverage, licensing risk) and `PHASE_D_IMPLEMENTATION_PLAN.md`
-> (schema, migrations `d009`–`d012`, correction behaviour, matching, PIT rules,
-> CLI, and the D1–D5 staging). The sketch below is superseded by those documents.
+> **Provider selection and implementation design complete; D1 provider
+> infrastructure implemented (schema v10), D2–D5 not started.** The
+> authoritative, up-to-date Phase D plan lives in two dedicated documents —
+> `PHASE_D_PROVIDER_DECISIONS.md` (provider evaluation, selection, credentials,
+> cost/coverage, licensing risk) and `PHASE_D_IMPLEMENTATION_PLAN.md` (schema,
+> migrations `d009`–`d013`, correction behaviour, matching, PIT rules, CLI, and
+> the D1–D5 staging). The sketch below is superseded by those documents.
 
 **Depends on:** C. The largest phase; the only one adding network hosts.
 
@@ -595,10 +604,16 @@ name or key possession; a tier limitation is reported as "capability unavailable
 for current subscription tier", never an invalid key or bug. A `provider-audit`
 command verifies auth/tier/capabilities before any large backfill.
 
-**Migrations (planned):** `d009_provider_infra` (v9 — references, venues, match
-decisions/candidates, data-quality, provider_capabilities), `d010_official_games_stats`
-(v10), `d011_nba_specifics` (v11 — quarter lines, injuries, plays), `d012_weather`
-(v12). No second canonical-game table: official ids attach to the existing
+**Migrations:** `d009_provider_infra` (v9 — references, venues, match
+decisions/candidates, data-quality, provider_capabilities) and
+`d010_provider_audit_integrity` (v10 — the D1 audit-integrity repair: evidence
+columns on `provider_capabilities`, the partial unique index pinning a provider
+venue id to one canonical venue, and `data_quality_issues` immutability) are
+applied. Planned next: `d011_official_games_stats` (v11), `d012_nba_specifics`
+(v12 — quarter lines, injuries, plays), `d013_weather` (v13). Migration numbers
+are a single global forward-only sequence, so the later Phase D migrations shift
+up by one now that `d010` is the integrity repair. No second canonical-game
+table: official ids attach to the existing
 `games.official_provider`/`official_game_key` and a `provider_game_references`
 crosswalk.
 

@@ -3,13 +3,15 @@
 Concrete, staged implementation design for official MLB/NBA data, weather, and
 canonical matching.
 
-> **Status: D1 provider infrastructure complete; D2–D5 not started.** D1 built
-> the typed provider-capability system, the four provider clients (MLB StatsAPI,
-> BALLDONTLIE, NWS, Open-Meteo) over a shared GET-only base, the `http_policy`
-> allow-lists, the pinned/validated config, migration `d009_provider_infra`
-> (schema v9), the references/venues/matching/data-quality/capabilities
-> repositories, and the `provider-audit` + `ingest-venues` CLI commands — all
-> tested against mocked transports (no live provider call was made). D2–D5
+> **Status: D1 provider infrastructure complete (incl. the `d010` audit-integrity
+> repair); D2–D5 not started.** D1 built the typed provider-capability system, the
+> four provider clients (MLB StatsAPI, BALLDONTLIE, NWS, Open-Meteo) over a shared
+> GET-only base, the `http_policy` allow-lists, the pinned/validated config,
+> migrations `d009_provider_infra` and `d010_provider_audit_integrity` (schema
+> v10), the references/venues/matching/data-quality/capabilities repositories, and
+> the evidence-backed multi-probe `provider-audit` + `ingest-venues` CLI commands —
+> all tested against mocked transports (no live provider call was made). The audit
+> separates declared from externally observed capabilities (§10). D2–D5
 > (MLB/NBA/weather ingestion + canonical matching) remain unbuilt. This document
 > is the build contract; providers are chosen in `PHASE_D_PROVIDER_DECISIONS.md`
 > (doc-review date 2026-07-23).
@@ -50,7 +52,8 @@ Companion documents: `PHASE_D_PROVIDER_DECISIONS.md`, `DATA_ARCHITECTURE.md`,
   `WEATHER_API_KEY`/`SPORTRADAR_*`) and **pinned base URLs** (`MLB_STATS_API_BASE_URL`,
   `NWS_BASE_URL`, `OPEN_METEO_BASE_URL`). Read-only invariants unchanged.
 - `sports_quant/cli.py` — register the Phase D sub-commands (incl. `provider-audit`).
-- `sports_quant/db/migrations/` — new immutable migrations `d009`…`d012`.
+- `sports_quant/db/migrations/` — new immutable migrations `d009`…`d013`
+  (`d009`/`d010` built; `d011`–`d013` planned).
 - `sports_quant/db/repositories/` — new typed repositories.
 - `sports_quant/db/models.py`, `ids.py`, `schema.py` — new row models / prefixes / constants.
 - `intel/player_matching.py` — **extend, not replace**: back the in-memory
@@ -134,10 +137,11 @@ New immutable migrations, one global sequence continuing from `c008` (v8):
 
 | Version | Migration | Adds |
 | --- | --- | --- |
-| 009 | `d009_provider_infra` | `provider_team_references`, `provider_player_references`, `provider_game_references`, `venues`, `venue_aliases`, `entity_match_decisions`, `match_candidates`, `data_quality_issues`, `provider_capabilities` |
-| 010 | `d010_official_games_stats` | `game_schedule_snapshots`, `game_result_snapshots`, `team_game_statistics`, `player_game_statistics`, `mlb_inning_lines`, `roster_snapshots`, `probable_pitcher_snapshots`, `lineup_snapshots`, `lineup_players` |
-| 011 | `d011_nba_specifics` | `nba_quarter_lines`, `injury_snapshots`, `play_snapshots` (GOAT plays / substitutions; sport-agnostic-ish) |
-| 012 | `d012_weather` | `weather_snapshots` |
+| 009 | `d009_provider_infra` *(built)* | `provider_team_references`, `provider_player_references`, `provider_game_references`, `venues`, `venue_aliases`, `entity_match_decisions`, `match_candidates`, `data_quality_issues`, `provider_capabilities` |
+| 010 | `d010_provider_audit_integrity` *(built)* | `provider_capabilities` evidence columns (`declared_state`/`observed_state`/`is_observed`/`probe_name`/`endpoint`/`http_status`/`error_kind`/`verified_at`) separating declared from observed; partial unique index on `venue_aliases (provider, provider_venue_id)`; `data_quality_issues` resolution-only-update + no-delete triggers |
+| 011 | `d011_official_games_stats` *(planned)* | `game_schedule_snapshots`, `game_result_snapshots`, `team_game_statistics`, `player_game_statistics`, `mlb_inning_lines`, `roster_snapshots`, `probable_pitcher_snapshots`, `lineup_snapshots`, `lineup_players` |
+| 012 | `d012_nba_specifics` *(planned)* | `nba_quarter_lines`, `injury_snapshots`, `play_snapshots` (GOAT plays / substitutions; sport-agnostic-ish) |
+| 013 | `d013_weather` *(planned)* | `weather_snapshots` |
 
 ### 3.1 Universal columns (every time-sensitive table)
 
@@ -359,18 +363,36 @@ with provenance; it makes no live provider call and is not part of app startup.
 ## 10. Provider audit (before any large backfill)
 
 Before D2 or D3 performs a large backfill, `provider-audit --provider P` runs a
-small, non-destructive check and records a `provider_capabilities` snapshot. It
-**must not** make a purchase or change the subscription. It tests:
+small, non-destructive check and records `provider_capabilities` snapshots. It
+**must not** make a purchase or change the subscription.
 
-authentication · **subscription tier** · current games · historical games · stable
-ids · pagination · player statistics · injury access · lineup access · play access
-· timestamp quality · corrections · rate limits · missing fields · sanitized error
-behaviour.
+**Declared vs observed (enforced by `d010`).** The audit runs **one minimal
+approved GET per capability group** and records only what a probe actually
+verified as *externally observed* (`is_observed = 1`), carrying the probe name,
+sanitized endpoint, HTTP status, error classification, verification timestamp,
+and the `raw_response_id` that is the evidence. A static capability *declaration*
+is **never** persisted as though an endpoint verified it: capabilities with no
+probe stay declared-only (`is_observed = 0`, `observed_state` NULL). So a
+successful `/teams` response marks only its own group observed — never injuries,
+stats, box scores, plays, or lineups. One tier-restricted endpoint restricts only
+its group; unrelated groups keep being probed. A `401` fails the run and records
+**no** supported observation. Capabilities without a confidently documented
+endpoint (NBA plays, lineups, confirmed pregame starters, substitutions) are left
+declared-only rather than probed against a guessed path. Groups probed:
 
-Each capability is recorded as one of the §2.2 states (e.g. GOAT-only endpoints on
-an ALL-STAR key → `paid_tier_required`). The audit is the authoritative source for
-the capability declarations the ingestors consult; a tier limitation it finds is a
-recorded capability state, never an error.
+MLB StatsAPI — teams · schedules/games · venues.
+BALLDONTLIE (GOAT) — teams · players · games/schedules · player game statistics ·
+box/team statistics · injuries (each a documented endpoint on the tightened
+allow-list).
+NWS / Open-Meteo — one current-forecast probe each; a current forecast never
+implies historical-forecast reconstruction.
+
+Each observed/declared capability is one of the §2.2 states (e.g. a GOAT-only
+endpoint answering a **plan-worded** 403 → `paid_tier_required`; a generic 403
+with no plan evidence → `unavailable`/forbidden, never `paid_tier_required`). The
+audit is the authoritative source for observed capability history; snapshots are
+append-only, so an earlier belief is preserved and never overwritten. A tier
+limitation it finds is a recorded capability state, never a failed run.
 
 ---
 
@@ -397,16 +419,23 @@ Model column = recommended driver.
 
 > **Built.** Capability system (`providers/capabilities.py` — typed
 > `ProviderCapability` × `CapabilityState`, `BalldontlieTier`, per-provider
-> declarations, tier-error classifier), shared client base
+> declarations, evidence-based tier-error classifier), shared client base
 > (`providers/base_provider.py` — GET-only, `RawExchange`, bounded
-> timeouts/retries + `Retry-After`, content-type/size guards, no redirect
+> timeouts/retries + `Retry-After`, content-type guard, **streamed** size guard
+> that counts bytes and aborts before buffering an oversized body, no redirect
 > chasing), the four clients (`mlb_statsapi`, `balldontlie`, `nws`,
-> `open_meteo`), `http_policy` allow-lists + `for_*`, pinned/validated config,
-> migration `d009_provider_infra` (v9), repositories
-> (`references`, `venues`, `matching`, `data_quality`, `capabilities`),
-> `provider-audit` + `ingest-venues` CLI, and full mocked tests. No historical
-> backfill; no live call. Live-verification of provider docs/terms (decisions
-> §7) is still owed before D2/D3 backfill via `provider-audit`.
+> `open_meteo`), `http_policy` allow-lists + `for_*` (BALLDONTLIE tightened to
+> explicit documented endpoints — no path wildcard), pinned/validated config
+> (exact host + normalized base path; rejects userinfo/port/query/fragment and
+> deceptive prefixes), migrations `d009_provider_infra` (v9) and
+> `d010_provider_audit_integrity` (v10), repositories (`references`, `venues`,
+> `matching`, `data_quality`, `capabilities`), the **evidence-backed multi-probe**
+> `provider-audit` + `ingest-venues` CLI, and full mocked tests. The audit now
+> separates declared from externally observed capabilities (§10): one GET per
+> group, observed capabilities carry probe/endpoint/status/error/raw-response
+> evidence, unprobed capabilities stay declared-only, and audit history is
+> append-only. No historical backfill; no live call. Live-verification of
+> provider docs/terms (decisions §7) is still owed before D2/D3 backfill.
 
 - **Provider(s):** infrastructure for all selected providers; **required tier:**
   BALLDONTLIE **GOAT** declared (not yet exercised for backfill). **Optional:**
@@ -448,7 +477,7 @@ Model column = recommended driver.
 - **Create:** `ingest/mlb_ingestor.py`; repositories for schedule/result/stats/
   inning/roster/probable/lineup; mocked-StatsAPI fixtures + tests.
 - **Modify:** `cli.py` (`ingest-mlb`, `ingest-lineups --sport mlb`).
-- **Migration:** `d010` (v10). **Tables:** game_schedule/result snapshots,
+- **Migration:** `d011` (v11). **Tables:** game_schedule/result snapshots,
   team/player_game_statistics, mlb_inning_lines, roster_snapshots,
   probable_pitcher_snapshots, lineup_snapshots, lineup_players.
 - **Completion:** mocked date-range sweep persists canonical `games` + provenance,
@@ -486,8 +515,8 @@ Model column = recommended driver.
   stub); optional `providers/nba_injury_report.py` (PDF cross-check) **only if
   built**; mocked GOAT fixtures (+ small Parquet + optional fixture PDF) + tests.
 - **Modify:** `cli.py` (`ingest-nba`, `ingest-injuries --sport nba`).
-- **Migration:** `d011` (v11). **Tables:** nba_quarter_lines, injury_snapshots,
-  play_snapshots (box/result/roster reuse d010).
+- **Migration:** `d012` (v12). **Tables:** nba_quarter_lines, injury_snapshots,
+  play_snapshots (box/result/roster reuse d011).
 - **Completion:** mocked GOAT sweep persists the **required** outputs; each
   **conditional** output is recorded with an explicit capability state; a tier
   error is reported as capability-unavailable (not failure); hoopR Parquet import
@@ -506,7 +535,7 @@ Model column = recommended driver.
 - **Create:** `ingest/weather_ingestor.py`; weather repository; mocked NWS/Open-Meteo
   fixtures + tests.
 - **Modify:** `cli.py` (`ingest-weather`).
-- **Migration:** `d012` (v12). **Tables:** weather_snapshots (venues from d009).
+- **Migration:** `d013` (v13). **Tables:** weather_snapshots (venues from d009).
 - **Completion:** forecast + actual persisted distinctly; outdoor-only gating by
   `venues.roof_type`; leakage-free historical-forecast; dome/indoor skipped;
   non-US → Open-Meteo; idempotent; append-only; `--dry-run` persists nothing.
@@ -522,7 +551,7 @@ Model column = recommended driver.
 - **Modify:** `cli.py` (`match-games`, `match-markets`, `matching-review`);
   `intel/player_matching.py` (back with references/aliases, API unchanged).
 - **Migration:** none if `entity_match_decisions`/`match_candidates` landed in
-  d009 (a small `d013` only if review columns need widening). **Populates**
+  d009 (a small `d014` only if review columns need widening). **Populates**
   `games.official_*`, `provider_*_references`, sportsbook/Kalshi `game_id` +
   `match_decision_id`.
 - **Tests:** the eight §5.3 venue-aware local-date scenarios; determinism under

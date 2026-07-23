@@ -31,9 +31,13 @@ from .ingest.kalshi_ingestor import DEFAULT_LIMIT, KalshiIngestResult, ingest_ka
 from .ingest.odds_ingestor import OddsIngestResult, ingest_odds
 from .ingest.provider_audit import (
     SUPPORTED_AUDIT_PROVIDERS,
+    CapabilityProbe,
     ProviderAuditResult,
-    SingleGetProbe,
     audit_provider,
+    build_balldontlie_probes,
+    build_mlb_statsapi_probes,
+    build_nws_probes,
+    build_open_meteo_probes,
     declaration_for,
 )
 from .ingest.venues_ingestor import VenueIngestResult, ingest_venues
@@ -571,37 +575,34 @@ def _db_ready_or_exit(path: Path, table: str, out: Printer) -> Optional[int]:
     return None
 
 
-def _make_audit_probe(
+def _make_audit_probes(
     provider: str, settings: Settings
-) -> tuple[SingleGetProbe, object]:
-    """Build the (probe, client) pair for a provider audit.
+) -> tuple[list[CapabilityProbe], Any, Any]:
+    """Build ``(probes, client, declaration)`` for a provider audit.
 
-    The BALLDONTLIE tier comes from settings (selected GOAT); the declaration is
-    static and the probe issues one small approved GET. Returns the client so the
-    caller can close it.
+    One minimal approved GET **per capability group** is issued; each probe
+    verifies only its own group. The BALLDONTLIE tier comes from settings
+    (selected GOAT). Returns the client so the caller can close it, and the
+    static declaration so unprobed capabilities are persisted as declared-only.
     """
 
     tier = BalldontlieTier(settings.nba_data_tier)
     declaration = declaration_for(provider, balldontlie_tier=tier)
     if provider == PROVIDER_MLB_STATSAPI:
         client: Any = MlbStatsApiClient(base_url=settings.mlb_stats_api_base_url)
-        probe = SingleGetProbe(declaration=declaration, fetch=client.fetch_venues)
+        probes = build_mlb_statsapi_probes(client)
     elif provider == PROVIDER_BALLDONTLIE:
         client = BalldontlieClient(settings.nba_data_api_key)
-        probe = SingleGetProbe(declaration=declaration, fetch=client.fetch_teams)
+        probes = build_balldontlie_probes(client)
     elif provider == PROVIDER_NWS:
         client = NwsClient(base_url=settings.nws_base_url)
-        probe = SingleGetProbe(
-            declaration=declaration, fetch=lambda: client.fetch_point(40.7128, -74.0060)
-        )
+        probes = build_nws_probes(client)
     elif provider == PROVIDER_OPEN_METEO:
         client = OpenMeteoClient(base_url=settings.open_meteo_base_url)
-        probe = SingleGetProbe(
-            declaration=declaration, fetch=lambda: client.fetch_forecast(40.7128, -74.0060)
-        )
+        probes = build_open_meteo_probes(client)
     else:  # pragma: no cover - guarded by the argparse choices
         raise ValueError(f"unsupported audit provider {provider!r}")
-    return probe, client
+    return probes, client, declaration
 
 
 def _report_audit(result: ProviderAuditResult, out: Printer, *, as_json: bool) -> None:
@@ -617,9 +618,22 @@ def _report_audit(result: ProviderAuditResult, out: Printer, *, as_json: bool) -
             "authenticated": result.authenticated,
             "tier_restricted": result.tier_restricted,
             "capabilities_recorded": result.capabilities_recorded,
+            "observed_count": result.observed_count,
+            "declared_only_count": result.declared_only_count,
             "issues_recorded": result.issues_recorded,
             "capabilities": [
-                {"capability": o.capability, "state": o.state} for o in result.observations
+                {
+                    "capability": o.capability,
+                    "state": o.state,
+                    "is_observed": o.is_observed,
+                    "observed_state": o.observed_state,
+                    "declared_state": o.declared_state,
+                    "probe_name": o.probe_name,
+                    "endpoint": o.endpoint,
+                    "http_status": o.http_status,
+                    "error_kind": o.error_kind,
+                }
+                for o in result.observations
             ],
             "error_type": result.error_type,
             "error_message": result.error_message,
@@ -631,14 +645,19 @@ def _report_audit(result: ProviderAuditResult, out: Printer, *, as_json: bool) -
     if result.status == "failed":
         out(f"[FAILED ] {result.error_type}: {result.error_message}")
         return
-    out(f"  requests: {result.requests_made} (GET-only)")
+    out(f"  requests: {result.requests_made} (GET-only, one probe per group)")
     out(f"  authenticated: {result.authenticated}  tier-restricted: {result.tier_restricted}")
     out(
-        f"  capabilities recorded: {result.capabilities_recorded}  "
+        f"  capabilities recorded: {result.capabilities_recorded} "
+        f"(observed: {result.observed_count}, declared-only: {result.declared_only_count})  "
         f"data-quality notes: {result.issues_recorded}"
     )
     for obs in result.observations:
-        out(f"    - {obs.capability}: {obs.state}")
+        if obs.is_observed:
+            marker = f"observed via {obs.probe_name} -> {obs.http_status}"
+        else:
+            marker = "declared-only" + (f" (probe {obs.probe_name} inconclusive)" if obs.probe_name else "")
+        out(f"    - {obs.capability}: {obs.state}  [{marker}]")
     out(f"[{'OK     ' if result.status == 'succeeded' else result.status.upper()}] {result.status}")
 
 
@@ -650,7 +669,8 @@ def run_provider_audit(
     dry_run: bool = False,
     as_json: bool = False,
     out: Printer = print,
-    probe: Any = None,
+    probes: Optional[list[CapabilityProbe]] = None,
+    declaration: Any = None,
     client_to_close: Any = None,
 ) -> int:
     """Audit one provider's capabilities/tier. GET-only; ``--dry-run`` persists nothing."""
@@ -667,14 +687,22 @@ def run_provider_audit(
             return code
     database = Database(path)
 
-    owns_client = probe is None
-    if probe is None:
-        probe, client_to_close = _make_audit_probe(provider, settings)
+    owns_client = probes is None
+    if probes is None:
+        probes, client_to_close, declaration = _make_audit_probes(provider, settings)
+    elif declaration is None:
+        declaration = declaration_for(
+            provider, balldontlie_tier=BalldontlieTier(settings.nba_data_tier)
+        )
 
     async def _run() -> ProviderAuditResult:
         try:
             return await audit_provider(
-                database=database, provider=provider, probe=probe, dry_run=dry_run
+                database=database,
+                provider=provider,
+                probes=probes,
+                declaration=declaration,
+                dry_run=dry_run,
             )
         finally:
             if owns_client and client_to_close is not None:
@@ -700,7 +728,9 @@ def _report_venues(result: VenueIngestResult, out: Printer, *, as_json: bool) ->
                     "venues_updated": result.venues_updated,
                     "venues_unchanged": result.venues_unchanged,
                     "venues_rejected": result.venues_rejected,
-                    "aliases_written": result.aliases_written,
+                    "aliases_inserted": result.aliases_inserted,
+                    "aliases_unchanged": result.aliases_unchanged,
+                    "aliases_conflict": result.aliases_conflict,
                     "error_type": result.error_type,
                     "error_message": result.error_message,
                 },
@@ -721,7 +751,10 @@ def _report_venues(result: VenueIngestResult, out: Printer, *, as_json: bool) ->
         f"unchanged {result.venues_unchanged}, rejected {result.venues_rejected})"
     )
     if not result.dry_run:
-        out(f"  aliases written: {result.aliases_written}")
+        out(
+            f"  aliases: {result.aliases_inserted} inserted, "
+            f"{result.aliases_unchanged} unchanged, {result.aliases_conflict} conflict"
+        )
     if result.rejections:
         out(f"  rejection reasons: {', '.join(sorted(set(result.rejections)))}")
     label2 = {"succeeded": "OK     ", "partially_succeeded": "PARTIAL"}.get(

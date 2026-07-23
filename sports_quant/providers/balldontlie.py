@@ -70,3 +70,34 @@ class BalldontlieClient(BaseProviderClient):
         if cursor is not None:
             params["cursor"] = cursor
         return await self._get("/v1/players", params=params)
+
+    # -- Audit probe endpoints ------------------------------------------------
+    # One minimal GET per capability group the audit verifies. Each is a
+    # *documented* BALLDONTLIE endpoint on the policy allow-list; a plan-gated
+    # one answers 403-with-plan-evidence and is classified TIER_RESTRICTED for
+    # *its own group only*. Capabilities without a documented endpoint (plays,
+    # lineups, confirmed pregame starters, substitutions) are deliberately NOT
+    # given a method here: the audit leaves them declared-only rather than
+    # guessing an endpoint name.
+    async def fetch_games(self, *, per_page: int = 1) -> ProviderResponse:
+        """GET /v1/games -- games / schedules / results group."""
+
+        return await self._get("/v1/games", params={"per_page": per_page})
+
+    async def fetch_stats(self, *, per_page: int = 1) -> ProviderResponse:
+        """GET /v1/stats -- per-player game statistics group (GOAT-gated)."""
+
+        return await self._get("/v1/stats", params={"per_page": per_page})
+
+    async def fetch_box_scores(self, *, date: Optional[str] = None) -> ProviderResponse:
+        """GET /v1/box_scores -- team/box statistics group (GOAT-gated)."""
+
+        params: dict[str, Any] = {}
+        if date is not None:
+            params["date"] = date
+        return await self._get("/v1/box_scores", params=params)
+
+    async def fetch_player_injuries(self, *, per_page: int = 1) -> ProviderResponse:
+        """GET /v1/player_injuries -- injuries group (tier-gated)."""
+
+        return await self._get("/v1/player_injuries", params={"per_page": per_page})

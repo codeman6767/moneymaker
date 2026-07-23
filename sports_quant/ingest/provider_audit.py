@@ -1,21 +1,29 @@
-"""Provider audit: a small, non-destructive capability check.
+"""Provider audit: evidence-backed, multi-probe capability verification.
 
-Before any large backfill (D2/D3), ``provider-audit`` probes a provider with a
-couple of small approved GET requests, records what it observed, and persists a
-``provider_capabilities`` snapshot (plus a `DQ-CAP-*` data-quality note for any
-gap). It **never** buys or changes a subscription, and it never treats a tier
-restriction as an invalid key -- a BALLDONTLIE plan-gated endpoint answering 403
-is recorded as ``paid_tier_required``/``unavailable``, and unrelated capabilities
-continue.
+Before any large backfill (D2/D3), ``provider-audit`` runs one minimal approved
+GET **per capability group** and records what each probe actually verified. It
+draws a hard line between:
 
-D1 exercises this against mocked transports only; no live provider call is made.
-``--dry-run`` performs the probe(s) in memory and persists absolutely nothing.
+* **declared** capabilities -- what documentation/config *expects* the provider
+  (at the selected tier) to support. Persisted as ``is_observed = 0`` metadata,
+  never as an endpoint observation.
+* **observed** capabilities -- what an exact probe *verified* at a specific time,
+  carrying the probe name, sanitized endpoint, HTTP status, error classification,
+  and the raw-response id that is the evidence. Persisted as ``is_observed = 1``.
+
+A successful ``/teams`` response therefore marks **only** teams (its group)
+observed -- never injuries, stats, box scores, plays, or lineups. Capabilities
+with no probe stay declared-only / ``unknown_until_audited``. A tier restriction
+affects only its own group; a 401 marks nothing supported. Nothing is fabricated.
+
+D1 exercises this against mocked transports only; no live call is made.
+``--dry-run`` runs the probes in memory and persists absolutely nothing.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from streaming.event_envelope import canonical_json
 
@@ -28,19 +36,16 @@ from ..db.repositories.raw_responses import (
     response_content_hash,
 )
 from ..db.schema import to_iso
-from ..providers.base_provider import ProviderError
+from ..providers.base_provider import ProviderError, ProviderResponse
 from ..providers.capabilities import (
     PROVIDER_BALLDONTLIE,
     PROVIDER_MLB_STATSAPI,
     PROVIDER_NWS,
     PROVIDER_OPEN_METEO,
-    BalldontlieTier,
     CapabilityDeclaration,
     CapabilityState,
     ProviderCapability,
     ProviderErrorKind,
-    balldontlie_declaration,
-    is_tier_restriction,
 )
 from ..providers.raw_exchange import RawExchange
 from .runner import sanitize_error
@@ -57,13 +62,44 @@ SUPPORTED_AUDIT_PROVIDERS = (
 )
 
 
+# --------------------------------------------------------------------------- #
+# Probes
+# --------------------------------------------------------------------------- #
+@dataclass
+class CapabilityProbe:
+    """One minimal approved GET that provides evidence for a capability group.
+
+    ``fetch`` returns a :class:`ProviderResponse` (raw exchange included) on
+    success or raises :class:`ProviderError`. ``capabilities`` is the exact set
+    this probe verifies -- and nothing else. ``endpoint`` is the sanitized
+    endpoint/family recorded on each observation.
+    """
+
+    name: str
+    endpoint: str
+    capabilities: tuple[ProviderCapability, ...]
+    fetch: Callable[[], Awaitable[ProviderResponse]]
+
+
 @dataclass
 class CapabilityObservation:
-    """One capability + the state the audit concluded for it."""
+    """One capability + the evidence-backed conclusion the audit drew for it.
+
+    ``is_observed`` is True only when a probe actually verified it; declared-only
+    rows keep ``observed_state``/``probe_name``/``endpoint`` at ``None``.
+    """
 
     capability: str
-    state: str
+    state: str  # effective belief recorded (observed_state if observed, else declared)
+    declared_state: Optional[str]
+    observed_state: Optional[str]
+    is_observed: bool
+    probe_name: Optional[str] = None
+    endpoint: Optional[str] = None
+    http_status: Optional[int] = None
+    error_kind: Optional[str] = None
     detail: Optional[str] = None
+    raw_response_id: Optional[str] = None  # filled at persist time
 
 
 @dataclass
@@ -80,6 +116,8 @@ class ProviderAuditResult:
     tier_restricted: bool = False
     observations: list[CapabilityObservation] = field(default_factory=list)
     capabilities_recorded: int = 0
+    observed_count: int = 0
+    declared_only_count: int = 0
     issues_recorded: int = 0
     error_type: Optional[str] = None
     error_message: Optional[str] = None
@@ -89,31 +127,69 @@ class ProviderAuditResult:
         return self.status == "failed"
 
 
-def _declared_observations(declaration: CapabilityDeclaration) -> list[CapabilityObservation]:
-    """Turn a static declaration into observations (the audit's starting point)."""
+@dataclass
+class _ProbeResult:
+    """Internal: outcome of running one probe, with its raw exchange (if any)."""
 
-    return [
-        CapabilityObservation(capability=cap.value, state=state.value, detail=None)
-        for cap, state in sorted(declaration.states.items(), key=lambda kv: kv[0].value)
-    ]
+    probe: CapabilityProbe
+    exchange: Optional[RawExchange]
+    http_status: Optional[int]
+    error_kind: Optional[ProviderErrorKind]
+    observed_state: Optional[CapabilityState]  # None when the probe couldn't verify
+    detail: Optional[str]
+    auth_failed: bool = False
 
 
+async def _run_probe(probe: CapabilityProbe) -> _ProbeResult:
+    """Run one probe and classify its outcome into an observed state.
+
+    * 2xx success -> the group is observed ``supported``.
+    * TIER_RESTRICTED -> observed ``paid_tier_required`` (only this group).
+    * FORBIDDEN -> observed ``unavailable`` (a permission gate, not a tier one).
+    * AUTHENTICATION / INVALID_KEY -> auth failure; nothing marked supported.
+    * anything else (rate limit / server / network / parser / not found /
+      unexpected) -> could NOT verify: observed_state stays ``None`` (recorded as
+      a failure, never a false observation).
+    """
+
+    try:
+        response = await probe.fetch()
+    except ProviderError as exc:
+        kind = exc.kind
+        if kind is ProviderErrorKind.TIER_RESTRICTED:
+            return _ProbeResult(probe, exc.exchange, exc.status_code, kind,
+                                CapabilityState.PAID_TIER_REQUIRED, "tier restriction observed")
+        if kind is ProviderErrorKind.FORBIDDEN:
+            return _ProbeResult(probe, exc.exchange, exc.status_code, kind,
+                                CapabilityState.UNAVAILABLE, "forbidden (no tier evidence)")
+        if kind in (ProviderErrorKind.AUTHENTICATION, ProviderErrorKind.INVALID_KEY):
+            return _ProbeResult(probe, exc.exchange, exc.status_code, kind, None,
+                                "authentication failure", auth_failed=True)
+        # Inconclusive: recorded as a failure, never a supported observation.
+        return _ProbeResult(probe, exc.exchange, exc.status_code, kind, None, kind.value)
+    except Exception as exc:  # noqa: BLE001 - classify, never leak
+        _t, msg = sanitize_error(exc)
+        return _ProbeResult(probe, None, None, ProviderErrorKind.UNEXPECTED, None, msg)
+
+    return _ProbeResult(
+        probe, response.exchange, response.exchange.http_status, None,
+        CapabilityState.SUPPORTED, None,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Audit
+# --------------------------------------------------------------------------- #
 async def audit_provider(
     *,
     database: Database,
     provider: str,
-    probe: "AuditProbe",
-    tier: Optional[str] = None,
+    probes: list[CapabilityProbe],
+    declaration: CapabilityDeclaration,
     dry_run: bool = False,
     tool_version: str = _TOOL_VERSION,
 ) -> ProviderAuditResult:
-    """Audit one provider using an injected :class:`AuditProbe` (mockable).
-
-    The probe performs the small approved GET(s) and returns whether the primary
-    endpoint authenticated and whether a tier restriction was seen; the static
-    capability declaration supplies the rest. Nothing is fabricated: a probe
-    failure downgrades the affected capability, it never invents availability.
-    """
+    """Audit a provider by running each capability-group probe independently."""
 
     if provider not in SUPPORTED_AUDIT_PROVIDERS:
         raise ValueError(
@@ -121,87 +197,133 @@ async def audit_provider(
             f"{list(SUPPORTED_AUDIT_PROVIDERS)}"
         )
 
-    declaration = probe.declaration
     result = ProviderAuditResult(
-        provider=provider, tier=declaration.tier or tier, dry_run=dry_run, status="succeeded"
+        provider=provider, tier=declaration.tier, dry_run=dry_run, status="succeeded"
     )
-    observations = _declared_observations(declaration)
 
-    # -- Probe (network via the injected probe; mocked in tests) --------------
-    exchange: Optional[RawExchange] = None
-    try:
-        outcome = await probe.run()
-        result.requests_made = outcome.requests_made
-        result.authenticated = outcome.authenticated
-        exchange = outcome.exchange
-    except ProviderError as exc:
-        if is_tier_restriction(exc.kind):
-            # A tier restriction is honest capability info, not a failure.
+    probe_results: list[_ProbeResult] = []
+    probed_caps: set[ProviderCapability] = set()
+    auth_failed = False
+    for probe in probes:
+        pr = await _run_probe(probe)
+        probe_results.append(pr)
+        result.requests_made += 1
+        if pr.observed_state is CapabilityState.PAID_TIER_REQUIRED:
             result.tier_restricted = True
-            result.authenticated = True  # the key was accepted; the tier gated it
-            result.requests_made = 1
-            exchange = exc.exchange
-            observations = _apply_tier_restriction(observations)
-        elif exc.kind is ProviderErrorKind.AUTHENTICATION:
-            result.authenticated = False
-            result.status = "failed"
-            result.error_type, result.error_message = _err(exc)
-        else:
-            result.status = "failed"
-            result.error_type, result.error_message = _err(exc)
-    except Exception as exc:  # noqa: BLE001 - classify, never leak
+        if pr.auth_failed:
+            auth_failed = True
+            # A shared key that fails auth on one endpoint fails everywhere;
+            # stop probing rather than hammer the provider with a bad key.
+            break
+        probed_caps.update(probe.capabilities)
+
+    # authenticated: True unless we saw an auth failure; None if no probe ran.
+    if auth_failed:
+        result.authenticated = False
         result.status = "failed"
-        result.error_type, result.error_message = sanitize_error(exc)
+    elif probes:
+        result.authenticated = True
+
+    # -- Build observations ---------------------------------------------------
+    observations: list[CapabilityObservation] = []
+    # 1) Observed capabilities from each probe that verified something.
+    for pr in probe_results:
+        for cap in pr.probe.capabilities:
+            declared = declaration.state(cap).value
+            if pr.observed_state is None:
+                # Probe attempted but could not verify: record the failure as a
+                # declared-only row carrying the error evidence (never supported).
+                observations.append(
+                    CapabilityObservation(
+                        capability=cap.value,
+                        state=declared,
+                        declared_state=declared,
+                        observed_state=None,
+                        is_observed=False,
+                        probe_name=pr.probe.name,
+                        endpoint=pr.probe.endpoint,
+                        http_status=pr.http_status,
+                        error_kind=(pr.error_kind.value if pr.error_kind else None),
+                        detail=pr.detail,
+                    )
+                )
+                continue
+            # A verified observation. If the declaration is more specific than a
+            # bare "supported" (best_effort / history_limited), keep that nuance.
+            observed = _reconcile_observed(pr.observed_state, declaration.state(cap))
+            observations.append(
+                CapabilityObservation(
+                    capability=cap.value,
+                    state=observed.value,
+                    declared_state=declared,
+                    observed_state=observed.value,
+                    is_observed=True,
+                    probe_name=pr.probe.name,
+                    endpoint=pr.probe.endpoint,
+                    http_status=pr.http_status,
+                    error_kind=(pr.error_kind.value if pr.error_kind else None),
+                    detail=pr.detail,
+                )
+            )
+    # 2) Declared-only capabilities (never probed): honest metadata, is_observed=0.
+    for cap, state in sorted(declaration.states.items(), key=lambda kv: kv[0].value):
+        if cap in probed_caps:
+            continue
+        observations.append(
+            CapabilityObservation(
+                capability=cap.value,
+                state=state.value,
+                declared_state=state.value,
+                observed_state=None,
+                is_observed=False,
+            )
+        )
 
     result.observations = observations
+    result.observed_count = sum(1 for o in observations if o.is_observed)
+    result.declared_only_count = sum(1 for o in observations if not o.is_observed)
 
     if dry_run:
-        # Report what a real run would persist; persist absolutely nothing.
         return result
 
-    _persist(database, provider, declaration, observations, result, exchange, tool_version)
+    _persist(database, provider, declaration, probe_results, observations, result, tool_version)
     return result
 
 
-def _apply_tier_restriction(
-    observations: list[CapabilityObservation],
-) -> list[CapabilityObservation]:
-    """Downgrade any 'supported' data capability the tier could not reach.
+def _reconcile_observed(
+    observed: CapabilityState, declared: CapabilityState
+) -> CapabilityState:
+    """Keep a declaration's nuance when a probe merely proves accessibility.
 
-    Conservative: a probe-level tier restriction demotes the paid-tier data
-    capabilities to ``paid_tier_required`` so the corpus records the tier gate.
+    A 2xx proves the endpoint is reachable (``SUPPORTED``); if the declaration is
+    the more specific ``BEST_EFFORT`` or ``PROVIDER_HISTORY_LIMITED``, preserve
+    that (accessibility does not upgrade a known-partial capability to full).
     """
 
-    demote = {
-        ProviderCapability.PLAYER_STATISTICS.value,
-        ProviderCapability.TEAM_STATISTICS.value,
-        ProviderCapability.PLAYS.value,
-        ProviderCapability.LINEUPS.value,
-        ProviderCapability.INJURIES.value,
-        ProviderCapability.QUARTER_LINES.value,
+    if observed is CapabilityState.SUPPORTED and declared in (
+        CapabilityState.BEST_EFFORT,
+        CapabilityState.PROVIDER_HISTORY_LIMITED,
+    ):
+        return declared
+    return observed
+
+
+_GAP_STATES = frozenset(
+    {
+        CapabilityState.PAID_TIER_REQUIRED.value,
+        CapabilityState.UNAVAILABLE.value,
+        CapabilityState.UNKNOWN_UNTIL_AUDITED.value,
     }
-    out: list[CapabilityObservation] = []
-    for obs in observations:
-        if obs.capability in demote and obs.state == CapabilityState.SUPPORTED.value:
-            out.append(
-                CapabilityObservation(
-                    capability=obs.capability,
-                    state=CapabilityState.PAID_TIER_REQUIRED.value,
-                    detail="observed tier restriction during audit",
-                )
-            )
-        else:
-            out.append(obs)
-    return out
+)
 
 
 def _persist(
     database: Database,
     provider: str,
     declaration: CapabilityDeclaration,
+    probe_results: list[_ProbeResult],
     observations: list[CapabilityObservation],
     result: ProviderAuditResult,
-    exchange: Optional[RawExchange],
     tool_version: str,
 ) -> None:
     import time
@@ -219,39 +341,48 @@ def _persist(
                 tool_version=tool_version,
             )
         result.run_id = run.run_id
+        raw_repo = SqliteRawResponseRepository(conn)
 
-        raw_id: Optional[str] = None
-        if exchange is not None:
+        # Store each probe's raw response ONCE; map endpoint -> (raw_id, received_at).
+        # A raw response is attached to a capability ONLY if that probe actually
+        # provided evidence for it.
+        raw_by_endpoint: dict[str, tuple[str, str]] = {}
+        for pr in probe_results:
+            if pr.exchange is None or pr.probe.endpoint in raw_by_endpoint:
+                continue
             content_hash = response_content_hash(
                 provider=provider,
-                endpoint=exchange.endpoint,
-                request_params=exchange.request_params,
-                body=exchange.body,
+                endpoint=pr.exchange.endpoint,
+                request_params=pr.exchange.request_params,
+                body=pr.exchange.body,
             )
             with transaction(conn):
-                raw = SqliteRawResponseRepository(conn).store(
+                raw = raw_repo.store(
                     run_id=run.run_id,
                     provider=provider,
-                    endpoint=exchange.endpoint,
-                    request_params_json=canonical_json(exchange.request_params),
-                    http_status=exchange.http_status,
-                    response_headers_json=canonical_json(exchange.response_headers),
-                    requested_at=to_iso(exchange.requested_at),
-                    received_at=to_iso(exchange.received_at),
-                    elapsed_ns=exchange.elapsed_ns,
-                    body=exchange.body,
+                    endpoint=pr.exchange.endpoint,
+                    request_params_json=canonical_json(pr.exchange.request_params),
+                    http_status=pr.exchange.http_status,
+                    response_headers_json=canonical_json(pr.exchange.response_headers),
+                    requested_at=to_iso(pr.exchange.requested_at),
+                    received_at=to_iso(pr.exchange.received_at),
+                    elapsed_ns=pr.exchange.elapsed_ns,
+                    body=pr.exchange.body,
                     content_hash=content_hash,
-                    content_type=exchange.content_type,
+                    content_type=pr.exchange.content_type,
                 )
-            raw_id = raw.raw_response_id
-            observed_at = raw.received_at
-        else:
-            observed_at = to_iso(_now())
+            raw_by_endpoint[pr.probe.endpoint] = (raw.raw_response_id, raw.received_at)
 
+        observed_at = to_iso(_now())
         caps = SqliteCapabilityRepository(conn)
         dq = SqliteDataQualityRepository(conn)
         with transaction(conn):
             for obs in observations:
+                raw_id: Optional[str] = None
+                verified_at: Optional[str] = None
+                if obs.is_observed and obs.endpoint in raw_by_endpoint:
+                    raw_id, verified_at = raw_by_endpoint[obs.endpoint]
+                obs.raw_response_id = raw_id
                 _snap, inserted = caps.record(
                     provider=provider,
                     tier=declaration.tier,
@@ -260,18 +391,28 @@ def _persist(
                     observed_at=observed_at,
                     detail=obs.detail,
                     run_id=run.run_id,
-                    raw_response_id=raw_id,
+                    raw_response_id=raw_id if obs.is_observed else None,
+                    declared_state=obs.declared_state,
+                    observed_state=obs.observed_state,
+                    is_observed=obs.is_observed,
+                    probe_name=obs.probe_name,
+                    endpoint=obs.endpoint,
+                    http_status=obs.http_status,
+                    error_kind=obs.error_kind,
+                    verified_at=verified_at,
                 )
                 if inserted:
                     result.capabilities_recorded += 1
-                if obs.state in _GAP_STATES:
+                # A DQ note for a genuine gap (observed or declared).
+                if obs.state in _GAP_STATES or obs.error_kind not in (None,):
                     dq.record(
                         severity="note",
                         rule_code="DQ-CAP-001",
                         entity_type="provider",
                         description=(
-                            f"{provider} capability {obs.capability!r} is {obs.state} "
-                            f"(tier={declaration.tier})"
+                            f"{provider} capability {obs.capability!r}: state={obs.state}"
+                            + (f", error={obs.error_kind}" if obs.error_kind else "")
+                            + f" (tier={declaration.tier}, observed={obs.is_observed})"
                         ),
                         provider=provider,
                         run_id=run.run_id,
@@ -282,7 +423,7 @@ def _persist(
         with transaction(conn):
             runs.complete(
                 run.run_id,
-                status="succeeded" if not result.failed else "failed",
+                status="failed" if result.failed else "succeeded",
                 duration_ns=time.monotonic_ns() - started,
                 requests_made=result.requests_made,
                 records_received=len(observations),
@@ -291,69 +432,23 @@ def _persist(
             )
 
 
-_GAP_STATES = frozenset(
-    {
-        CapabilityState.PAID_TIER_REQUIRED.value,
-        CapabilityState.UNAVAILABLE.value,
-        CapabilityState.UNKNOWN_UNTIL_AUDITED.value,
-    }
-)
-
-
 def _now():  # small indirection so tests need not patch datetime
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc)
 
 
-def _err(exc: ProviderError) -> tuple[str, str]:
-    return type(exc).__name__, str(exc)
-
-
 # --------------------------------------------------------------------------- #
-# Probe abstraction
+# Probe-set builders (documented endpoints only; unverified endpoints omitted)
 # --------------------------------------------------------------------------- #
-@dataclass
-class ProbeOutcome:
-    requests_made: int
-    authenticated: bool
-    exchange: Optional[RawExchange]
-
-
-class AuditProbe:
-    """Runs the small approved GET(s) for one provider and reports the outcome.
-
-    Concrete probes are thin wrappers over the provider clients; tests inject a
-    client with a mocked transport, so no live call occurs. The probe holds the
-    static capability declaration used to seed the audit's observations.
-    """
-
-    def __init__(self, *, declaration: CapabilityDeclaration) -> None:
-        self.declaration = declaration
-
-    async def run(self) -> ProbeOutcome:  # pragma: no cover - overridden
-        raise NotImplementedError
-
-
-class SingleGetProbe(AuditProbe):
-    """A probe that issues one GET via an async callable returning a ProviderResponse."""
-
-    def __init__(self, *, declaration: CapabilityDeclaration, fetch) -> None:
-        super().__init__(declaration=declaration)
-        self._fetch = fetch
-
-    async def run(self) -> ProbeOutcome:
-        response = await self._fetch()
-        return ProbeOutcome(requests_made=1, authenticated=True, exchange=response.exchange)
-
-
-def declaration_for(provider: str, *, balldontlie_tier: BalldontlieTier) -> CapabilityDeclaration:
+def declaration_for(provider: str, *, balldontlie_tier: "BalldontlieTier") -> CapabilityDeclaration:
     """The static capability declaration for a provider (BALLDONTLIE by tier)."""
 
     from ..providers.capabilities import (
         MLB_STATSAPI_DECLARATION,
         NWS_DECLARATION,
         OPEN_METEO_DECLARATION,
+        balldontlie_declaration,
     )
 
     if provider == PROVIDER_MLB_STATSAPI:
@@ -365,3 +460,78 @@ def declaration_for(provider: str, *, balldontlie_tier: BalldontlieTier) -> Capa
     if provider == PROVIDER_OPEN_METEO:
         return OPEN_METEO_DECLARATION
     raise ValueError(f"no declaration for provider {provider!r}")
+
+
+_C = ProviderCapability
+
+
+def build_balldontlie_probes(client) -> list[CapabilityProbe]:
+    """Independent probes for the documented BALLDONTLIE GOAT endpoint families.
+
+    Each group hits one documented endpoint. Capabilities without a documented
+    endpoint (plays, lineups, confirmed pregame starters, substitutions) are
+    **not** probed here -- they remain declared-only / unknown until a live audit
+    confirms an endpoint, honouring "do not guess endpoint names". Lineup access
+    and pregame-starter confirmation are represented separately.
+    """
+
+    return [
+        CapabilityProbe("teams", "/v1/teams", (_C.TEAMS,), lambda: client.fetch_teams()),
+        CapabilityProbe("players", "/v1/players", (_C.PLAYERS,), lambda: client.fetch_players()),
+        CapabilityProbe(
+            "games", "/v1/games", (_C.GAMES, _C.SCHEDULES, _C.GAME_RESULTS),
+            lambda: client.fetch_games(),
+        ),
+        CapabilityProbe(
+            "player_stats", "/v1/stats", (_C.PLAYER_STATISTICS,),
+            lambda: client.fetch_stats(),
+        ),
+        CapabilityProbe(
+            "box_scores", "/v1/box_scores", (_C.TEAM_STATISTICS,),
+            lambda: client.fetch_box_scores(),
+        ),
+        CapabilityProbe(
+            "injuries", "/v1/player_injuries", (_C.INJURIES,),
+            lambda: client.fetch_player_injuries(),
+        ),
+    ]
+
+
+def build_mlb_statsapi_probes(client) -> list[CapabilityProbe]:
+    """Independent probes for the MLB StatsAPI endpoint families D1 verifies."""
+
+    return [
+        CapabilityProbe("teams", "/teams", (_C.TEAMS,), lambda: client.fetch_teams()),
+        CapabilityProbe(
+            "schedule", "/schedule", (_C.SCHEDULES, _C.GAMES),
+            lambda: client.fetch_schedule(),
+        ),
+        CapabilityProbe("venues", "/venues", (_C.VENUES,), lambda: client.fetch_venues()),
+    ]
+
+
+def build_nws_probes(client) -> list[CapabilityProbe]:
+    """A single NWS point probe (US forecast availability)."""
+
+    return [
+        CapabilityProbe(
+            "point", "/points/{lat},{lon}", (_C.LIVE_AVAILABILITY,),
+            lambda: client.fetch_point(40.7128, -74.0060),
+        ),
+    ]
+
+
+def build_open_meteo_probes(client) -> list[CapabilityProbe]:
+    """A single Open-Meteo forecast probe. Historical-forecast reconstruction is
+    a separate documented endpoint and is NOT implied by a current forecast."""
+
+    return [
+        CapabilityProbe(
+            "forecast", "/v1/forecast", (_C.LIVE_AVAILABILITY,),
+            lambda: client.fetch_forecast(40.7128, -74.0060),
+        ),
+    ]
+
+
+# Late import to avoid a cycle at module import time.
+from ..providers.capabilities import BalldontlieTier  # noqa: E402

@@ -92,8 +92,17 @@ def test_undeclared_capability_is_unknown_until_audited() -> None:
 # --------------------------------------------------------------------------- #
 # Tier-error classification
 # --------------------------------------------------------------------------- #
-def test_balldontlie_403_is_tier_restriction_not_invalid_key() -> None:
-    kind = classify_http_status(403, provider=PROVIDER_BALLDONTLIE)
+def test_balldontlie_403_is_tier_restriction_only_with_plan_evidence() -> None:
+    # A bare 403 carries no plan/subscription evidence -> FORBIDDEN, never an
+    # assumed tier restriction (which would fabricate a paid_tier_required belief).
+    assert (
+        classify_http_status(403, provider=PROVIDER_BALLDONTLIE)
+        is ProviderErrorKind.FORBIDDEN
+    )
+    # With explicit plan wording it IS a tier restriction.
+    kind = classify_http_status(
+        403, provider=PROVIDER_BALLDONTLIE, body_snippet="upgrade to the GOAT plan"
+    )
     assert kind is ProviderErrorKind.TIER_RESTRICTED
     assert is_tier_restriction(kind)
 
@@ -101,10 +110,20 @@ def test_balldontlie_403_is_tier_restriction_not_invalid_key() -> None:
 def test_401_is_authentication_separate_from_tier() -> None:
     assert classify_http_status(401, provider=PROVIDER_BALLDONTLIE) is ProviderErrorKind.AUTHENTICATION
     assert not is_tier_restriction(ProviderErrorKind.AUTHENTICATION)
+    # A 401 whose body names a bad key is the INVALID_KEY subtype -- still never
+    # a supported/tier observation.
+    assert (
+        classify_http_status(401, body_snippet="Invalid API key")
+        is ProviderErrorKind.INVALID_KEY
+    )
 
 
-def test_generic_403_without_plan_wording_is_authentication() -> None:
-    assert classify_http_status(403, provider=PROVIDER_MLB_STATSAPI) is ProviderErrorKind.AUTHENTICATION
+def test_generic_403_without_plan_wording_is_forbidden_not_tier() -> None:
+    # No provider's bare 403 is a tier restriction; it is a generic FORBIDDEN.
+    assert (
+        classify_http_status(403, provider=PROVIDER_MLB_STATSAPI)
+        is ProviderErrorKind.FORBIDDEN
+    )
     assert (
         classify_http_status(403, provider=PROVIDER_MLB_STATSAPI, body_snippet="subscription plan")
         is ProviderErrorKind.TIER_RESTRICTED
@@ -124,7 +143,7 @@ def test_429_and_5xx_classified() -> None:
     "policy_factory,base,allowed,unapproved",
     [
         (ReadOnlyHTTPPolicy.for_mlb_statsapi, "https://statsapi.mlb.com",
-         "/api/v1/venues", "/api/v1/schedule"),
+         "/api/v1/venues", "/api/v1/awards"),
         (ReadOnlyHTTPPolicy.for_balldontlie, "https://api.balldontlie.io",
          "/v1/teams", "/v1/account"),
         (ReadOnlyHTTPPolicy.for_nws, "https://api.weather.gov",

@@ -76,3 +76,33 @@ def build_exchange(
         elapsed_ns=elapsed_ns,
         body=redact_secrets(response.text, list(secrets)),
     )
+
+
+def build_exchange_from_parts(
+    *,
+    path: str,
+    params: Mapping[str, Any],
+    status_code: int,
+    headers: Mapping[str, str],
+    body: str,
+    requested_at: datetime,
+    elapsed_ns: int,
+    secrets: Iterable[str] = (),
+) -> RawExchange:
+    """Capture an exchange from already-read parts (streaming path).
+
+    Used when the body is read chunk-by-chunk with a size guard rather than
+    buffered by ``httpx`` -- the sanitization is identical to :func:`build_exchange`.
+    """
+
+    return RawExchange(
+        endpoint=path,
+        request_params={k: str(v) for k, v in sanitize_params(params).items()},
+        http_status=status_code,
+        response_headers=sanitize_headers(headers),
+        content_type=headers.get("content-type"),
+        requested_at=requested_at,
+        received_at=datetime.now(timezone.utc),
+        elapsed_ns=elapsed_ns,
+        body=redact_secrets(body, list(secrets)),
+    )

@@ -142,8 +142,10 @@ FORBIDDEN_PROVIDER_SEGMENTS: frozenset[str] = frozenset(
 def mlb_statsapi_host_rule(host: str = "statsapi.mlb.com") -> HostRule:
     """MLB StatsAPI allow-list.
 
-    D1 needs only the venue surface; the schedule/game/box/roster paths are added
-    when D2 uses them. Kept tight so an unplanned path is blocked by default.
+    Covers the venue surface D1 ingests plus the small read endpoints the D1
+    provider audit probes (teams / schedule / rosters / people). The full
+    game/box surface is added when D2 uses it. Kept explicit so an unplanned path
+    is blocked by default.
     """
 
     return HostRule(
@@ -152,12 +154,24 @@ def mlb_statsapi_host_rule(host: str = "statsapi.mlb.com") -> HostRule:
         allowed_patterns=(
             re.compile(r"/api/v1/venues/?"),
             re.compile(r"/api/v1/venues/[0-9]+/?"),
+            re.compile(r"/api/v1/teams/?"),
+            re.compile(r"/api/v1/teams/[0-9]+/?"),
+            re.compile(r"/api/v1/teams/[0-9]+/roster/?"),
+            re.compile(r"/api/v1/schedule/?"),
+            re.compile(r"/api/v1/people/[0-9]+/?"),
         ),
     )
 
 
 def balldontlie_host_rule(host: str = "api.balldontlie.io") -> HostRule:
-    """BALLDONTLIE allow-list (public read endpoints)."""
+    """BALLDONTLIE allow-list -- explicit documented GET read endpoints only.
+
+    The earlier broad ``/nba/v1/[a-z_]+`` wildcard is removed: an arbitrary path
+    under a versioned namespace is no longer reachable. Only the exact endpoint
+    families the D1 audit and the approved D3 ingestion design need are listed,
+    and every account/billing/subscription/admin segment stays blocked by
+    ``FORBIDDEN_PROVIDER_SEGMENTS``.
+    """
 
     return HostRule(
         host=host,
@@ -170,15 +184,14 @@ def balldontlie_host_rule(host: str = "api.balldontlie.io") -> HostRule:
             re.compile(r"/v1/players/active/?"),
             re.compile(r"/v1/games/?"),
             re.compile(r"/v1/games/[0-9]+/?"),
-            # Read data surfaces (exercised from D3; declared here so the audit
-            # can probe them). Still GET-only, still no account surface.
+            # GOAT read-data surfaces the audit probes and D3 ingests. GET-only.
             re.compile(r"/v1/stats/?"),
             re.compile(r"/v1/season_averages/?"),
             re.compile(r"/v1/box_scores/?"),
             re.compile(r"/v1/box_scores/live/?"),
             re.compile(r"/v1/player_injuries/?"),
             re.compile(r"/v1/standings/?"),
-            re.compile(r"/nba/v1/[a-z_]+/?"),  # versioned namespace variants
+            re.compile(r"/v1/advanced_stats/?"),
         ),
     )
 

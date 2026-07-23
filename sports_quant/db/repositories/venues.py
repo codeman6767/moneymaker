@@ -9,6 +9,7 @@ mirroring ``team_aliases``.
 
 from __future__ import annotations
 
+import enum
 import sqlite3
 from typing import Optional, Protocol
 
@@ -20,6 +21,20 @@ from .base import Repository, RepositoryError, to_db_bool
 from .kalshi import UpsertOutcome
 
 _ROOF_OUTDOOR = {"open", "retractable"}  # retractable venues can be outdoor
+
+
+class AliasOutcome(str, enum.Enum):
+    """Result of adding a venue alias, so the ingestor counts accurately.
+
+    * ``INSERTED``  -- a new alias row was written.
+    * ``UNCHANGED`` -- the identical alias already existed (idempotent no-op).
+    * ``CONFLICT``  -- a provider venue id already maps to a *different* canonical
+      venue: an ambiguity to surface, never a silent arbitrary choice.
+    """
+
+    INSERTED = "inserted"
+    UNCHANGED = "unchanged"
+    CONFLICT = "conflict"
 
 
 def validate_venue_fields(
@@ -163,24 +178,54 @@ class SqliteVenueRepository(Repository):
         provider: str = "",
         provider_venue_id: Optional[str] = None,
         source: str = "provider_observed",
-    ) -> VenueAlias:
-        """Insert a venue alias idempotently (``INSERT OR IGNORE``)."""
+    ) -> tuple[Optional[VenueAlias], AliasOutcome]:
+        """Add a venue alias, distinguishing insert / unchanged / conflict.
+
+        Returns ``(alias, outcome)``. A provider venue id already bound to a
+        *different* canonical venue is a **conflict** (``(None, CONFLICT)``) --
+        surfaced, never resolved by an arbitrary choice, so ambiguous mappings are
+        detected. An identical existing alias is ``UNCHANGED`` (no ``INSERT OR
+        IGNORE`` miscounting). A genuinely new alias is ``INSERTED``.
+        """
 
         normalized = normalized_key(alias)
         now = utc_now_iso()
+
+        # A provider id already mapped to another venue is an ambiguity, not a dup.
+        if provider_venue_id and provider:
+            bound = self._fetch_one(
+                "SELECT venue_id FROM venue_aliases "
+                "WHERE provider = ? AND provider_venue_id = ?",
+                (provider, provider_venue_id),
+            )
+            if bound is not None and str(bound["venue_id"]) != venue_id:
+                return None, AliasOutcome.CONFLICT
+
+        existing = self._fetch_one(
+            "SELECT alias_id, venue_id, provider, provider_venue_id, alias, normalized, source, "
+            "created_at FROM venue_aliases WHERE venue_id = ? AND normalized = ? AND provider = ?",
+            (venue_id, normalized, provider),
+        )
+        if existing is not None:
+            return self._to_alias(existing), AliasOutcome.UNCHANGED
+
         alias_id = new_venue_alias_id()
         self._conn.execute(
-            "INSERT OR IGNORE INTO venue_aliases "
+            "INSERT INTO venue_aliases "
             "(alias_id, venue_id, provider, provider_venue_id, alias, normalized, source, "
             " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (alias_id, venue_id, provider, provider_venue_id, alias, normalized, source, now),
         )
         row = self._fetch_one(
             "SELECT alias_id, venue_id, provider, provider_venue_id, alias, normalized, source, "
-            "created_at FROM venue_aliases WHERE venue_id = ? AND normalized = ? AND provider = ?",
-            (venue_id, normalized, provider),
+            "created_at FROM venue_aliases WHERE alias_id = ?",
+            (alias_id,),
         )
         assert row is not None  # noqa: S101
+        return self._to_alias(row), AliasOutcome.INSERTED
+
+    @staticmethod
+    def _to_alias(row: sqlite3.Row) -> VenueAlias:
         return VenueAlias(
             alias_id=str(row["alias_id"]),
             venue_id=str(row["venue_id"]),
@@ -189,18 +234,38 @@ class SqliteVenueRepository(Repository):
             source=str(row["source"]),
             created_at=str(row["created_at"]),
             provider=str(row["provider"]),
-            provider_venue_id=self._opt_str(row, "provider_venue_id"),
+            provider_venue_id=(None if row["provider_venue_id"] is None else str(row["provider_venue_id"])),
         )
 
     def resolve_alias(self, alias: str, *, provider: str = "") -> Optional[str]:
-        """Return the ``venue_id`` for an alias, or ``None``."""
+        """Return the venue an alias uniquely resolves to, else ``None``.
+
+        Returns ``None`` when the alias is unknown **or ambiguous** (a normalized
+        name that maps to more than one canonical venue -- e.g. same-named venues
+        in different cities). Ambiguity is detected, never resolved to an
+        arbitrary venue; a caller needing the distinction uses
+        :meth:`resolve_alias_detail`.
+        """
+
+        venue_ids, _ambiguous = self.resolve_alias_detail(alias, provider=provider)
+        return venue_ids[0] if len(venue_ids) == 1 else None
+
+    def resolve_alias_detail(
+        self, alias: str, *, provider: str = ""
+    ) -> tuple[list[str], bool]:
+        """Return ``(venue_ids, ambiguous)`` for an alias.
+
+        ``venue_ids`` is every distinct canonical venue the normalized alias maps
+        to; ``ambiguous`` is ``True`` when there is more than one.
+        """
 
         normalized = normalized_key(alias)
-        row = self._fetch_one(
-            "SELECT venue_id FROM venue_aliases WHERE normalized = ? AND provider = ?",
+        rows = self._fetch_all(
+            "SELECT DISTINCT venue_id FROM venue_aliases WHERE normalized = ? AND provider = ?",
             (normalized, provider),
         )
-        return None if row is None else str(row["venue_id"])
+        venue_ids = [str(r["venue_id"]) for r in rows]
+        return venue_ids, len(venue_ids) > 1
 
     def count_aliases(self) -> int:
         return self._count("SELECT COUNT(*) FROM venue_aliases")

@@ -72,23 +72,38 @@ _VALID_NBA_TIERS: frozenset[str] = frozenset({"free", "all_star", "goat"})
 def _pinned_url_violation(field: str, value: str) -> Optional[str]:
     """Return a human-readable violation for a pinned base URL, or ``None``.
 
-    Rejects a non-https scheme, an unexpected host, an explicit port, or a path
-    that does not start with the required prefix -- so environment substitution
-    cannot redirect a provider to an arbitrary host.
+    Strict, fail-closed validation so environment substitution can never redirect
+    a provider to an arbitrary or deceptive host/path. Rejects: a non-https
+    scheme; any userinfo (``user:pass@``); an unexpected host; any explicit port;
+    a query string; a fragment; a percent-encoded path (an escape-trick vector);
+    and a path that is not **exactly** the required normalized prefix -- so
+    ``/api/v1evil`` and ``/api/v1/extra`` are both rejected, unlike a naive
+    ``startswith`` check. Request-level HTTP-policy enforcement remains an
+    independent second layer.
     """
 
     from urllib.parse import urlsplit
 
     host, prefix = _PINNED_URL_SPECS[field]
-    parts = urlsplit(value.rstrip("/"))
+    parts = urlsplit(value)
     if parts.scheme != "https":
         return f"{field} must use https (got {parts.scheme or 'no'} scheme)"
+    if parts.username is not None or parts.password is not None:
+        return f"{field} must not contain userinfo"
     if parts.hostname != host:
         return f"{field} host must be {host!r} (got {parts.hostname!r})"
     if parts.port is not None:
         return f"{field} must not specify a port (got {parts.port})"
-    if prefix and not parts.path.startswith(prefix):
-        return f"{field} path must start with {prefix!r} (got {parts.path!r})"
+    if parts.query:
+        return f"{field} must not contain a query string"
+    if parts.fragment:
+        return f"{field} must not contain a fragment"
+    if "%" in parts.path:
+        return f"{field} path must not be percent-encoded (got {parts.path!r})"
+    normalized_path = parts.path.rstrip("/")
+    expected_path = prefix.rstrip("/")
+    if normalized_path != expected_path:
+        return f"{field} path must be exactly {expected_path!r} (got {parts.path!r})"
     return None
 
 

@@ -32,7 +32,7 @@ import httpx
 from ..http_policy import ReadOnlyHTTPPolicy, build_readonly_client
 from ..redaction import sanitize_url
 from .capabilities import ProviderErrorKind, classify_http_status
-from .raw_exchange import RawExchange, build_exchange
+from .raw_exchange import RawExchange, build_exchange_from_parts
 
 #: Content types a data provider may return. A response outside this set is
 #: rejected rather than parsed (defends against an HTML error/redirect page).
@@ -156,10 +156,12 @@ class BaseProviderClient:
         while True:
             requested_at = datetime.now(timezone.utc)
             started_ns = time.monotonic_ns()
+            request = self._client.build_request("GET", path, params=request_params)
             try:
-                response = await self._client.get(path, params=request_params)
+                # stream=True so the body is read chunk-by-chunk and the size cap
+                # is enforced BEFORE the whole response is buffered into memory.
+                response = await self._client.send(request, stream=True)
             except httpx.HTTPError as exc:
-                # Transport-level failure (connect/timeout): retry, then classify.
                 if attempt < self._max_retries:
                     await self._sleep(self._backoff(attempt))
                     attempt += 1
@@ -170,25 +172,64 @@ class BaseProviderClient:
                     kind=ProviderErrorKind.NETWORK,
                 ) from None
 
-            exchange = build_exchange(
+            body, oversized = await self._read_bounded(response)
+            elapsed_ns = time.monotonic_ns() - started_ns
+            status_code = response.status_code
+
+            if oversized:
+                # No exchange, no body: an oversized response never reaches
+                # raw-response storage. Only a sanitized failure record survives.
+                raise ProviderError(
+                    f"{self.provider_name} response exceeded the maximum body size "
+                    f"(> {self._max_body_bytes} bytes) for {path}",
+                    kind=ProviderErrorKind.UNEXPECTED,
+                    status_code=status_code,
+                )
+
+            exchange = build_exchange_from_parts(
                 path=path,
                 params=request_params,
-                response=response,
+                status_code=status_code,
+                headers=response.headers,
+                body=body,
                 requested_at=requested_at,
-                elapsed_ns=time.monotonic_ns() - started_ns,
+                elapsed_ns=elapsed_ns,
                 secrets=secrets,
             )
 
-            if response.status_code in _RETRYABLE_STATUSES and attempt < self._max_retries:
+            if status_code in _RETRYABLE_STATUSES and attempt < self._max_retries:
                 await self._sleep(self._retry_delay(response, attempt))
                 attempt += 1
                 continue
 
-            if response.status_code >= 400:
-                self._raise_for_status(response, exchange)
+            if status_code >= 400:
+                self._raise_for_status(status_code, exchange)
 
-            self._check_response(response, exchange)
-            return ProviderResponse(data=response.json(), exchange=exchange)
+            self._check_content_type(response, exchange)
+            return ProviderResponse(data=self._parse_json(body, exchange), exchange=exchange)
+
+    async def _read_bounded(self, response: httpx.Response) -> tuple[str, bool]:
+        """Read a streamed body, aborting once it exceeds the size cap.
+
+        Returns ``(decoded_body, oversized)``. When ``oversized`` is True the
+        body is discarded (never returned/stored). Counts actual bytes, so a
+        misleading or missing ``Content-Length`` cannot smuggle an oversized
+        payload past the cap.
+        """
+
+        buffer = bytearray()
+        oversized = False
+        try:
+            async for chunk in response.aiter_bytes():
+                buffer.extend(chunk)
+                if len(buffer) > self._max_body_bytes:
+                    oversized = True
+                    break
+        finally:
+            await response.aclose()
+        if oversized:
+            return "", True
+        return buffer.decode("utf-8", errors="replace"), False
 
     # -- Helpers -------------------------------------------------------------
     def _backoff(self, attempt: int) -> float:
@@ -205,39 +246,44 @@ class BaseProviderClient:
                 pass  # HTTP-date form: fall back to exponential backoff
         return self._backoff(attempt)
 
-    def _raise_for_status(self, response: httpx.Response, exchange: RawExchange) -> None:
+    def _raise_for_status(self, status_code: int, exchange: RawExchange) -> None:
         # exchange.body is already sanitized; use a short snippet for wording.
         snippet = exchange.body[:200]
         kind = classify_http_status(
-            response.status_code, body_snippet=snippet, provider=self.provider_name
+            status_code, body_snippet=snippet, provider=self.provider_name
         )
         raise ProviderError(
-            f"{self.provider_name} responded {response.status_code} "
+            f"{self.provider_name} responded {status_code} "
             f"({kind.value}) for {exchange.endpoint}",
             kind=kind,
-            status_code=response.status_code,
+            status_code=status_code,
             exchange=exchange,
         )
 
-    def _check_response(self, response: httpx.Response, exchange: RawExchange) -> None:
+    def _check_content_type(self, response: httpx.Response, exchange: RawExchange) -> None:
         content_type = (response.headers.get("content-type") or "").split(";", 1)[0].strip()
         if content_type and content_type.lower() not in ALLOWED_CONTENT_TYPES:
             raise ProviderError(
                 f"{self.provider_name} returned unexpected content-type "
                 f"{content_type!r} for {exchange.endpoint}",
                 kind=ProviderErrorKind.UNEXPECTED,
-                status_code=response.status_code,
+                status_code=exchange.http_status,
                 exchange=exchange,
             )
-        if len(response.content) > self._max_body_bytes:
+
+    def _parse_json(self, body: str, exchange: RawExchange) -> Any:
+        import json
+
+        try:
+            return json.loads(body)
+        except (ValueError, TypeError):
             raise ProviderError(
-                f"{self.provider_name} response exceeded the maximum body size "
-                f"({len(response.content)} > {self._max_body_bytes} bytes) for "
+                f"{self.provider_name} returned an unparseable JSON body for "
                 f"{exchange.endpoint}",
-                kind=ProviderErrorKind.UNEXPECTED,
-                status_code=response.status_code,
+                kind=ProviderErrorKind.PARSER,
+                status_code=exchange.http_status,
                 exchange=exchange,
-            )
+            ) from None
 
 
 def merge_secrets(*values: Optional[str]) -> Iterable[str]:

@@ -18,13 +18,18 @@ from typing import Any, Optional
 from streaming.event_envelope import canonical_json
 
 from ..db.engine import Database, transaction
+from ..db.repositories.data_quality import SqliteDataQualityRepository
 from ..db.repositories.ingestion_runs import SqliteIngestionRunRepository
 from ..db.repositories.kalshi import UpsertOutcome
 from ..db.repositories.raw_responses import (
     SqliteRawResponseRepository,
     response_content_hash,
 )
-from ..db.repositories.venues import SqliteVenueRepository, validate_venue_fields
+from ..db.repositories.venues import (
+    AliasOutcome,
+    SqliteVenueRepository,
+    validate_venue_fields,
+)
 from ..db.schema import to_iso
 from ..providers.base_provider import ProviderError, ProviderResponse
 from ..providers.capabilities import PROVIDER_MLB_STATSAPI
@@ -60,7 +65,12 @@ class VenueIngestResult:
     venues_updated: int = 0
     venues_unchanged: int = 0
     venues_rejected: int = 0
-    aliases_written: int = 0
+    #: Aliases newly written -- only counts genuine INSERTs (an ``INSERT OR
+    #: IGNORE`` that changed nothing, or an ambiguous conflict, is NOT counted
+    #: here). ``aliases_unchanged``/``aliases_conflict`` keep those distinct.
+    aliases_inserted: int = 0
+    aliases_unchanged: int = 0
+    aliases_conflict: int = 0
     rejections: list[str] = field(default_factory=list)
     error_type: Optional[str] = None
     error_message: Optional[str] = None
@@ -213,6 +223,7 @@ async def _persist(
         observed_at = raw.received_at
 
         venues = SqliteVenueRepository(conn)
+        dq = SqliteDataQualityRepository(conn)
         with transaction(conn):
             for raw_venue in raw_venues:
                 norm, reason = normalize_venue(raw_venue)
@@ -239,15 +250,39 @@ async def _persist(
                     result.venues_updated += 1
                 else:
                     result.venues_unchanged += 1
-                # Alias: the provider's own name + provider id.
-                venues.add_alias(
+                # Alias: the provider's own name + provider id. The outcome is
+                # counted exactly (a no-op INSERT OR IGNORE is NOT an insert), and
+                # a provider id already bound to a *different* venue is an
+                # ambiguity surfaced as a data-quality note, never resolved by an
+                # arbitrary choice.
+                alias, alias_outcome = venues.add_alias(
                     venue_id=venue.venue_id,
                     alias=norm.name,
                     provider=PROVIDER_MLB_STATSAPI,
                     provider_venue_id=norm.provider_venue_id,
                     source="provider_observed",
                 )
-                result.aliases_written += 1
+                if alias_outcome is AliasOutcome.INSERTED:
+                    result.aliases_inserted += 1
+                elif alias_outcome is AliasOutcome.UNCHANGED:
+                    result.aliases_unchanged += 1
+                else:  # CONFLICT
+                    result.aliases_conflict += 1
+                    reason = (
+                        f"venue provider id {norm.provider_venue_id!r} already maps to a "
+                        f"different canonical venue; alias for {norm.name!r} not written"
+                    )
+                    result.note(reason)
+                    dq.record(
+                        severity="issue",
+                        rule_code="DQ-VENUE-ALIAS-001",
+                        entity_type="venue",
+                        description=reason,
+                        provider=PROVIDER_MLB_STATSAPI,
+                        run_id=run.run_id,
+                        raw_response_id=raw.raw_response_id,
+                        entity_id=venue.venue_id,
+                    )
 
         status = "partially_succeeded" if result.venues_rejected else "succeeded"
         with transaction(conn):

@@ -281,22 +281,52 @@ OPEN_METEO_DECLARATION = CapabilityDeclaration(
 class ProviderErrorKind(str, enum.Enum):
     """Distinct, non-overlapping classifications of a provider failure.
 
-    ``TIER_RESTRICTED`` (a capability the current subscription tier does not
-    grant) is deliberately separate from ``AUTHENTICATION`` (a bad/absent key):
-    a tier restriction is an honest "capability unavailable for current
-    subscription tier", never an invalid key, network fault, or application bug.
+    Each kind is separate on purpose. In particular ``TIER_RESTRICTED`` (a
+    capability the current subscription tier does not grant) is distinct from
+    ``AUTHENTICATION``/``INVALID_KEY`` (a bad/absent key) and from ``FORBIDDEN``
+    (a generic 403 with no plan/tier evidence): a tier restriction is only ever
+    inferred from explicit plan/subscription evidence, never assumed from a bare
+    403, and never mislabelled as an invalid key, network fault, or app bug.
     """
 
     AUTHENTICATION = "authentication"
+    INVALID_KEY = "invalid_key"
     TIER_RESTRICTED = "tier_restricted"
+    FORBIDDEN = "forbidden"
     RATE_LIMITED = "rate_limited"
     NOT_FOUND = "not_found"
     NETWORK = "network"
     SERVER = "server"
+    INVALID_PAYLOAD = "invalid_payload"
+    PARSER = "parser"
+    UNSUPPORTED = "unsupported"
     UNEXPECTED = "unexpected"
 
 
 TIER_UNAVAILABLE_MESSAGE = "capability unavailable for current subscription tier"
+
+#: Words in a sanitized response body that specifically indicate a plan/tier
+#: restriction (as opposed to a generic forbidden). Matched case-insensitively.
+_TIER_EVIDENCE = (
+    "tier",
+    "plan",
+    "subscription",
+    "upgrade",
+    "goat",
+    "all-star",
+    "all star",
+    "not included in your",
+    "requires a higher",
+    "paid plan",
+)
+
+#: Words indicating the key itself is bad/invalid (a subtype of authentication).
+_INVALID_KEY_EVIDENCE = ("invalid api key", "invalid key", "invalid authorization", "bad api key")
+
+
+def _has_tier_evidence(body_snippet: str) -> bool:
+    lowered = body_snippet.lower()
+    return any(token in lowered for token in _TIER_EVIDENCE)
 
 
 def classify_http_status(
@@ -304,24 +334,25 @@ def classify_http_status(
 ) -> ProviderErrorKind:
     """Classify an HTTP failure into a :class:`ProviderErrorKind`.
 
-    ``401`` is authentication (a bad/absent key). ``403`` is treated as a
-    **subscription-tier restriction** for BALLDONTLIE (its plan-gated endpoints
-    answer 403), and as authentication elsewhere -- so a GOAT-only endpoint on a
-    lower tier is never mislabelled as an invalid key. ``429`` is rate-limiting;
-    ``404`` not-found; ``5xx`` server. ``body_snippet`` must already be sanitized
-    by the caller (no secret ever reaches this function's decisions).
+    ``401`` is authentication (``INVALID_KEY`` when the body says so). A ``403``
+    is classified as ``TIER_RESTRICTED`` **only** when the sanitized body carries
+    explicit plan/tier/subscription evidence (:data:`_TIER_EVIDENCE`) -- a bare
+    403 with no such evidence is ``FORBIDDEN``, never ``paid_tier_required``. This
+    holds for **every** provider, including BALLDONTLIE: a GOAT-only endpoint on a
+    lower tier answers 403 with a plan message and is TIER_RESTRICTED, while a
+    generic 403 is FORBIDDEN. ``body_snippet`` must already be sanitized by the
+    caller (no secret ever reaches this function's decisions).
     """
 
     if status_code == 401:
+        lowered = body_snippet.lower()
+        if any(token in lowered for token in _INVALID_KEY_EVIDENCE):
+            return ProviderErrorKind.INVALID_KEY
         return ProviderErrorKind.AUTHENTICATION
     if status_code == 403:
-        if provider == PROVIDER_BALLDONTLIE:
+        if _has_tier_evidence(body_snippet):
             return ProviderErrorKind.TIER_RESTRICTED
-        # A generic 403 with plan/tier wording is still a tier restriction.
-        lowered = body_snippet.lower()
-        if "tier" in lowered or "plan" in lowered or "subscription" in lowered:
-            return ProviderErrorKind.TIER_RESTRICTED
-        return ProviderErrorKind.AUTHENTICATION
+        return ProviderErrorKind.FORBIDDEN
     if status_code == 429:
         return ProviderErrorKind.RATE_LIMITED
     if status_code == 404:

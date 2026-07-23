@@ -527,7 +527,16 @@ class DataQualityIssue:
 
 @dataclass(frozen=True)
 class ProviderCapabilityRecord:
-    """One append-only observation of a provider capability state at a tier."""
+    """One append-only provider-capability record at a tier.
+
+    ``is_observed`` distinguishes an *externally verified* observation
+    (``True`` — a probe hit ``endpoint`` and got ``http_status`` at
+    ``verified_at``, with ``raw_response_id`` as evidence and ``observed_state``
+    as the verified state) from a *declared-only* row (``False`` — documentation
+    says the capability is ``declared_state``, but no endpoint verified it).
+    ``state`` is the effective belief (observed_state when observed, else
+    declared_state). A static declaration is never persisted as an observation.
+    """
 
     capability_id: str
     provider: str
@@ -540,3 +549,11 @@ class ProviderCapabilityRecord:
     detail: Optional[str] = None
     run_id: Optional[str] = None
     raw_response_id: Optional[str] = None
+    declared_state: Optional[str] = None
+    observed_state: Optional[str] = None
+    is_observed: bool = False
+    probe_name: Optional[str] = None
+    endpoint: Optional[str] = None
+    http_status: Optional[int] = None
+    error_kind: Optional[str] = None
+    verified_at: Optional[str] = None

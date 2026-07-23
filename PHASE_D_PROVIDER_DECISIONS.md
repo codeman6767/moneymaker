@@ -3,9 +3,12 @@
 Provider evaluation and selection for the official-data + matching phase of the
 read-only MLB/NBA betting **recommendation** engine.
 
-> **Status: Provider selection and implementation design complete; implementation
-> not started.** No account was created, no subscription purchased, and no live
-> provider call was made while writing this document.
+> **Status: Provider selection and implementation design complete; D1 provider
+> infrastructure implemented (schema v10), D2–D5 not started.** No account was
+> created, no subscription purchased, and no live provider call was made while
+> writing this document or building D1 (every D1 test uses mocked transports).
+> The live re-verification of provider documentation/terms below is still owed
+> before any D2/D3 backfill.
 >
 > **Documentation-review date: 2026-07-23.** Every capability table below carries
 > this date. Because this planning pass made **no live provider call**, the tables

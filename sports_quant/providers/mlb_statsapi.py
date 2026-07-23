@@ -57,3 +57,14 @@ class MlbStatsApiClient(BaseProviderClient):
         return await self._get(
             f"/venues/{int(venue_id)}", params={"hydrate": "location,fieldInfo"}
         )
+
+    # -- Audit probe endpoints ------------------------------------------------
+    async def fetch_teams(self, *, sport_id: int = 1) -> ProviderResponse:
+        """GET /teams -- teams group; verifies the teams surface for the audit."""
+
+        return await self._get("/teams", params={"sportId": sport_id})
+
+    async def fetch_schedule(self, *, sport_id: int = 1) -> ProviderResponse:
+        """GET /schedule -- schedules/games group for the audit."""
+
+        return await self._get("/schedule", params={"sportId": sport_id})

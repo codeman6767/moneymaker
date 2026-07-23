@@ -76,12 +76,14 @@ from .teams import (
     TeamRepositoryProtocol,
 )
 from .venues import (
+    AliasOutcome,
     SqliteVenueRepository,
     VenueRepositoryProtocol,
     validate_venue_fields,
 )
 
 __all__ = [
+    "AliasOutcome",
     "CandidateInput",
     "CapabilityRepositoryProtocol",
     "DataQualityRepositoryProtocol",
