@@ -100,6 +100,11 @@ def _pinned_url_violation(field: str, value: str) -> Optional[str]:
         return f"{field} must not contain a fragment"
     if "%" in parts.path:
         return f"{field} path must not be percent-encoded (got {parts.path!r})"
+    if "//" in parts.path:
+        return f"{field} path must not contain duplicate slashes (got {parts.path!r})"
+    segments = [seg for seg in parts.path.split("/") if seg]
+    if any(seg in (".", "..") for seg in segments):
+        return f"{field} path must not contain dot segments (got {parts.path!r})"
     normalized_path = parts.path.rstrip("/")
     expected_path = prefix.rstrip("/")
     if normalized_path != expected_path:

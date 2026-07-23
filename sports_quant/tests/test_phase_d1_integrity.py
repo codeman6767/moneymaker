@@ -134,6 +134,92 @@ async def test_oversized_body_with_understated_content_length_is_refused() -> No
     assert excinfo.value.kind is ProviderErrorKind.UNEXPECTED
 
 
+class _ExplodingStream(httpx.AsyncByteStream):
+    """A body stream that fails if iterated -- proves the body was never read."""
+
+    async def __aiter__(self):
+        raise AssertionError("body must not be read when Content-Length exceeds the cap")
+        yield b""  # pragma: no cover - unreachable, satisfies the generator type
+
+    async def aclose(self) -> None:
+        return None
+
+
+async def test_declared_oversized_content_length_rejected_before_reading() -> None:
+    """An honestly-declared oversized Content-Length is refused before any read."""
+
+    limit = 128
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json", "content-length": str(limit * 10)},
+            stream=_ExplodingStream(),
+        )
+
+    client = _client(handler, max_body_bytes=limit)
+    try:
+        with pytest.raises(ProviderError) as excinfo:
+            await client.fetch_venues()  # _ExplodingStream would raise if read
+    finally:
+        await client.aclose()
+    assert excinfo.value.kind is ProviderErrorKind.UNEXPECTED
+    assert excinfo.value.exchange is None
+
+
+async def test_oversized_multi_chunk_body_aborted_mid_stream() -> None:
+    """Many small chunks that together exceed the cap are aborted mid-stream."""
+
+    limit = 100
+
+    class _Chunks(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            for _ in range(50):
+                yield b"a" * 10  # 500 bytes total, well over the 100 cap
+
+        async def aclose(self) -> None:
+            return None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # No content-length -> layer 2 (byte counting) must catch it.
+        return httpx.Response(200, headers={"content-type": "application/json"}, stream=_Chunks())
+
+    client = _client(handler, max_body_bytes=limit)
+    try:
+        with pytest.raises(ProviderError) as excinfo:
+            await client.fetch_venues()
+    finally:
+        await client.aclose()
+    assert excinfo.value.kind is ProviderErrorKind.UNEXPECTED
+    assert excinfo.value.exchange is None
+
+
+async def test_oversized_single_chunk_body_aborted() -> None:
+    """A single chunk larger than the cap is aborted on the first read."""
+
+    limit = 50
+
+    class _OneBigChunk(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"a" * (limit * 4)
+
+        async def aclose(self) -> None:
+            return None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, headers={"content-type": "application/json"}, stream=_OneBigChunk()
+        )
+
+    client = _client(handler, max_body_bytes=limit)
+    try:
+        with pytest.raises(ProviderError) as excinfo:
+            await client.fetch_venues()
+    finally:
+        await client.aclose()
+    assert excinfo.value.kind is ProviderErrorKind.UNEXPECTED
+
+
 # --------------------------------------------------------------------------- #
 # Base-URL pinning (config layer; independent of the request policy)
 # --------------------------------------------------------------------------- #
@@ -156,10 +242,22 @@ def test_pinned_url_accepts_exact_base() -> None:
         "https://statsapi.mlb.com/api/v1/extra",    # extra path segment
         "https://statsapi.mlb.com/api/%2e%2e/v1",   # percent-encoded path trick
         "https://statsapi.mlb.com/api/v2",          # wrong path
+        "https://statsapi.mlb.com//api/v1",         # duplicate leading slash
+        "https://statsapi.mlb.com/api//v1",         # duplicate interior slash
+        "https://statsapi.mlb.com/api/./v1",        # dot segment
+        "https://statsapi.mlb.com/api/v1/../v1",    # dot-dot segment
+        "https://statsapi.mlb.com/api/v1/..",       # dot-dot suffix
     ],
 )
 def test_pinned_url_rejects_deceptive_variants(value: str) -> None:
     assert _pinned_url_violation("mlb_stats_api_base_url", value) is not None
+
+
+def test_pinned_url_accepts_nws_empty_and_root_path() -> None:
+    assert _pinned_url_violation("nws_base_url", "https://api.weather.gov") is None
+    assert _pinned_url_violation("nws_base_url", "https://api.weather.gov/") is None
+    # A non-root path is rejected for NWS (its pinned base path is empty).
+    assert _pinned_url_violation("nws_base_url", "https://api.weather.gov/v1") is not None
 
 
 # --------------------------------------------------------------------------- #
@@ -174,6 +272,10 @@ def test_pinned_url_rejects_deceptive_variants(value: str) -> None:
         "/v1/stats",
         "/v1/box_scores",
         "/v1/player_injuries",
+        # Documented GOAT endpoints added in this repair:
+        "/v1/plays",
+        "/v1/lineups",
+        "/nba/v1/stats/advanced",
     ],
 )
 def test_balldontlie_documented_endpoints_are_allowed(path: str) -> None:
@@ -182,14 +284,30 @@ def test_balldontlie_documented_endpoints_are_allowed(path: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "url",
+    [
+        "https://api.balldontlie.io/v1/plays?game_id=18444208",
+        "https://api.balldontlie.io/v1/lineups?game_ids[]=1&game_ids[]=2",
+        "https://api.balldontlie.io/nba/v1/stats/advanced?game_id=1&per_page=25",
+    ],
+)
+def test_balldontlie_query_params_do_not_affect_path_authorization(url: str) -> None:
+    # Authorization is on the path only; a query string never grants or denies it.
+    ReadOnlyHTTPPolicy.for_balldontlie().enforce("GET", url)  # no raise
+
+
+@pytest.mark.parametrize(
     "path",
     [
+        "/v1/advanced_stats",     # removed: was never a documented endpoint
         "/v1/arbitrary",          # the removed /nba/v1/[a-z_]+ style wildcard
         "/v1/anything_goes",
-        "/nba/v1/teams",          # old namespace no longer reachable
+        "/nba/v1/teams",          # only /nba/v1/stats/advanced is reachable
+        "/nba/v1/stats",          # the parent is not itself allowed
         "/v1/account",            # account surface
         "/v1/subscriptions",      # billing surface
         "/v1/user/profile",       # user surface
+        "/v1/api-keys",           # key-management surface
     ],
 )
 def test_balldontlie_undocumented_or_forbidden_paths_blocked(path: str) -> None:
@@ -198,8 +316,9 @@ def test_balldontlie_undocumented_or_forbidden_paths_blocked(path: str) -> None:
         policy.enforce("GET", f"https://api.balldontlie.io{path}")
 
 
-def test_write_methods_blocked_on_documented_endpoint() -> None:
+@pytest.mark.parametrize("path", ["/v1/teams", "/v1/plays", "/v1/lineups", "/nba/v1/stats/advanced"])
+def test_write_methods_blocked_on_documented_endpoint(path: str) -> None:
     policy = ReadOnlyHTTPPolicy.for_balldontlie()
-    for method in ("POST", "PUT", "PATCH", "DELETE"):
+    for method in ("POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"):
         with pytest.raises(ReadOnlyPolicyError):
-            policy.enforce(method, "https://api.balldontlie.io/v1/teams")
+            policy.enforce(method, f"https://api.balldontlie.io{path}")

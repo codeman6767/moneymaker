@@ -171,6 +171,11 @@ def balldontlie_host_rule(host: str = "api.balldontlie.io") -> HostRule:
     families the D1 audit and the approved D3 ingestion design need are listed,
     and every account/billing/subscription/admin segment stays blocked by
     ``FORBIDDEN_PROVIDER_SEGMENTS``.
+
+    Play-by-play, lineups, and advanced statistics are **documented GOAT
+    endpoints** (``/v1/plays``, ``/v1/lineups``, ``/nba/v1/stats/advanced``); the
+    previously-listed ``/v1/advanced_stats`` was not a documented path and is
+    removed. Each is a single exact path, never a wildcard.
     """
 
     return HostRule(
@@ -191,7 +196,9 @@ def balldontlie_host_rule(host: str = "api.balldontlie.io") -> HostRule:
             re.compile(r"/v1/box_scores/live/?"),
             re.compile(r"/v1/player_injuries/?"),
             re.compile(r"/v1/standings/?"),
-            re.compile(r"/v1/advanced_stats/?"),
+            re.compile(r"/v1/plays/?"),
+            re.compile(r"/v1/lineups/?"),
+            re.compile(r"/nba/v1/stats/advanced/?"),
         ),
     )
 

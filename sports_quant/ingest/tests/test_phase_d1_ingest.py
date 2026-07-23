@@ -10,6 +10,7 @@ only its own capability group, and auth/tier failures are classified honestly.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 
 import httpx
 import pytest
@@ -81,13 +82,30 @@ def _mlb_client(body: dict, *, status: int = 200) -> MlbStatsApiClient:
     return MlbStatsApiClient(client=http)
 
 
-def _bdl_client(handler) -> BalldontlieClient:
+def _bdl_client(handler, **kwargs) -> BalldontlieClient:
     http = build_readonly_client(
         base_url="https://api.balldontlie.io",
         policy=ReadOnlyHTTPPolicy.for_balldontlie(),
         inner_transport=httpx.MockTransport(handler),
     )
-    return BalldontlieClient(SENTINEL_KEY, client=http)
+    return BalldontlieClient(SENTINEL_KEY, client=http, **kwargs)
+
+
+#: A deterministic BALLDONTLIE handler with a game to seed dependent probes.
+def _bdl_routing_handler(*, plays_body: Optional[dict] = None, games_body: Optional[dict] = None):
+    plays = plays_body if plays_body is not None else {"data": [{"id": 1, "type": "shot"}]}
+    games = games_body if games_body is not None else {"data": [{"id": 18444208}]}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        body: dict = {"data": [{"id": 1}]}
+        if path == "/v1/games":
+            body = games
+        elif path == "/v1/plays":
+            body = plays
+        return httpx.Response(200, json=body, headers={"content-type": "application/json"})
+
+    return handler
 
 
 def _mlb_decl():
@@ -391,8 +409,10 @@ async def test_audit_generic_403_is_unavailable_not_paid_tier(db: Database) -> N
         assert paid == 0
 
 
-async def test_audit_unprobed_capabilities_are_declared_only(db: Database) -> None:
-    """plays/lineups/starters have no documented probe -> declared-only, never observed."""
+async def test_audit_unobserved_capabilities_are_never_observed(db: Database) -> None:
+    """With an empty games response, the game-dependent capabilities (plays,
+    lineups) are skipped and starters/substitutions stay declared-only -- none is
+    ever marked observed or carries evidence."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"data": []}, headers={"content-type": "application/json"})
@@ -413,7 +433,7 @@ async def test_audit_unprobed_capabilities_are_declared_only(db: Database) -> No
                 (cap,),
             ).fetchone()
             assert row is not None, f"{cap} not recorded"
-            assert row["is_observed"] == 0, f"{cap} must not be observed (no documented probe)"
+            assert row["is_observed"] == 0, f"{cap} must not be observed"
             assert row["observed_state"] is None
             assert row["raw_response_id"] is None
 
@@ -488,6 +508,228 @@ async def test_audit_appends_history_never_overwrites(db: Database) -> None:
             )
         }
         assert "supported" in teams_states and "unavailable" in teams_states
+
+
+# --------------------------------------------------------------------------- #
+# Dependency-aware probes (plays / lineups / advanced / MLB roster)
+# --------------------------------------------------------------------------- #
+async def test_audit_balldontlie_dependent_probes_use_game_id(db: Database) -> None:
+    """plays/lineups/advanced are observed via their own endpoints once a game id
+    is extracted from the games response -- each with its own raw-response
+    evidence, never the games response."""
+
+    client = _bdl_client(_bdl_routing_handler())
+    await audit_provider(
+        database=db,
+        provider=PROVIDER_BALLDONTLIE,
+        probes=build_balldontlie_probes(client),
+        declaration=_bdl_decl(),
+    )
+    await client.aclose()
+    with db.connection() as conn:
+        rows = {
+            r["capability"]: (r["endpoint"], r["raw_response_id"], r["observed_state"])
+            for r in conn.execute(
+                "SELECT capability, endpoint, raw_response_id, observed_state "
+                "FROM provider_capabilities WHERE provider='balldontlie' AND is_observed=1"
+            )
+        }
+        assert rows["plays"][0] == "/v1/plays"
+        assert rows["lineups"][0] == "/v1/lineups"
+        assert rows["advanced_statistics"][0] == "/nba/v1/stats/advanced"
+        # Each dependent capability links its OWN raw response, distinct from games.
+        games_raw = rows["games"][1]
+        assert rows["plays"][1] not in (None, games_raw)
+        assert rows["lineups"][1] not in (None, games_raw)
+        assert rows["advanced_statistics"][1] not in (None, games_raw)
+        assert len({rows["plays"][1], rows["lineups"][1], rows["advanced_statistics"][1]}) == 3
+
+
+async def test_audit_no_game_marks_dependents_unknown_not_supported(db: Database) -> None:
+    """An empty games response leaves plays/lineups/advanced unknown_until_audited
+    -- never supported, never an auth failure -- and no game id is fabricated."""
+
+    client = _bdl_client(_bdl_routing_handler(games_body={"data": []}))
+    result = await audit_provider(
+        database=db,
+        provider=PROVIDER_BALLDONTLIE,
+        probes=build_balldontlie_probes(client),
+        declaration=_bdl_decl(),
+    )
+    await client.aclose()
+    assert result.status == "succeeded"  # not an auth failure
+    assert result.authenticated is True
+    with db.connection() as conn:
+        for cap in ("plays", "lineups", "advanced_statistics"):
+            row = conn.execute(
+                "SELECT is_observed, state, observed_state, raw_response_id, detail "
+                "FROM provider_capabilities WHERE provider='balldontlie' AND capability=?",
+                (cap,),
+            ).fetchone()
+            assert row["is_observed"] == 0
+            assert row["state"] == "unknown_until_audited"
+            assert row["observed_state"] is None
+            assert row["raw_response_id"] is None
+            assert "no suitable" in (row["detail"] or "")
+        # No plays request was issued, so there is no /v1/plays raw response.
+        plays_raw = conn.execute(
+            "SELECT COUNT(*) FROM raw_responses WHERE endpoint = '/v1/plays'"
+        ).fetchone()[0]
+        assert plays_raw == 0
+
+
+async def test_audit_substitutions_observed_only_when_plays_contain_them(db: Database) -> None:
+    """Substitutions are observed only if the plays payload actually has them."""
+
+    # Case 1: plays WITH a substitution event -> substitutions observed (via plays).
+    with_subs = _bdl_client(
+        _bdl_routing_handler(plays_body={"data": [{"id": 9, "type": "substitution"}]})
+    )
+    await audit_provider(
+        database=db, provider=PROVIDER_BALLDONTLIE,
+        probes=build_balldontlie_probes(with_subs), declaration=_bdl_decl(),
+    )
+    await with_subs.aclose()
+    with db.connection() as conn:
+        sub = conn.execute(
+            "SELECT is_observed, endpoint FROM provider_capabilities "
+            "WHERE provider='balldontlie' AND capability='substitutions' AND is_observed=1"
+        ).fetchone()
+        assert sub is not None and sub["endpoint"] == "/v1/plays"
+
+    # Case 2: plays WITHOUT substitutions -> substitutions stays declared-only.
+    db2 = Database(db.path.parent / "corpus2.db")
+    initialize_database(db2.path)
+    without = _bdl_client(
+        _bdl_routing_handler(plays_body={"data": [{"id": 9, "type": "shot"}]})
+    )
+    await audit_provider(
+        database=db2, provider=PROVIDER_BALLDONTLIE,
+        probes=build_balldontlie_probes(without), declaration=_bdl_decl(),
+    )
+    await without.aclose()
+    with db2.connection() as conn:
+        observed = conn.execute(
+            "SELECT COUNT(*) FROM provider_capabilities "
+            "WHERE provider='balldontlie' AND capability='substitutions' AND is_observed=1"
+        ).fetchone()[0]
+        assert observed == 0
+
+
+async def test_audit_lineup_access_does_not_confirm_pregame_starters(db: Database) -> None:
+    """Lineup endpoint access must never mark confirmed_pregame_starters observed."""
+
+    client = _bdl_client(_bdl_routing_handler())
+    await audit_provider(
+        database=db, provider=PROVIDER_BALLDONTLIE,
+        probes=build_balldontlie_probes(client), declaration=_bdl_decl(),
+    )
+    await client.aclose()
+    with db.connection() as conn:
+        lineups = conn.execute(
+            "SELECT is_observed FROM provider_capabilities "
+            "WHERE provider='balldontlie' AND capability='lineups' AND is_observed=1"
+        ).fetchone()
+        assert lineups is not None  # lineup access WAS observed
+        starters_observed = conn.execute(
+            "SELECT COUNT(*) FROM provider_capabilities "
+            "WHERE provider='balldontlie' AND capability='confirmed_pregame_starters' "
+            "AND is_observed=1"
+        ).fetchone()[0]
+        assert starters_observed == 0  # but starters are NOT inferred from it
+
+
+def _mlb_routing_client(*, teams_body: dict, roster_body: dict) -> MlbStatsApiClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        body: dict = {"venues": [], "dates": []}
+        if path == "/api/v1/teams":
+            body = teams_body
+        elif path.endswith("/roster"):
+            body = roster_body
+        elif "/people/" in path:
+            body = {"people": [{"id": 592450}]}
+        return httpx.Response(200, json=body, headers={"content-type": "application/json"})
+
+    http = build_readonly_client(
+        base_url="https://statsapi.mlb.com/api/v1",
+        policy=ReadOnlyHTTPPolicy.for_mlb_statsapi(),
+        inner_transport=httpx.MockTransport(handler),
+    )
+    return MlbStatsApiClient(client=http)
+
+
+async def test_audit_mlb_players_verified_via_roster_not_teams(db: Database) -> None:
+    """MLB players is observed via the roster (and person) endpoints, not teams."""
+
+    client = _mlb_routing_client(
+        teams_body={"teams": [{"id": 133, "name": "Tigers"}]},
+        roster_body={"roster": [{"person": {"id": 592450, "fullName": "X"}}]},
+    )
+    await audit_provider(
+        database=db, provider=PROVIDER_MLB_STATSAPI,
+        probes=build_mlb_statsapi_probes(client), declaration=_mlb_decl(),
+    )
+    await client.aclose()
+    with db.connection() as conn:
+        endpoints = {
+            r[0]
+            for r in conn.execute(
+                "SELECT endpoint FROM provider_capabilities "
+                "WHERE provider='mlb_statsapi' AND capability='players' AND is_observed=1"
+            )
+        }
+        assert "/teams/{id}/roster" in endpoints
+        assert "/teams" not in endpoints  # teams success alone never verifies players
+
+
+async def test_audit_mlb_players_unknown_when_no_team_id(db: Database) -> None:
+    """No extractable team id -> players recorded unverified, never supported."""
+
+    client = _mlb_routing_client(teams_body={"teams": []}, roster_body={"roster": []})
+    await audit_provider(
+        database=db, provider=PROVIDER_MLB_STATSAPI,
+        probes=build_mlb_statsapi_probes(client), declaration=_mlb_decl(),
+    )
+    await client.aclose()
+    with db.connection() as conn:
+        observed = conn.execute(
+            "SELECT COUNT(*) FROM provider_capabilities "
+            "WHERE provider='mlb_statsapi' AND capability='players' AND is_observed=1"
+        ).fetchone()[0]
+        assert observed == 0
+        unknown = conn.execute(
+            "SELECT state FROM provider_capabilities "
+            "WHERE provider='mlb_statsapi' AND capability='players' AND probe_name='roster'"
+        ).fetchone()
+        assert unknown is not None and unknown["state"] == "unknown_until_audited"
+
+
+async def test_audit_oversized_response_never_stored(db: Database) -> None:
+    """An oversized provider response is refused and never lands in raw_responses."""
+
+    big = b'{"data":[' + b'{"id":1},' * 5000 + b'{"id":2}]}'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=big, headers={"content-type": "application/json"})
+
+    client = _bdl_client(handler, max_body_bytes=256)
+    result = await audit_provider(
+        database=db, provider=PROVIDER_BALLDONTLIE,
+        probes=build_balldontlie_probes(client), declaration=_bdl_decl(),
+    )
+    await client.aclose()
+    # The run completed; every probe failed as UNEXPECTED (oversized), nothing
+    # supported, and NO oversized body is anywhere in raw_responses.
+    with db.connection() as conn:
+        supported = conn.execute(
+            "SELECT COUNT(*) FROM provider_capabilities "
+            "WHERE provider='balldontlie' AND observed_state='supported'"
+        ).fetchone()[0]
+        assert supported == 0
+        for (body,) in conn.execute("SELECT body FROM raw_responses"):
+            assert len(body) <= 256
+    assert result.observed_count == 0
 
 
 # --------------------------------------------------------------------------- #

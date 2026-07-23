@@ -212,11 +212,27 @@ class BaseProviderClient:
         """Read a streamed body, aborting once it exceeds the size cap.
 
         Returns ``(decoded_body, oversized)``. When ``oversized`` is True the
-        body is discarded (never returned/stored). Counts actual bytes, so a
-        misleading or missing ``Content-Length`` cannot smuggle an oversized
-        payload past the cap.
+        body is discarded (never returned/stored). Two layers guard the cap:
+
+        1. A **declared** ``Content-Length`` above the maximum is rejected before
+           a single body byte is read (fast reject; no wasted bandwidth).
+        2. Bytes are then counted as chunks arrive and the read is aborted the
+           moment the accumulated size exceeds the cap -- so a missing, low, or
+           otherwise misleading ``Content-Length`` cannot smuggle an oversized
+           payload past the cap either.
         """
 
+        # Layer 1: fast reject on an honestly-declared oversized Content-Length.
+        declared = response.headers.get("content-length")
+        if declared is not None:
+            try:
+                if int(declared) > self._max_body_bytes:
+                    await response.aclose()
+                    return "", True
+            except ValueError:
+                pass  # unpar. fall through to byte counting
+
+        # Layer 2: count actual bytes, aborting the stream when the cap is passed.
         buffer = bytearray()
         oversized = False
         try:

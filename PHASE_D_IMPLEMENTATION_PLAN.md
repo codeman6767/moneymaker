@@ -376,22 +376,41 @@ probe stay declared-only (`is_observed = 0`, `observed_state` NULL). So a
 successful `/teams` response marks only its own group observed — never injuries,
 stats, box scores, plays, or lineups. One tier-restricted endpoint restricts only
 its group; unrelated groups keep being probed. A `401` fails the run and records
-**no** supported observation. Capabilities without a confidently documented
-endpoint (NBA plays, lineups, confirmed pregame starters, substitutions) are left
-declared-only rather than probed against a guessed path. Groups probed:
+**no** supported observation.
 
-MLB StatsAPI — teams · schedules/games · venues.
+**Dependency-aware probing.** Some documented endpoints require a valid provider
+id, so the audit resolves it from an earlier probe rather than hardcoding one:
+
+* BALLDONTLIE `/v1/plays?game_id=…`, `/v1/lineups?game_ids[]=…`, and
+  `/nba/v1/stats/advanced` each take a **game id** extracted from the sanitized
+  `/v1/games` response.
+* MLB **players** is verified via `/teams/{id}/roster` (a team id from the teams
+  response) and then optionally `/people/{id}` (a person id from the roster) —
+  never marked supported just because `/teams` returned 200.
+
+When no suitable id is available the dependent capability is recorded
+`unknown_until_audited` (skipped, no request issued, never supported, never an
+auth failure); an id is never fabricated. A 2xx with an empty result verifies
+*endpoint access* only, not historical coverage or payload completeness. Lineup
+*endpoint access*, confirmed pregame starters, substitutions, and play-by-play
+stay distinct: starters are never inferred from lineup access, and substitutions
+are marked observed **only** when the returned play data actually contains
+substitution events. Groups probed:
+
+MLB StatsAPI — teams · schedules/games · venues · roster/person (players).
 BALLDONTLIE (GOAT) — teams · players · games/schedules · player game statistics ·
-box/team statistics · injuries (each a documented endpoint on the tightened
-allow-list).
+box/team statistics · injuries · plays · lineups · advanced statistics
+(`/nba/v1/stats/advanced`) — each a documented endpoint on the tightened
+allow-list; the previously-listed `/v1/advanced_stats` was undocumented and was
+removed.
 NWS / Open-Meteo — one current-forecast probe each; a current forecast never
 implies historical-forecast reconstruction.
 
 Each observed/declared capability is one of the §2.2 states (e.g. a GOAT-only
 endpoint answering a **plan-worded** 403 → `paid_tier_required`; a generic 403
-with no plan evidence → `unavailable`/forbidden, never `paid_tier_required`). The
-audit is the authoritative source for observed capability history; snapshots are
-append-only, so an earlier belief is preserved and never overwritten. A tier
+with no plan evidence → `forbidden`/`unavailable`, never `paid_tier_required`).
+The audit is the authoritative source for observed capability history; snapshots
+are append-only, so an earlier belief is preserved and never overwritten. A tier
 limitation it finds is a recorded capability state, never a failed run.
 
 ---
@@ -419,23 +438,32 @@ Model column = recommended driver.
 
 > **Built.** Capability system (`providers/capabilities.py` — typed
 > `ProviderCapability` × `CapabilityState`, `BalldontlieTier`, per-provider
-> declarations, evidence-based tier-error classifier), shared client base
-> (`providers/base_provider.py` — GET-only, `RawExchange`, bounded
-> timeouts/retries + `Retry-After`, content-type guard, **streamed** size guard
-> that counts bytes and aborts before buffering an oversized body, no redirect
-> chasing), the four clients (`mlb_statsapi`, `balldontlie`, `nws`,
-> `open_meteo`), `http_policy` allow-lists + `for_*` (BALLDONTLIE tightened to
-> explicit documented endpoints — no path wildcard), pinned/validated config
-> (exact host + normalized base path; rejects userinfo/port/query/fragment and
-> deceptive prefixes), migrations `d009_provider_infra` (v9) and
+> declarations incl. `advanced_statistics`, evidence-based tier-error classifier
+> with distinct authentication / invalid-key / tier-restricted / forbidden /
+> rate-limited / not-found / network / server / invalid-payload / parser /
+> unsupported / unexpected kinds), shared client base (`providers/base_provider.py`
+> — GET-only, `RawExchange`, bounded timeouts/retries + `Retry-After`,
+> content-type guard, **streamed** size guard: it rejects a declared
+> `Content-Length` over the cap before reading and otherwise counts bytes and
+> aborts mid-stream, so an oversized body never buffers or reaches storage; no
+> redirect chasing), the four clients (`mlb_statsapi` incl. roster/person,
+> `balldontlie` incl. plays/lineups/advanced-stats with id validation and bounded
+> pages, `nws`, `open_meteo`), `http_policy` allow-lists + `for_*` (BALLDONTLIE
+> tightened to explicit documented endpoints incl. `/v1/plays`, `/v1/lineups`,
+> `/nba/v1/stats/advanced`; the undocumented `/v1/advanced_stats` removed; no path
+> wildcard), pinned/validated config (exact host + normalized base path; rejects
+> userinfo/port/query/fragment, duplicate slashes, dot segments, and deceptive
+> prefixes), migrations `d009_provider_infra` (v9) and
 > `d010_provider_audit_integrity` (v10), repositories (`references`, `venues`,
-> `matching`, `data_quality`, `capabilities`), the **evidence-backed multi-probe**
-> `provider-audit` + `ingest-venues` CLI, and full mocked tests. The audit now
-> separates declared from externally observed capabilities (§10): one GET per
-> group, observed capabilities carry probe/endpoint/status/error/raw-response
-> evidence, unprobed capabilities stay declared-only, and audit history is
-> append-only. No historical backfill; no live call. Live-verification of
-> provider docs/terms (decisions §7) is still owed before D2/D3 backfill.
+> `matching`, `data_quality`, `capabilities`), the **evidence-backed,
+> dependency-aware** `provider-audit` + `ingest-venues` CLI, and full mocked
+> tests. The audit separates declared from externally observed capabilities (§10):
+> one GET per group, dependent probes resolve a game/team id from an earlier
+> response (skipping honestly as `unknown_until_audited` when none is available),
+> observed capabilities carry probe/endpoint/status/error/raw-response evidence,
+> unprobed/unverified capabilities stay declared-only, and audit history is
+> append-only. No historical backfill; no live call. Live-verification of provider
+> docs/terms (decisions §7) is still owed before D2/D3 backfill.
 
 - **Provider(s):** infrastructure for all selected providers; **required tier:**
   BALLDONTLIE **GOAT** declared (not yet exercised for backfill). **Optional:**
@@ -494,9 +522,12 @@ Model column = recommended driver.
   R at runtime. **Optional comparison:** SportsDataIO Discovery Lab (delayed;
   id/field/record comparison; off by default; never the live feed).
 - **Capabilities (per GOAT):** teams/players/games/schedules/game_results/
-  player_statistics/injuries/plays/quarter_lines = `supported`; `lineups` =
-  `best_effort`; `confirmed_pregame_starters` = `unavailable`;
-  `correction_timestamps` = `unsupported`.
+  player_statistics/team_statistics/advanced_statistics/injuries/plays/quarter_lines
+  = `supported`; `lineups` = `best_effort`; `confirmed_pregame_starters` =
+  `unavailable`; `substitutions` = `best_effort` (from plays where present);
+  `correction_timestamps` = `unsupported`. Advanced statistics are served by the
+  documented `/nba/v1/stats/advanced` endpoint; play-by-play and lineups require a
+  game id (`/v1/plays?game_id=…`, `/v1/lineups?game_ids[]=…`).
 - **Required D3 outputs (must be produced):** provider teams, provider players,
   schedules, games, game-level results, **available** player statistics,
   **available** box scores, **available** injuries, provider ids, raw-response

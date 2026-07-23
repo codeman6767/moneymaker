@@ -29,6 +29,7 @@ class ProviderCapability(str, enum.Enum):
     GAME_RESULTS = "game_results"
     TEAM_STATISTICS = "team_statistics"
     PLAYER_STATISTICS = "player_statistics"
+    ADVANCED_STATISTICS = "advanced_statistics"
     INNING_LINES = "inning_lines"
     QUARTER_LINES = "quarter_lines"
     INJURIES = "injuries"
@@ -169,6 +170,7 @@ BALLDONTLIE_GOAT_DECLARATION = CapabilityDeclaration(
         _C.GAME_RESULTS: _S.SUPPORTED,
         _C.PLAYER_STATISTICS: _S.SUPPORTED,
         _C.TEAM_STATISTICS: _S.SUPPORTED,  # derivable from box scores
+        _C.ADVANCED_STATISTICS: _S.SUPPORTED,  # /nba/v1/stats/advanced (GOAT)
         _C.INJURIES: _S.SUPPORTED,
         _C.PLAYS: _S.SUPPORTED,
         _C.QUARTER_LINES: _S.SUPPORTED,  # derivable from box/plays
@@ -188,6 +190,7 @@ BALLDONTLIE_GOAT_DECLARATION = CapabilityDeclaration(
 _GOAT_ONLY_CAPS = (
     _C.PLAYER_STATISTICS,
     _C.TEAM_STATISTICS,
+    _C.ADVANCED_STATISTICS,
     _C.PLAYS,
     _C.QUARTER_LINES,
     _C.LINEUPS,

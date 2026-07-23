@@ -16,6 +16,19 @@ observed -- never injuries, stats, box scores, plays, or lineups. Capabilities
 with no probe stay declared-only / ``unknown_until_audited``. A tier restriction
 affects only its own group; a 401 marks nothing supported. Nothing is fabricated.
 
+**Dependency-aware probes.** Some documented endpoints require a valid provider
+id: BALLDONTLIE ``/v1/plays`` and ``/v1/lineups`` (and ``/nba/v1/stats/advanced``)
+need a game id, and the MLB roster/person endpoints need a team/person id. The
+audit runs the base probe first, extracts one valid id from the *sanitized*
+parsed response, then runs the dependent probe with it. If no suitable id is
+available the dependent capability is recorded ``unknown_until_audited`` (skipped,
+never supported, never an auth failure) -- an id is never fabricated. A 2xx with
+an empty result verifies endpoint access only, not historical coverage. Lineup
+*endpoint access*, confirmed pregame starters, substitutions, and play-by-play
+are kept distinct: starters are never inferred from lineup access, and
+substitutions are marked observed only when the returned play data actually
+contains substitution events.
+
 D1 exercises this against mocked transports only; no live call is made.
 ``--dry-run`` runs the probes in memory and persists absolutely nothing.
 """
@@ -65,6 +78,19 @@ SUPPORTED_AUDIT_PROVIDERS = (
 # --------------------------------------------------------------------------- #
 # Probes
 # --------------------------------------------------------------------------- #
+#: A resolver turns the successful responses of earlier probes (keyed by probe
+#: name) into a fetch callable for a dependent probe, or ``None`` to skip it when
+#: the dependency (e.g. a valid provider game id) was not available.
+ResolveFn = Callable[
+    [dict[str, ProviderResponse]], Optional[Callable[[], Awaitable[ProviderResponse]]]
+]
+#: Given a probe's successful parsed response, return any *additional*
+#: capabilities that response actually evidences (e.g. substitutions found inside
+#: play-by-play data). Only capabilities returned here are marked observed off
+#: that response -- never inferred from mere endpoint access.
+ExtraCapsFn = Callable[[ProviderResponse], tuple[ProviderCapability, ...]]
+
+
 @dataclass
 class CapabilityProbe:
     """One minimal approved GET that provides evidence for a capability group.
@@ -73,12 +99,25 @@ class CapabilityProbe:
     success or raises :class:`ProviderError`. ``capabilities`` is the exact set
     this probe verifies -- and nothing else. ``endpoint`` is the sanitized
     endpoint/family recorded on each observation.
+
+    A **dependency-aware** probe leaves ``fetch`` ``None`` and supplies
+    ``resolve``: it is handed the successful responses of earlier probes and
+    returns the fetch callable to use, or ``None`` to *skip* (no GET issued). A
+    skipped probe records its capabilities as ``unknown_until_audited`` with
+    ``skip_reason`` -- never as an authentication failure or a supported result.
+
+    ``extra_capabilities`` inspects a successful response for capabilities it
+    genuinely contains (e.g. substitution events inside plays) and marks only
+    those observed, attached to this probe's exact response.
     """
 
     name: str
     endpoint: str
     capabilities: tuple[ProviderCapability, ...]
-    fetch: Callable[[], Awaitable[ProviderResponse]]
+    fetch: Optional[Callable[[], Awaitable[ProviderResponse]]] = None
+    resolve: Optional[ResolveFn] = None
+    skip_reason: str = "no suitable dependency was available to probe this capability"
+    extra_capabilities: Optional[ExtraCapsFn] = None
 
 
 @dataclass
@@ -138,11 +177,17 @@ class _ProbeResult:
     observed_state: Optional[CapabilityState]  # None when the probe couldn't verify
     detail: Optional[str]
     auth_failed: bool = False
+    skipped: bool = False  # dependency unavailable -> no GET issued
+    response: Optional[ProviderResponse] = None  # successful parsed response
+    extra_caps: tuple[ProviderCapability, ...] = ()
 
 
-async def _run_probe(probe: CapabilityProbe) -> _ProbeResult:
-    """Run one probe and classify its outcome into an observed state.
+async def _run_probe(
+    probe: CapabilityProbe, prior: dict[str, ProviderResponse]
+) -> _ProbeResult:
+    """Run one probe (resolving any dependency) and classify its outcome.
 
+    * dependency unavailable -> ``skipped`` (no request; ``unknown_until_audited``).
     * 2xx success -> the group is observed ``supported``.
     * TIER_RESTRICTED -> observed ``paid_tier_required`` (only this group).
     * FORBIDDEN -> observed ``unavailable`` (a permission gate, not a tier one).
@@ -152,8 +197,19 @@ async def _run_probe(probe: CapabilityProbe) -> _ProbeResult:
       a failure, never a false observation).
     """
 
+    fetch = probe.fetch
+    if probe.resolve is not None:
+        fetch = probe.resolve(prior)
+        if fetch is None:
+            # Dependency (e.g. a valid game id) not available: skip honestly.
+            return _ProbeResult(
+                probe, None, None, None, None, probe.skip_reason, skipped=True
+            )
+    if fetch is None:  # pragma: no cover - a misconfigured probe
+        raise ValueError(f"probe {probe.name!r} has neither fetch nor a resolver")
+
     try:
-        response = await probe.fetch()
+        response = await fetch()
     except ProviderError as exc:
         kind = exc.kind
         if kind is ProviderErrorKind.TIER_RESTRICTED:
@@ -167,13 +223,21 @@ async def _run_probe(probe: CapabilityProbe) -> _ProbeResult:
                                 "authentication failure", auth_failed=True)
         # Inconclusive: recorded as a failure, never a supported observation.
         return _ProbeResult(probe, exc.exchange, exc.status_code, kind, None, kind.value)
+    except ValueError as exc:
+        # A pre-request validation failure (e.g. a bad game id): never a network
+        # call, never a supported observation. Recorded as an invalid payload.
+        _t, msg = sanitize_error(exc)
+        return _ProbeResult(probe, None, None, ProviderErrorKind.INVALID_PAYLOAD, None, msg)
     except Exception as exc:  # noqa: BLE001 - classify, never leak
         _t, msg = sanitize_error(exc)
         return _ProbeResult(probe, None, None, ProviderErrorKind.UNEXPECTED, None, msg)
 
+    extra: tuple[ProviderCapability, ...] = ()
+    if probe.extra_capabilities is not None:
+        extra = probe.extra_capabilities(response)
     return _ProbeResult(
         probe, response.exchange, response.exchange.http_status, None,
-        CapabilityState.SUPPORTED, None,
+        CapabilityState.SUPPORTED, None, response=response, extra_caps=extra,
     )
 
 
@@ -203,11 +267,13 @@ async def audit_provider(
 
     probe_results: list[_ProbeResult] = []
     probed_caps: set[ProviderCapability] = set()
+    responses_by_name: dict[str, ProviderResponse] = {}
     auth_failed = False
     for probe in probes:
-        pr = await _run_probe(probe)
+        pr = await _run_probe(probe, responses_by_name)
         probe_results.append(pr)
-        result.requests_made += 1
+        if not pr.skipped:
+            result.requests_made += 1  # a skipped probe issued no GET
         if pr.observed_state is CapabilityState.PAID_TIER_REQUIRED:
             result.tier_restricted = True
         if pr.auth_failed:
@@ -215,7 +281,12 @@ async def audit_provider(
             # A shared key that fails auth on one endpoint fails everywhere;
             # stop probing rather than hammer the provider with a bad key.
             break
+        if pr.response is not None:
+            responses_by_name[probe.name] = pr.response
+        # Capabilities this probe is responsible for (base + any verified extras)
+        # are considered "probed" so they are not also emitted as declared-only.
         probed_caps.update(probe.capabilities)
+        probed_caps.update(pr.extra_caps)
 
     # authenticated: True unless we saw an auth failure; None if no probe ran.
     if auth_failed:
@@ -228,7 +299,29 @@ async def audit_provider(
     observations: list[CapabilityObservation] = []
     # 1) Observed capabilities from each probe that verified something.
     for pr in probe_results:
-        for cap in pr.probe.capabilities:
+        if pr.skipped:
+            # Dependency unavailable: record each capability as unverified
+            # (unknown_until_audited), never supported, never an auth failure.
+            for cap in pr.probe.capabilities:
+                declared = declaration.state(cap).value
+                observations.append(
+                    CapabilityObservation(
+                        capability=cap.value,
+                        state=CapabilityState.UNKNOWN_UNTIL_AUDITED.value,
+                        declared_state=declared,
+                        observed_state=None,
+                        is_observed=False,
+                        probe_name=pr.probe.name,
+                        endpoint=pr.probe.endpoint,
+                        http_status=None,
+                        error_kind=None,
+                        detail=pr.detail,
+                    )
+                )
+            continue
+        # Base capabilities + any extras the response genuinely evidenced.
+        probe_caps = tuple(pr.probe.capabilities) + tuple(pr.extra_caps)
+        for cap in probe_caps:
             declared = declaration.state(cap).value
             if pr.observed_state is None:
                 # Probe attempted but could not verify: record the failure as a
@@ -466,14 +559,39 @@ _C = ProviderCapability
 
 
 def build_balldontlie_probes(client) -> list[CapabilityProbe]:
-    """Independent probes for the documented BALLDONTLIE GOAT endpoint families.
+    """Dependency-aware probes for the documented BALLDONTLIE GOAT endpoints.
 
-    Each group hits one documented endpoint. Capabilities without a documented
-    endpoint (plays, lineups, confirmed pregame starters, substitutions) are
-    **not** probed here -- they remain declared-only / unknown until a live audit
-    confirms an endpoint, honouring "do not guess endpoint names". Lineup access
-    and pregame-starter confirmation are represented separately.
+    Independent groups (teams, players, games, per-player stats, box scores,
+    injuries) hit one documented endpoint each. Play-by-play, lineups, and
+    advanced stats are documented but require a valid game id; each is a dependent
+    probe that extracts one id from the games response and skips honestly
+    (``unknown_until_audited``) when no game is available. Substitutions are marked
+    observed only if the plays payload actually contains substitution events;
+    confirmed pregame starters are never inferred from lineup access.
     """
+
+    from ..providers.balldontlie import game_id_from_payload, substitutions_present
+
+    def game_id(prior: dict[str, ProviderResponse]) -> Optional[int]:
+        resp = prior.get("games")
+        return None if resp is None else game_id_from_payload(resp.data)
+
+    def resolve_plays(prior):
+        gid = game_id(prior)
+        return None if gid is None else (lambda: client.fetch_plays(game_id=gid))
+
+    def resolve_lineups(prior):
+        gid = game_id(prior)
+        return None if gid is None else (lambda: client.fetch_lineups(game_ids=[gid]))
+
+    def resolve_advanced(prior):
+        gid = game_id(prior)
+        return None if gid is None else (lambda: client.fetch_advanced_stats(game_id=gid))
+
+    def plays_extra(response: ProviderResponse) -> tuple[ProviderCapability, ...]:
+        return (_C.SUBSTITUTIONS,) if substitutions_present(response.data) else ()
+
+    _no_game = "no suitable provider game id was available from the games probe"
 
     return [
         CapabilityProbe("teams", "/v1/teams", (_C.TEAMS,), lambda: client.fetch_teams()),
@@ -494,11 +612,51 @@ def build_balldontlie_probes(client) -> list[CapabilityProbe]:
             "injuries", "/v1/player_injuries", (_C.INJURIES,),
             lambda: client.fetch_player_injuries(),
         ),
+        # Dependent probes: need a valid game id from the games response above.
+        CapabilityProbe(
+            "plays", "/v1/plays", (_C.PLAYS,),
+            resolve=resolve_plays, skip_reason=_no_game, extra_capabilities=plays_extra,
+        ),
+        CapabilityProbe(
+            "lineups", "/v1/lineups", (_C.LINEUPS,),
+            resolve=resolve_lineups, skip_reason=_no_game,
+        ),
+        CapabilityProbe(
+            "advanced_stats", "/nba/v1/stats/advanced", (_C.ADVANCED_STATISTICS,),
+            resolve=resolve_advanced, skip_reason=_no_game,
+        ),
     ]
 
 
 def build_mlb_statsapi_probes(client) -> list[CapabilityProbe]:
-    """Independent probes for the MLB StatsAPI endpoint families D1 verifies."""
+    """Dependency-aware probes for the MLB StatsAPI endpoint families D1 verifies.
+
+    teams / schedule / venues are independent. The players capability is verified
+    via a **dependent** roster probe (a team id extracted from the teams response),
+    then optionally a single person lookup (a person id from the roster response) --
+    players is never marked supported just because ``/teams`` returned 200.
+    """
+
+    from ..providers.mlb_statsapi import _first_id, first_person_id_from_roster
+
+    def resolve_roster(prior):
+        resp = prior.get("teams")
+        tid = None if resp is None else _first_id(resp.data, "teams")
+        return None if tid is None else (lambda: client.fetch_roster(tid))
+
+    def resolve_person(prior):
+        resp = prior.get("roster")
+        pid = None if resp is None else first_person_id_from_roster(resp.data)
+        return None if pid is None else (lambda: client.fetch_person(pid))
+
+    def person_extra(_response: ProviderResponse) -> tuple[ProviderCapability, ...]:
+        # A reachable person endpoint adds confirming players evidence; carried as
+        # an extra (not a base capability) so a skipped person probe emits no
+        # redundant players row -- the roster probe already covers players.
+        return (_C.PLAYERS,)
+
+    _no_team = "no suitable team id was available from the teams probe"
+    _no_person = "no suitable person id was available from the roster probe"
 
     return [
         CapabilityProbe("teams", "/teams", (_C.TEAMS,), lambda: client.fetch_teams()),
@@ -507,6 +665,14 @@ def build_mlb_statsapi_probes(client) -> list[CapabilityProbe]:
             lambda: client.fetch_schedule(),
         ),
         CapabilityProbe("venues", "/venues", (_C.VENUES,), lambda: client.fetch_venues()),
+        CapabilityProbe(
+            "roster", "/teams/{id}/roster", (_C.PLAYERS,),
+            resolve=resolve_roster, skip_reason=_no_team,
+        ),
+        CapabilityProbe(
+            "person", "/people/{id}", (),
+            resolve=resolve_person, skip_reason=_no_person, extra_capabilities=person_extra,
+        ),
     ]
 
 

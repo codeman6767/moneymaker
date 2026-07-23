@@ -304,3 +304,151 @@ def test_clients_do_no_network_at_import() -> None:
         "sports_quant.providers.base_provider",
     ):
         importlib.import_module(mod)  # no exception, no network
+
+
+# --------------------------------------------------------------------------- #
+# BALLDONTLIE documented dependent endpoints: validation + GET-only
+# --------------------------------------------------------------------------- #
+def _ok_handler(seen: list[str]):
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return httpx.Response(200, json={"data": []}, headers={"content-type": "application/json"})
+
+    return handler
+
+
+async def test_balldontlie_plays_lineups_advanced_hit_documented_paths() -> None:
+    seen: list[str] = []
+    client = _bdl_client(_ok_handler(seen))
+    try:
+        await client.fetch_plays(game_id=18444208)
+        await client.fetch_lineups(game_ids=[18444208, 7])
+        await client.fetch_advanced_stats(game_id=18444208)
+        await client.fetch_advanced_stats(season=2024)
+    finally:
+        await client.aclose()
+    assert seen == ["/v1/plays", "/v1/lineups", "/nba/v1/stats/advanced", "/nba/v1/stats/advanced"]
+
+
+@pytest.mark.parametrize("bad", [None, "", "  ", "abc", 0, -5, 1.5, True, "12x"])
+async def test_balldontlie_plays_rejects_invalid_game_id_without_request(bad) -> None:  # noqa: ANN001
+    seen: list[str] = []
+    client = _bdl_client(_ok_handler(seen))
+    try:
+        with pytest.raises(ValueError):
+            await client.fetch_plays(game_id=bad)
+    finally:
+        await client.aclose()
+    assert seen == []  # never issued a request with a bad id
+
+
+async def test_balldontlie_lineups_requires_at_least_one_id() -> None:
+    seen: list[str] = []
+    client = _bdl_client(_ok_handler(seen))
+    try:
+        with pytest.raises(ValueError):
+            await client.fetch_lineups(game_ids=[])
+    finally:
+        await client.aclose()
+    assert seen == []
+
+
+async def test_balldontlie_advanced_stats_requires_a_bounding_filter() -> None:
+    seen: list[str] = []
+    client = _bdl_client(_ok_handler(seen))
+    try:
+        with pytest.raises(ValueError):
+            await client.fetch_advanced_stats()  # no game_id and no season
+    finally:
+        await client.aclose()
+    assert seen == []
+
+
+async def test_balldontlie_per_page_is_bounded() -> None:
+    captured: list[httpx.URL] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request.url)
+        return httpx.Response(200, json={"data": []}, headers={"content-type": "application/json"})
+
+    client = _bdl_client(handler)
+    try:
+        await client.fetch_stats(per_page=100000)  # absurd; must be clamped to 100
+    finally:
+        await client.aclose()
+    assert captured and captured[0].params.get("per_page") == "100"
+
+
+async def test_mlb_roster_and_person_reject_invalid_ids_without_request() -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return httpx.Response(200, json={"roster": []}, headers={"content-type": "application/json"})
+
+    client = _mlb_client(handler)
+    try:
+        for bad in (None, "", "abc", 0, -1):
+            with pytest.raises(ValueError):
+                await client.fetch_roster(bad)
+            with pytest.raises(ValueError):
+                await client.fetch_person(bad)
+    finally:
+        await client.aclose()
+    assert seen == []
+
+
+# --------------------------------------------------------------------------- #
+# Error classification edge cases (sanitized bodies)
+# --------------------------------------------------------------------------- #
+async def test_empty_403_body_is_forbidden_not_tier() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={}, headers={"content-type": "application/json"})
+
+    client = _bdl_client(handler)
+    try:
+        with pytest.raises(ProviderError) as excinfo:
+            await client.fetch_teams()
+    finally:
+        await client.aclose()
+    assert excinfo.value.kind is ProviderErrorKind.FORBIDDEN
+
+
+async def test_malformed_error_body_still_classified_by_status() -> None:
+    # A 403 whose body is not JSON is still a FORBIDDEN by status; a 401 an auth
+    # failure. The unparseable body never crashes classification or leaks.
+    def forbidden(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text="<html>nope</html>", headers={"content-type": "application/json"})
+
+    client = _bdl_client(forbidden)
+    try:
+        with pytest.raises(ProviderError) as excinfo:
+            await client.fetch_teams()
+    finally:
+        await client.aclose()
+    assert excinfo.value.kind is ProviderErrorKind.FORBIDDEN
+    assert SENTINEL_KEY not in str(excinfo.value)
+
+
+async def test_401_body_naming_bad_key_is_invalid_key() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": "Invalid API key"},
+                              headers={"content-type": "application/json"})
+
+    client = _bdl_client(handler)
+    try:
+        with pytest.raises(ProviderError) as excinfo:
+            await client.fetch_teams()
+    finally:
+        await client.aclose()
+    assert excinfo.value.kind is ProviderErrorKind.INVALID_KEY
+
+
+def test_provider_error_kind_has_every_referenced_member() -> None:
+    # Guards against a reference to a nonexistent enum member at runtime.
+    for name in (
+        "AUTHENTICATION", "INVALID_KEY", "TIER_RESTRICTED", "FORBIDDEN", "RATE_LIMITED",
+        "NOT_FOUND", "NETWORK", "SERVER", "INVALID_PAYLOAD", "PARSER", "UNSUPPORTED",
+        "UNEXPECTED",
+    ):
+        assert hasattr(ProviderErrorKind, name), f"ProviderErrorKind.{name} is missing"
