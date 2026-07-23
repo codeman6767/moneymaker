@@ -189,6 +189,9 @@ Phase A landed the temporal foundations these rules rest on. What exists today:
 | Kalshi public trades append-only + idempotent, with range reads | ✅ **Phase C** `UNIQUE (market_ticker, content_hash)`; `KalshiRepository.trades_in_range()` |
 | Kalshi event/market current metadata never regressed by a stale backfill | ✅ **Phase C** — upserts refresh only on a strictly-newer `observed_at`, equal retains earlier (deterministic) |
 | Kalshi current-metadata provenance is explicit and traceable | ✅ **Phase C** `c008` — `first_raw_response_id` (creating) vs `current_raw_response_id`/`current_raw_response_hash` (supplied the current values); current pointers move only on a strictly-newer observation |
+| Official results/box/injuries/lineups/probables/weather as-of accessors | ◻ **Phase D (planned)** — every Phase D snapshot table carries `observed_at` (= `raw_responses.received_at`) as the sole cutoff; authoritative-time-per-category table in `PHASE_D_IMPLEMENTATION_PLAN.md` §6 |
+| Match decisions bounded by `decided_at` (DQ-PIT-010) | ◻ **Phase D (planned)** — `entity_match_decisions.decided_at`; historical joins use only `decided_at ≤ cutoff` |
+| Weather forecast-vs-actual kept distinct (leakage vector) | ◻ **Phase D (planned)** — `weather_snapshots.is_forecast` + `forecast_for`; only forecasts with `observed_at ≤ cutoff`, never the actual, in pregame features |
 | Full `pit/asof.py`, `pit/dataset.py`, adversarial leak fixtures | ◻ Phase E |
 
 `GameRepository.status_as_of()` is the first working instance of the §3

@@ -222,6 +222,23 @@ retroactively reinterpret old decisions.
 
 ## 4. Game matching
 
+> **Phase D status.** Official-game matching is **planned, not built** — its
+> implementation contract is `PHASE_D_IMPLEMENTATION_PLAN.md` §4. Phase D adds the
+> official-provider anchor (MLB StatsAPI `gamePk`, balldontlie game id) via the
+> existing `games.official_provider`/`official_game_key` columns and a new
+> `provider_game_references` crosswalk (no second canonical-game table), then
+> matches sportsbook events (Phase B, already ingested with `game_id` NULL) and
+> Kalshi events/markets (Phase C, already ingested with `game_id` NULL) to the
+> canonical `games` row by the schedule key below. `game_date_local` is resolved
+> in the **home venue's timezone** from the new `venues` table.
+>
+> **`match_candidates` is a normalized table, not a JSON blob.** Where §7 below
+> describes `candidates_json`, Phase D instead stores one `match_candidates` row
+> per candidate considered (with its per-candidate score and tier), a child of
+> `entity_match_decisions` — mirroring the `kalshi_orderbook_levels` precedent of
+> normalized rows over an opaque blob. The intent (every candidate, including the
+> losers, is recorded) is unchanged.
+
 The hardest problem here: reconciling an official game, a sportsbook event, and
 a Kalshi market that all describe the same contest in different vocabularies.
 

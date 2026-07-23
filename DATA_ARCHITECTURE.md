@@ -212,6 +212,19 @@ version 1 and collide. Applied so far:
 | 006 | `b006_sportsbook_transition_dedup` | `sportsbook_price_snapshots` rebuilt: `UNIQUE (sb_outcome_id, content_hash)` → `UNIQUE (sb_outcome_id, observed_at, content_hash)` for transition-aware dedup (§3.6.1) |
 | 007 | `c007_kalshi` | kalshi_events, kalshi_markets (mutable current-state), kalshi_orderbook_snapshots + kalshi_orderbook_levels (append-only, transition-aware), kalshi_public_trades (append-only); identity-immutability triggers (§3.7) |
 | 008 | `c008_kalshi_metadata_integrity` | `kalshi_events`/`kalshi_markets` split `raw_response_id` into `first_raw_response_id` (immutable) + `current_raw_response_id`/`current_raw_response_hash`; `ingestion_runs.records_updated` added (§3.7.1) |
+| 009 | `d009_provider_infra` *(planned, Phase D — not built)* | provider_team/player/game_references, venues, venue_aliases, entity_match_decisions, match_candidates, data_quality_issues |
+| 010 | `d010_official_games_stats` *(planned)* | game_schedule/result snapshots, team/player_game_statistics, mlb_inning_lines, roster_snapshots, probable_pitcher_snapshots, lineup_snapshots, lineup_players |
+| 011 | `d011_nba_specifics` *(planned)* | nba_quarter_lines, injury_snapshots |
+| 012 | `d012_weather` *(planned)* | weather_snapshots |
+
+Migrations 009–012 are **planned Phase D work, not yet built**; the authoritative
+Phase D schema design is `PHASE_D_IMPLEMENTATION_PLAN.md` §2, and the earlier
+§3.7–§3.9 sketches below (injuries, lineups, probable pitchers, weather, match
+decisions, data quality) are the design targets those migrations will implement,
+reconciled to the Phase B/C provenance conventions (universal
+`observed_at`/`ingested_at`/`raw_response` provenance; append-only snapshots;
+c008 first/current provenance for mutable current-state; `match_candidates` as a
+normalized child table rather than a `candidates_json` blob).
 
 **Migrations are applied statement-by-statement, not via `executescript`.**
 `sqlite3.Cursor.executescript` issues an implicit `COMMIT` before running,
@@ -1181,7 +1194,8 @@ sports_quant/
 ✅    b006_sportsbook_transition_dedup.sql
 ✅    c007_kalshi.sql
 ✅    c008_kalshi_metadata_integrity.sql
-◻     d009_matching.sql ...
+◻     d009_provider_infra.sql  d010_official_games_stats.sql   (Phase D, planned)
+◻     d011_nba_specifics.sql   d012_weather.sql                (Phase D, planned)
     repositories/
 ✅    __init__.py  base.py
 ✅    leagues.py           # LeagueRepository + SeasonRepository
@@ -1192,15 +1206,17 @@ sports_quant/
 ✅    ingestion_runs.py    # IngestionRunRepository
 ✅    sportsbook.py        # SportsbookRepository + as-of price queries
 ✅    kalshi.py            # KalshiRepository + as-of book/trade queries
-◻     matching.py  data_quality.py
+◻     references.py  venues.py  matching.py  data_quality.py   (Phase D, planned)
     seeds/
 ✅    __init__.py  loader.py  mlb_teams.py  nba_teams.py
 ✅ providers/
-✅    raw_exchange.py      # shared sanitized HTTP-exchange capture (Odds + Kalshi)
+✅    raw_exchange.py      # shared sanitized HTTP-exchange capture (all providers)
+◻    mlb_statsapi.py  balldontlie.py  nba_stats.py  open_meteo.py  nws.py  (Phase D)
 ✅ ingest/                 # __init__.py, runner.py, odds_ingestor.py, kalshi_ingestor.py
-◻ matching/               # teams.py, players.py, games.py, markets.py
-                          #   (imports db/normalize.py -- one normalizer only)
-◻ pit/                    # asof.py, dataset.py
+◻                         #   + mlb_ingestor.py nba_ingestor.py weather_ingestor.py (Phase D)
+◻ matching/               # teams.py, players.py, games.py, markets.py, decisions.py
+                          #   (imports db/normalize.py -- one normalizer only)  (Phase D)
+◻ pit/                    # asof.py, dataset.py  (Phase E)
 ```
 
 `hashing.py` was not needed: `canonical_json` is imported directly from

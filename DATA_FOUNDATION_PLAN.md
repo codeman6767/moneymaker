@@ -27,14 +27,20 @@ Kalshi credential, private key, or signing is used anywhere; there is no
 account/balance/position/fill/order column in the schema. All 559 tests pass
 under Ruff and mypy.
 
-Phases D–E below remain planning; each begins only on explicit instruction.
+**Phase D provider selection and implementation design are complete;
+implementation is not started.** The providers are chosen (MLB StatsAPI, balldontlie,
+Open-Meteo/NWS, official NBA injury report, Chadwick crosswalk; Sportradar/Stats
+Perform as the professional path) and the full schema/migration/CLI/staging plan is
+written — see `PHASE_D_PROVIDER_DECISIONS.md` and `PHASE_D_IMPLEMENTATION_PLAN.md`.
+No Phase D provider client, migration, or repository has been written, and no live
+provider call was made. Phase E remains planning.
 
 | Phase | Scope | Status |
 | --- | --- | --- |
 | A | Database engine, migrations, core entities, `db-init` | ✅ Complete (schema v3) |
 | B | Raw responses, ingestion runs, sportsbook odds | ✅ Complete (schema v6, incl. `b006` integrity repair) |
 | C | Kalshi public events, markets, books, trades | ✅ Complete (schema v8, incl. `c008` integrity repair) |
-| D | Official providers, canonical matching | ◻ Not started |
+| D | Official providers, weather, canonical matching | ◻ **Provider selection & design complete; implementation not started** (targets schema v9–v12) |
 | E | Point-in-time builder, quality rules, leakage tests | ◻ Not started |
 
 Companion documents:
@@ -42,6 +48,8 @@ Companion documents:
 - `DATA_ARCHITECTURE.md` — engine choice, canonical IDs, full schema, raw-response contract
 - `POINT_IN_TIME_DATA.md` — timestamp semantics, leakage prevention
 - `ENTITY_MATCHING.md` — normalization, aliases, game/market matching
+- `PHASE_D_PROVIDER_DECISIONS.md` — Phase D provider evaluation, selection, cost/coverage
+- `PHASE_D_IMPLEMENTATION_PLAN.md` — Phase D schema, migrations, CLI, D1–D5 staging
 
 ---
 
@@ -541,37 +549,50 @@ is never miscounted as a new insert.
 
 ---
 
-### Phase D — Official providers and canonical matching
+### Phase D — Official providers, weather, and canonical matching
 
-**Depends on:** C. The largest phase; the only one adding a network host.
+> **Provider selection and implementation design complete; implementation not
+> started.** The authoritative, up-to-date Phase D plan lives in two dedicated
+> documents — `PHASE_D_PROVIDER_DECISIONS.md` (provider evaluation, selection,
+> credentials, cost/coverage, licensing risk) and `PHASE_D_IMPLEMENTATION_PLAN.md`
+> (schema, migrations `d009`–`d012`, correction behaviour, matching, PIT rules,
+> CLI, and the D1–D5 staging). The sketch below is superseded by those documents.
 
-**Create:**
-`sports_quant/providers/{mlb_official,nba_official}.py` (new clients, same
-policy-wrapped pattern);
-`sports_quant/matching/{__init__,normalize,teams,players,games,markets}.py`;
-`sports_quant/db/migrations/d001_matching.sql`;
-`sports_quant/db/repositories/matching.py`;
-`sports_quant/matching/tests/{test_normalize,test_teams,test_players,test_games,test_markets,test_determinism}.py`.
+**Depends on:** C. The largest phase; the only one adding network hosts.
 
-**Modify:** `sports_quant/http_policy.py` (allow-list official hosts, GET-only);
-`intel/player_matching.py` (back with `player_aliases`, API unchanged);
-`sports_quant/cli.py` (`data-quality --review`).
+**Selected providers (MVP, no-paid, risk-labelled):** MLB StatsAPI (no key) for
+all MLB official data + venues; balldontlie (free `NBA_DATA_API_KEY`) for NBA
+games/results/box, with stats.nba.com as a header-gated fallback; Open-Meteo
+(no key) for weather with NWS (no key) as a US-only fallback; the official NBA
+injury-report PDF as the injury source of record (or an explicit unavailable
+path); Chadwick register for the MLB player-id crosswalk. **Professional path:**
+Sportradar / Stats Perform (paid, betting-licensed) for both sports. The Odds API
+key supplies sportsbook pricing only; the Kalshi public API supplies
+prediction-market data only — neither supplies official statistics.
 
-**Tables:** `entity_match_decisions`; populates `games`, `game_status_history`;
-sets `game_id` / `match_decision_id` on sportsbook and Kalshi rows.
+**New credential:** `NBA_DATA_API_KEY` (balldontlie) is the only key the MVP
+needs; every other selected provider is key-less. Optional paid keys
+(`WEATHER_API_KEY`, `SPORTRADAR_*`) stay blank for the MVP. Placeholders are in
+`.env.example`.
 
-**Repositories:** `MatchDecisionRepository`.
+**Migrations (planned):** `d009_provider_infra` (v9 — references, venues, match
+decisions/candidates, data-quality), `d010_official_games_stats` (v10),
+`d011_nba_specifics` (v11), `d012_weather` (v12). No second canonical-game table:
+official ids attach to the existing `games.official_provider`/`official_game_key`
+and a `provider_game_references` crosswalk.
 
-**Tests:** normalization golden file; determinism under 100 shuffled candidate
-orderings; ambiguity refusal (two Jalen Williamses, bare `NY`, same-time
-doubleheader); every §4.3 hard case; Kalshi title/rules disagreement rejected;
-every matcher call writes exactly one decision row; new hosts remain GET-only
-and account paths stay blocked.
+**Staging:** D1 provider infrastructure → D2 MLB → D3 NBA → D4 weather → D5
+matching. Per-stage files, tables, repositories, CLI, tests, completion criteria,
+and expected blockers are enumerated in `PHASE_D_IMPLEMENTATION_PLAN.md` §9.
 
-**CLI:** `data-quality --review`.
+**CLI (planned):** `ingest-mlb`, `ingest-nba`, `ingest-injuries`,
+`ingest-lineups`, `ingest-weather`, `ingest-venues`, `match-games`,
+`match-markets`, `matching-review`.
 
-**Done when:** a fixture slate matches end-to-end with every decision recorded,
-and every hard case behaves as specified in `ENTITY_MATCHING.md` §4.3.
+**Done when:** all four ingestion lanes plus matching pass against mocked
+transports with append-only history, full raw-response traceability, GET-only
+networking, no credential in any stored column, and every `ENTITY_MATCHING.md`
+§4.3 hard case behaving as specified.
 
 ---
 
