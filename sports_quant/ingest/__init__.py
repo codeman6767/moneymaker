@@ -9,12 +9,15 @@ order surface is imported here.
 
 from __future__ import annotations
 
+from .kalshi_ingestor import KalshiIngestResult, ingest_kalshi
 from .odds_ingestor import OddsIngestResult, ingest_odds
 from .runner import RunCounters, sanitize_error
 
 __all__ = [
+    "KalshiIngestResult",
     "OddsIngestResult",
     "RunCounters",
+    "ingest_kalshi",
     "ingest_odds",
     "sanitize_error",
 ]

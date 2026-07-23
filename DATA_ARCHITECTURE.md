@@ -210,6 +210,7 @@ version 1 and collide. Applied so far:
 | 004 | `b004_raw_responses` | ingestion_runs, raw_responses (append-only), `game_status_history` rebuilt to add the `raw_response_id` FK |
 | 005 | `b005_sportsbook` | sportsbook_events, sportsbook_markets, sportsbook_outcomes, sportsbook_price_snapshots (append-only), identity-immutability triggers |
 | 006 | `b006_sportsbook_transition_dedup` | `sportsbook_price_snapshots` rebuilt: `UNIQUE (sb_outcome_id, content_hash)` → `UNIQUE (sb_outcome_id, observed_at, content_hash)` for transition-aware dedup (§3.6.1) |
+| 007 | `c007_kalshi` | kalshi_events, kalshi_markets (mutable current-state), kalshi_orderbook_snapshots + kalshi_orderbook_levels (append-only, transition-aware), kalshi_public_trades (append-only); identity-immutability triggers (§3.7) |
 
 **Migrations are applied statement-by-statement, not via `executescript`.**
 `sqlite3.Cursor.executescript` issues an implicit `COMMIT` before running,
@@ -698,105 +699,132 @@ SQLite cannot drop an inline `UNIQUE`, so `b006` rebuilds the table (create,
 copy every row verbatim, drop, rename, recreate the two indexes and the
 append-only triggers). Nothing references the table by foreign key.
 
-### 3.7 Kalshi (public data only)
+### 3.7 Kalshi (public data only) — as built in migration `c007_kalshi`
+
+The authoritative DDL is `sports_quant/db/migrations/c007_kalshi.sql`. The
+as-built schema differs from the original sketch in three deliberate ways, each
+a correction found during implementation:
+
+1. **Order-book ladders are a separate table** (`kalshi_orderbook_levels`), one
+   row per level, rather than `yes_bids_json` / `no_bids_json` blobs. The
+   requirement is to preserve every level (side, price, quantity, ordering) and
+   to *reject duplicate price levels with conflicting quantities* — a
+   `UNIQUE (snapshot_id, side, price)` constraint makes that a schema fact, and a
+   per-level `CHECK (price BETWEEN 1 AND 99)` / `CHECK (quantity >= 0)` enforces
+   validity per level rather than only on the derived bests.
+2. **Order books are transition-aware.** The uniqueness key is
+   `UNIQUE (market_ticker, observed_at, content_hash)` (not
+   `(kalshi_market_id, content_hash)`), so a book returning to an earlier state
+   is preserved — the same reasoning as `b006` for prices (§3.6.1). The
+   repository skips an observation only when it is unchanged from its immediate
+   temporal predecessor. Keyed by `market_ticker` (the stable provider identity)
+   because a book can be ingested for a market whose event row is not yet known.
+3. **No Phase-D columns yet.** `match_decision_id` and `entity_match_decisions`
+   do not exist until Phase D, so they are not referenced. `game_id` columns
+   exist (nullable) but are never set in Phase C — no fuzzy matching happens
+   here. `kalshi_markets.kalshi_event_id` is nullable (a market may arrive before
+   its event); `event_ticker` is always preserved.
+
+Tables:
 
 ```sql
 CREATE TABLE kalshi_events (
     kalshi_event_id  TEXT PRIMARY KEY,           -- 'kev_<ulid>'
-    event_ticker     TEXT NOT NULL UNIQUE,       -- Kalshi's own ticker
-    series_ticker    TEXT,
-    title            TEXT,
-    sub_title        TEXT,
-    category         TEXT,
-    league_id        TEXT REFERENCES leagues(league_id),
-    game_id          TEXT REFERENCES games(game_id),
-    match_decision_id TEXT REFERENCES entity_match_decisions(match_id),
-    first_seen_at    TEXT NOT NULL,
-    last_seen_at     TEXT NOT NULL,
-    created_at       TEXT NOT NULL,
-    updated_at       TEXT NOT NULL
+    event_ticker     TEXT NOT NULL UNIQUE,       -- stable provider identity
+    series_ticker    TEXT, title TEXT, sub_title TEXT, category TEXT, status TEXT,
+    mutually_exclusive INTEGER,                  -- 0/1 or NULL
+    game_id          TEXT REFERENCES games(game_id),   -- NULL in Phase C
+    raw_response_id  TEXT NOT NULL REFERENCES raw_responses(raw_response_id),
+    first_observed_at TEXT NOT NULL, last_observed_at TEXT NOT NULL,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 
 CREATE TABLE kalshi_markets (
     kalshi_market_id TEXT PRIMARY KEY,           -- 'kmk_<ulid>'
-    kalshi_event_id  TEXT NOT NULL REFERENCES kalshi_events(kalshi_event_id),
-    market_ticker    TEXT NOT NULL UNIQUE,
-    title            TEXT,
-    subtitle         TEXT,
-    yes_sub_title    TEXT,
-    market_type      TEXT,                       -- 'binary'
-    rules_primary    TEXT,                       -- settlement rules text, verbatim
-    rules_secondary  TEXT,
-    rules_hash       TEXT,                       -- sha256; a rules change is material
-    open_time        TEXT,
-    close_time       TEXT,
-    expiration_time  TEXT,
-    settlement_side  TEXT,                       -- populated only after settlement
-    game_id          TEXT REFERENCES games(game_id),
-    match_decision_id TEXT REFERENCES entity_match_decisions(match_id),
-    first_seen_at    TEXT NOT NULL,
-    last_seen_at     TEXT NOT NULL,
-    created_at       TEXT NOT NULL,
-    updated_at       TEXT NOT NULL
+    market_ticker    TEXT NOT NULL UNIQUE,       -- stable provider identity
+    event_ticker     TEXT,                       -- provider's event reference
+    kalshi_event_id  TEXT REFERENCES kalshi_events(kalshi_event_id),  -- NULL until seen
+    series_ticker TEXT, title TEXT, subtitle TEXT, yes_sub_title TEXT, no_sub_title TEXT,
+    status TEXT, open_time TEXT, close_time TEXT, expiration_time TEXT,
+    settlement_time TEXT, result TEXT,
+    rules_primary TEXT, rules_secondary TEXT, rules_hash TEXT,  -- sha256; Phase D acts on a change
+    game_id          TEXT REFERENCES games(game_id),   -- NULL in Phase C
+    raw_response_id  TEXT NOT NULL REFERENCES raw_responses(raw_response_id),
+    first_observed_at TEXT NOT NULL, last_observed_at TEXT NOT NULL,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 
 CREATE TABLE kalshi_orderbook_snapshots (
-    snapshot_id      TEXT PRIMARY KEY,
-    kalshi_market_id TEXT NOT NULL REFERENCES kalshi_markets(kalshi_market_id),
-    yes_bids_json    TEXT NOT NULL,              -- [[price_cents, qty], ...] canonical JSON
-    no_bids_json     TEXT NOT NULL,
-    best_yes_bid     INTEGER,                    -- denormalized for fast scans
-    best_no_bid      INTEGER,
-    derived_yes_ask  INTEGER,                    -- 100 - best_no_bid
-    derived_no_ask   INTEGER,                    -- 100 - best_yes_bid
-    depth_levels     INTEGER NOT NULL,
-    sequence         INTEGER,
-    sequence_ok      INTEGER NOT NULL DEFAULT 1 CHECK (sequence_ok IN (0,1)),
-    provider_timestamp TEXT,
-    observed_at      TEXT NOT NULL,
-    ingested_at      TEXT NOT NULL,
-    raw_response_id  TEXT NOT NULL REFERENCES raw_responses(raw_response_id),
-    raw_response_hash TEXT NOT NULL,
-    content_hash     TEXT NOT NULL,
-    created_at       TEXT NOT NULL,
-    UNIQUE (kalshi_market_id, content_hash),
-    CHECK (best_yes_bid IS NULL OR best_yes_bid BETWEEN 1 AND 99),
-    CHECK (best_no_bid  IS NULL OR best_no_bid  BETWEEN 1 AND 99)
+    snapshot_id      TEXT PRIMARY KEY,           -- 'kob_<ulid>'
+    kalshi_market_id TEXT REFERENCES kalshi_markets(kalshi_market_id),  -- NULL if market unseen
+    market_ticker    TEXT NOT NULL,
+    best_yes_bid INTEGER, best_no_bid INTEGER,   -- CHECK 1..99 or NULL
+    derived_yes_ask INTEGER, derived_no_ask INTEGER,  -- 100 - opposing best bid
+    yes_levels INTEGER NOT NULL, no_levels INTEGER NOT NULL, depth_levels INTEGER NOT NULL,
+    provider_timestamp TEXT, observed_at TEXT NOT NULL, ingested_at TEXT NOT NULL,
+    run_id TEXT NOT NULL REFERENCES ingestion_runs(run_id),
+    raw_response_id TEXT NOT NULL REFERENCES raw_responses(raw_response_id),
+    raw_response_hash TEXT NOT NULL, content_hash TEXT NOT NULL, created_at TEXT NOT NULL,
+    UNIQUE (market_ticker, observed_at, content_hash)   -- transition-aware
 );
 
-CREATE TABLE kalshi_trade_snapshots (
-    trade_snapshot_id TEXT PRIMARY KEY,
-    kalshi_market_id TEXT NOT NULL REFERENCES kalshi_markets(kalshi_market_id),
-    provider_trade_id TEXT,
-    taker_side       TEXT CHECK (taker_side IN ('yes','no')),
-    yes_price        INTEGER CHECK (yes_price BETWEEN 1 AND 99),
-    no_price         INTEGER CHECK (no_price  BETWEEN 1 AND 99),
-    count            INTEGER NOT NULL,
-    trade_time       TEXT,                       -- provider's trade timestamp
-    provider_timestamp TEXT,
-    observed_at      TEXT NOT NULL,
-    ingested_at      TEXT NOT NULL,
-    raw_response_id  TEXT NOT NULL REFERENCES raw_responses(raw_response_id),
-    raw_response_hash TEXT NOT NULL,
-    content_hash     TEXT NOT NULL,
-    created_at       TEXT NOT NULL,
-    UNIQUE (kalshi_market_id, content_hash)
+CREATE TABLE kalshi_orderbook_levels (
+    level_id    TEXT PRIMARY KEY,                -- 'kol_<ulid>'
+    snapshot_id TEXT NOT NULL REFERENCES kalshi_orderbook_snapshots(snapshot_id),
+    side  TEXT NOT NULL CHECK (side IN ('yes','no')),
+    price INTEGER NOT NULL CHECK (price BETWEEN 1 AND 99),
+    quantity INTEGER NOT NULL CHECK (quantity >= 0),
+    level_index INTEGER NOT NULL,                -- 0 = best, preserves ordering
+    created_at TEXT NOT NULL,
+    UNIQUE (snapshot_id, side, price)            -- duplicate price levels rejected
 );
 
-CREATE INDEX idx_kalshi_book_asof  ON kalshi_orderbook_snapshots (kalshi_market_id, observed_at);
-CREATE INDEX idx_kalshi_trade_asof ON kalshi_trade_snapshots (kalshi_market_id, observed_at);
+CREATE TABLE kalshi_public_trades (
+    trade_id TEXT PRIMARY KEY,                   -- 'ktr_<ulid>' (internal)
+    provider_trade_id TEXT,                      -- provider's id when supplied
+    kalshi_market_id TEXT REFERENCES kalshi_markets(kalshi_market_id),
+    market_ticker TEXT NOT NULL,
+    taker_side TEXT CHECK (taker_side IN ('yes','no')),
+    yes_price INTEGER CHECK (yes_price BETWEEN 1 AND 99),
+    no_price  INTEGER CHECK (no_price  BETWEEN 1 AND 99),
+    count INTEGER NOT NULL CHECK (count >= 0),
+    trade_time TEXT, provider_timestamp TEXT,
+    observed_at TEXT NOT NULL, ingested_at TEXT NOT NULL,
+    run_id TEXT NOT NULL REFERENCES ingestion_runs(run_id),
+    raw_response_id TEXT NOT NULL REFERENCES raw_responses(raw_response_id),
+    content_hash TEXT NOT NULL, created_at TEXT NOT NULL,
+    UNIQUE (market_ticker, content_hash)         -- idempotent per trade identity
+);
 ```
 
+`kalshi_orderbook_snapshots`, `kalshi_orderbook_levels`, and
+`kalshi_public_trades` are **append-only** (BEFORE UPDATE/DELETE triggers; in
+`APPEND_ONLY_TABLES`). `kalshi_events` and `kalshi_markets` are mutable
+current-state, like `sportsbook_events`: their identity columns are frozen by a
+`BEFORE UPDATE` trigger, and the mutable metadata is refreshed only from a
+strictly-newer `observed_at` (stale-backfill protection, §3.6 / POINT_IN_TIME
+§4).
+
 **Derived asks are stored, never wire asks.** Kalshi publishes resting *bids* on
-both sides; the executable Yes ask is `100 − best No bid`. `sports_quant/
-providers/kalshi.py` already derives this correctly (`KalshiOrderBook.
-executable_yes_ask`). The schema mirrors that derivation and keeps the full
-ladders in `*_bids_json`, so no consumer is tempted to read a bid as an ask.
+both sides; the executable Yes ask is `100 − best No bid`.
+`sports_quant/providers/kalshi.py` derives this (`KalshiOrderBook.
+executable_yes_ask`), and `kalshi_orderbook_snapshots.derived_yes_ask` /
+`derived_no_ask` store exactly that. The full ladders live in
+`kalshi_orderbook_levels`, so no consumer can read a bid as an ask.
+
+**Trade identity.** `content_hash` uses the provider `trade_id` (scoped by
+market) when present, and otherwise a documented function of the
+provider-supplied fields (`market_ticker, trade_time, yes_price, no_price,
+count, taker_side`) — no id is ever invented. `UNIQUE (market_ticker,
+content_hash)` makes re-ingesting the same trade idempotent while two genuinely
+different trades (different id/time/price/side) both persist.
 
 **No account-scoped columns exist anywhere.** There is no position, balance,
-fill-ownership, order, or private-key column in this schema. `kalshi_trade_
-snapshots` records the *public* trade print feed — anonymous market-wide prints,
-not our fills, because we have none.
+fill-ownership, order, or private-key column in this schema — a Phase C test
+asserts this against `PRAGMA table_info` for every Kalshi table.
+`kalshi_public_trades` records the *public* trade-print feed — anonymous
+market-wide prints, not our fills, because we have none. No credential, private
+key, or request signing is used to reach any of this data.
 
 ### 3.8 Injuries, lineups, probable pitchers, weather
 
@@ -1109,7 +1137,9 @@ sports_quant/
 ✅    a003_integrity_guards.sql
 ✅    b004_raw_responses.sql
 ✅    b005_sportsbook.sql
-◻     c006_kalshi.sql ...
+✅    b006_sportsbook_transition_dedup.sql
+✅    c007_kalshi.sql
+◻     d008_matching.sql ...
     repositories/
 ✅    __init__.py  base.py
 ✅    leagues.py           # LeagueRepository + SeasonRepository
@@ -1119,11 +1149,13 @@ sports_quant/
 ✅    raw_responses.py     # RawResponseRepository + content hashing
 ✅    ingestion_runs.py    # IngestionRunRepository
 ✅    sportsbook.py        # SportsbookRepository + as-of price queries
-◻     kalshi.py  matching.py  data_quality.py
+✅    kalshi.py            # KalshiRepository + as-of book/trade queries
+◻     matching.py  data_quality.py
     seeds/
 ✅    __init__.py  loader.py  mlb_teams.py  nba_teams.py
-✅ ingest/                 # __init__.py, runner.py, odds_ingestor.py
-                          #   (kalshi_ingestor.py is Phase C)
+✅ providers/
+✅    raw_exchange.py      # shared sanitized HTTP-exchange capture (Odds + Kalshi)
+✅ ingest/                 # __init__.py, runner.py, odds_ingestor.py, kalshi_ingestor.py
 ◻ matching/               # teams.py, players.py, games.py, markets.py
                           #   (imports db/normalize.py -- one normalizer only)
 ◻ pit/                    # asof.py, dataset.py

@@ -26,6 +26,7 @@ from typing import Awaitable, Callable, Optional
 from .config import ReadOnlyStartupError, Settings, load_settings
 from .db.engine import Database, DatabaseError, table_exists
 from .db.init import initialize_database
+from .ingest.kalshi_ingestor import DEFAULT_LIMIT, KalshiIngestResult, ingest_kalshi
 from .ingest.odds_ingestor import OddsIngestResult, ingest_odds
 from .providers.kalshi import KalshiClient
 from .providers.odds_api import (
@@ -410,6 +411,123 @@ def run_ingest_odds(
     return EXIT_ACTIVE_FAILURE if result.failed else 0
 
 
+def _report_kalshi(result: KalshiIngestResult, out: Printer) -> None:
+    """Print a sanitized Kalshi ingestion summary. No credential is ever shown."""
+
+    if result.dry_run:
+        out("[DRY-RUN] ingest-kalshi (no rows persisted)")
+    else:
+        out(f"ingest-kalshi (run {result.run_id})")
+
+    if result.status == "failed":
+        out(f"[FAILED ] {result.error_type}: {result.error_message}")
+        return
+
+    out(f"  requests: {result.requests_made} (GET-only, public, unauthenticated)")
+    if result.events_seen == 0 and result.markets_seen == 0:
+        out("  0 matching events/markets (not a failure)")
+    out(
+        f"  events={result.events_seen} (rejected {result.events_rejected}) "
+        f"markets={result.markets_seen} (rejected {result.markets_rejected})"
+    )
+    out(
+        f"  order books: {result.orderbook_snapshots_inserted} new, "
+        f"{result.orderbook_snapshots_duplicate} unchanged, "
+        f"{result.orderbook_levels_inserted} levels "
+        f"(rejected {result.orderbooks_rejected})"
+    )
+    out(
+        f"  public trades: {result.trades_inserted} new, "
+        f"{result.trades_duplicate} duplicate (rejected {result.trades_rejected})"
+    )
+    if result.orderbooks_truncated_at is not None:
+        out(
+            f"  NOTE: order-book fan-out truncated at --limit={result.orderbooks_truncated_at}; "
+            "more markets were available (partial sweep, not a complete one)"
+        )
+    if result.rejections:
+        shown = ", ".join(sorted(set(result.rejections)))
+        out(f"  rejection reasons: {shown}")
+    status_label = {
+        "succeeded": "OK     ",
+        "partially_succeeded": "PARTIAL",
+    }.get(result.status, result.status.upper())
+    out(f"[{status_label}] {result.status}")
+
+
+def run_ingest_kalshi(
+    settings: Optional[Settings] = None,
+    *,
+    status: Optional[str] = "open",
+    event_ticker: Optional[str] = None,
+    market_ticker: Optional[str] = None,
+    limit: int = DEFAULT_LIMIT,
+    include_orderbooks: bool = False,
+    include_trades: bool = False,
+    max_pages: int = 1,
+    database_path: Optional[Path] = None,
+    dry_run: bool = False,
+    out: Printer = print,
+    client: Optional[KalshiClient] = None,
+) -> int:
+    """Ingest Kalshi public events/markets (and optionally books/trades).
+
+    Read-only, GET-only, unauthenticated -- no Kalshi credential is ever required
+    or displayed. Returns ``0`` on success (including zero matching markets or a
+    closed exchange), ``1`` on a genuine provider/parse/persist failure, ``2`` on
+    a read-only startup violation, and ``3`` when the database is missing or
+    unmigrated.
+    """
+
+    if settings is None:
+        settings = load_settings()
+    else:
+        settings.enforce_read_only()
+
+    path = database_path if database_path is not None else settings.resolved_database_path()
+
+    if not dry_run:
+        if not path.exists():
+            out(f"[FAILED ] database not found at {path}; run 'python -m sports_quant db-init'")
+            return EXIT_DATABASE_ERROR
+        db_check = Database(path)
+        with db_check.connection() as conn:
+            if not table_exists(conn, "kalshi_orderbook_snapshots"):
+                out(
+                    f"[FAILED ] database at {path} is not migrated for Phase C; "
+                    "run 'python -m sports_quant db-init'"
+                )
+                return EXIT_DATABASE_ERROR
+
+    database = Database(path)
+    owns_client = client is None
+
+    async def _run() -> KalshiIngestResult:
+        kalshi = client if client is not None else KalshiClient(
+            base_url=settings.kalshi_public_rest_url
+        )
+        try:
+            return await ingest_kalshi(
+                database=database,
+                client=kalshi,
+                status=status,
+                event_ticker=event_ticker,
+                market_ticker=market_ticker,
+                limit=limit,
+                include_orderbooks=include_orderbooks,
+                include_trades=include_trades,
+                max_pages=max_pages,
+                dry_run=dry_run,
+            )
+        finally:
+            if owns_client:
+                await kalshi.aclose()
+
+    result = asyncio.run(_run())
+    _report_kalshi(result, out)
+    return EXIT_ACTIVE_FAILURE if result.failed else 0
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     """CLI dispatch.
 
@@ -477,6 +595,54 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Perform the GET and normalization but persist nothing",
     )
 
+    kalshi = sub.add_parser(
+        "ingest-kalshi",
+        help="Fetch and store Kalshi PUBLIC events/markets/books/trades (GET-only, no credential)",
+    )
+    kalshi.add_argument(
+        "--status", default="open", help="Kalshi status filter (default: open)"
+    )
+    kalshi.add_argument(
+        "--event-ticker", dest="event_ticker", default=None, help="Restrict markets to one event"
+    )
+    kalshi.add_argument(
+        "--market-ticker", dest="market_ticker", default=None, help="Ingest a single market"
+    )
+    kalshi.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_LIMIT,
+        help=f"Safe finite bound on events/markets/books (default: {DEFAULT_LIMIT})",
+    )
+    kalshi.add_argument(
+        "--max-pages", dest="max_pages", type=int, default=1, help="Max pages per listing"
+    )
+    kalshi.add_argument(
+        "--include-orderbooks",
+        dest="include_orderbooks",
+        action="store_true",
+        help="Also fetch each market's public order book (bounded by --limit)",
+    )
+    kalshi.add_argument(
+        "--include-trades",
+        dest="include_trades",
+        action="store_true",
+        help="Also fetch each market's public trades (bounded by --limit)",
+    )
+    kalshi.add_argument(
+        "--db",
+        dest="database_path",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Override DATABASE_PATH for this run",
+    )
+    kalshi.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Perform the GETs and normalization but persist nothing",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command == "providers-check":
@@ -503,6 +669,23 @@ def main(argv: Optional[list[str]] = None) -> int:
                 bookmakers=args.bookmakers,
                 commence_from=args.commence_from,
                 commence_to=args.commence_to,
+                dry_run=args.dry_run,
+            )
+        except ReadOnlyStartupError as exc:
+            print(str(exc))
+            return 2
+
+    if args.command == "ingest-kalshi":
+        try:
+            return run_ingest_kalshi(
+                status=args.status,
+                event_ticker=args.event_ticker,
+                market_ticker=args.market_ticker,
+                limit=args.limit,
+                include_orderbooks=args.include_orderbooks,
+                include_trades=args.include_trades,
+                max_pages=args.max_pages,
+                database_path=args.database_path,
                 dry_run=args.dry_run,
             )
         except ReadOnlyStartupError as exc:

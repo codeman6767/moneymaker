@@ -86,6 +86,28 @@ executable No ask  = 100 − best Yes bid
 Every price/quantity level is preserved, and an empty book yields `None` for the
 derived asks.
 
+## Public Kalshi ingestion (Phase C)
+
+```
+python -m sports_quant ingest-kalshi --status open --limit 5
+                                     [--include-orderbooks] [--include-trades]
+```
+
+`ingest-kalshi` persists Kalshi's **public** events, markets, order-book
+snapshots (with full ladder levels), and public trade prints into the historical
+corpus. It goes through the same GET-only, unauthenticated, policy-wrapped
+transport as `providers-check`: **no Kalshi credential, private key, or request
+signing is used or loaded**, and account/portfolio/order/fill paths remain
+blocked. `--limit` (default 20) bounds the sweep, including per-market
+order-book/trade fan-out, so the default never requests every book on the
+exchange; a truncated sweep is reported explicitly.
+
+The public trade feed is stored in `kalshi_public_trades` — anonymous
+market-wide prints. These are **not** account fills: the engine has no positions
+and never contacts a private fill endpoint. Order-book snapshots and trades are
+append-only historical records; a book returning to an earlier state is
+preserved (transition-aware), and re-ingesting the same trade is idempotent.
+
 ## Providers check
 
 ```

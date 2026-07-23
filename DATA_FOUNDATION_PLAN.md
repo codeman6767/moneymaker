@@ -12,16 +12,24 @@ events/markets/outcomes, point-in-time price snapshots, the Odds API ingestion
 service, and the `ingest-odds` CLI now exist, with team/sport validation,
 stale-metadata protection, transition-aware price deduplication, and correct
 failed-request counting, and the `b006` price-snapshot uniqueness rule
-(`UNIQUE (sb_outcome_id, observed_at, content_hash)`). All 479 tests pass under
-Ruff and mypy.
+(`UNIQUE (sb_outcome_id, observed_at, content_hash)`).
 
-Phases C–E below remain planning; each begins only on explicit instruction.
+**Phase C is complete** (migration `c007_kalshi`, schema v7): the public,
+GET-only, unauthenticated Kalshi surface is ingested into `kalshi_events`,
+`kalshi_markets`, `kalshi_orderbook_snapshots`, `kalshi_orderbook_levels`, and
+`kalshi_public_trades`, with derived executable asks, transition-aware
+order-book history, trade idempotency, point-in-time queries, and the
+`ingest-kalshi` CLI. No Kalshi credential, private key, or signing is used
+anywhere; there is no account/balance/position/fill/order column in the schema.
+All 534 tests pass under Ruff and mypy.
+
+Phases D–E below remain planning; each begins only on explicit instruction.
 
 | Phase | Scope | Status |
 | --- | --- | --- |
 | A | Database engine, migrations, core entities, `db-init` | ✅ Complete (schema v3) |
 | B | Raw responses, ingestion runs, sportsbook odds | ✅ Complete (schema v6, incl. `b006` integrity repair) |
-| C | Kalshi public events, markets, books, trades | ◻ Not started |
+| C | Kalshi public events, markets, books, trades | ✅ Complete (schema v7) |
 | D | Official providers, canonical matching | ◻ Not started |
 | E | Point-in-time builder, quality rules, leakage tests | ◻ Not started |
 
@@ -195,25 +203,37 @@ one `raw_responses` row plus derived events/markets/outcomes/price snapshots.
   `data_quality_issues` row, and exits `1`. The corpus keeps the response for a
   later re-parse.
 
-### `ingest-kalshi`
+### `ingest-kalshi` (implemented, Phase C)
 
 ```
-python -m sports_quant ingest-kalshi [--series TICKER] [--league {mlb,nba}]
-                                     [--with-orderbooks] [--with-trades]
-                                     [--max-markets N] [--db PATH] [--dry-run]
+python -m sports_quant ingest-kalshi [--status open] [--event-ticker T]
+                                     [--market-ticker T] [--limit N]
+                                     [--include-orderbooks] [--include-trades]
+                                     [--max-pages N] [--db PATH] [--dry-run]
 ```
 
 Fetches Kalshi **public** events, markets, and optionally order books and public
-trade prints via the existing `KalshiClient`.
+trade prints via the existing `KalshiClient`. Public, GET-only, unauthenticated
+— no Kalshi credential, key, or signing is ever used or required.
 
-- **Output:** run id, events/markets seen, order-book and trade snapshots
-  written, duplicates skipped, unmatched markets.
-- **Exit `0`:** success, including "exchange closed" (a legitimate skip).
-- **Exit `1`:** a genuine fetch or write failure.
-- **Idempotency:** as above, on `content_hash`.
-- **Safety:** only the public GET surface. `--max-markets` bounds order-book
-  fan-out; when it truncates, the count is **logged explicitly** rather than
-  silently capped, so a partial sweep is never mistaken for a complete one.
+- **Output:** run id, requests made, events/markets seen (and rejected),
+  order-book snapshots new/unchanged and levels stored, public trades
+  new/duplicate/rejected, sanitized rejection reasons.
+- **Exit `0`:** success, **including zero matching markets** (reported as a
+  clean zero, not a failure).
+- **Exit `1`:** a genuine provider, parse, validation, or persistence failure.
+- **Exit `3`:** database missing or unmigrated for Phase C.
+- **Idempotency:** order books use transition-aware dedup
+  (`UNIQUE (market_ticker, observed_at, content_hash)` + immediate-predecessor
+  comparison); trades dedup on `(market_ticker, content_hash)`.
+- **Safety — bounded fan-out:** `--limit` (default **20**) bounds events,
+  markets, **and** the per-market order-book/trade fan-out, so the default never
+  sweeps every book on the exchange. When the market list exceeds `--limit`, the
+  truncation point is **reported explicitly** rather than silently capped, so a
+  partial sweep is never mistaken for a complete one.
+- **Dry-run:** performs the external GETs and normalization but persists
+  **nothing at all** — not the run, not the raw response, not a single
+  normalized row (see the dry-run note in the Phase C completion criteria).
 
 ### `data-status`
 
@@ -411,33 +431,83 @@ change is the additive migration `b006`, the rest are repository/ingestor fixes.
 
 ---
 
-### Phase C — Kalshi public events, markets, order books, trades
+### Phase C — Kalshi public events, markets, order books, trades ✅ COMPLETE
 
-**Depends on:** B.
+**Depended on:** B (complete).
 
-**Create:** `sports_quant/db/migrations/c001_kalshi.sql`;
+**Created:** `sports_quant/db/migrations/c007_kalshi.sql`;
 `sports_quant/db/repositories/kalshi.py`;
 `sports_quant/ingest/kalshi_ingestor.py`;
-`sports_quant/ingest/tests/test_kalshi_ingestor.py`.
+`sports_quant/providers/raw_exchange.py` (shared exchange capture, extracted
+from the Odds API adapter so Kalshi reuses it — one capture, no duplication);
+`sports_quant/ingest/tests/{test_kalshi_ingestor,test_kalshi_safety}.py`;
+`sports_quant/db/tests/{test_kalshi_repositories,test_kalshi_schema}.py`;
+`sports_quant/tests/test_kalshi_ingest_cli.py`.
 
-**Modify:** `sports_quant/cli.py` (`ingest-kalshi`).
+**Modified:** `sports_quant/cli.py` (`ingest-kalshi`);
+`sports_quant/providers/kalshi.py` (captured GET methods returning `RawExchange`
+— the same GET requests through the same policy-wrapped transport, no second
+client, no credential); `sports_quant/providers/odds_api.py` (uses the shared
+`raw_exchange` module); `sports_quant/db/{schema,ids,models}.py`;
+`sports_quant/db/repositories/__init__.py`; `sports_quant/ingest/__init__.py`.
 
 **Tables:** `kalshi_events`, `kalshi_markets`, `kalshi_orderbook_snapshots`,
-`kalshi_trade_snapshots`.
+`kalshi_orderbook_levels`, `kalshi_public_trades`. (Order-book *levels* are a
+separate table from the snapshot metadata, so the full ladder is preserved
+row-per-level rather than as an opaque JSON blob.)
 
-**Repositories:** `KalshiRepository`.
+**Repositories:** `SqliteKalshiRepository` — a `Protocol` plus a SQLite
+implementation, reusing the raw-response and ingestion-run repositories, the
+transaction handling, timestamp normalization, and content hashing.
 
-**Tests:** derived asks equal `100 − opposing best bid` and match
-`KalshiOrderBook`'s existing derivation; full ladders preserved; empty book
-yields NULL asks; price CHECKs reject out-of-range cents; `rules_hash` changes
-detected; `--max-markets` truncation is reported; **no account-scoped column
-exists in the Kalshi schema** (asserted against `PRAGMA table_info`);
-idempotent re-ingestion.
+**Tests delivered:** migration applies once and idempotently; existing A/B
+migrations still valid; only approved public GET paths reachable; POST/PUT/
+PATCH/DELETE and account/portfolio/order/fill paths blocked (existing policy
+tests, unweakened); **no authentication header sent** and **no private key
+loaded** (behavioural + source scan); event/market normalization; pagination;
+newer metadata becomes current and older backfills do not regress; Yes/No bids
+preserved; derived Yes ask = `100 − best No bid` and vice versa; empty and
+one-sided books; complete ladders preserved; identical consecutive books
+deduplicate; changed books append; a book returning to a prior state is
+preserved; older backfills preserved and exact replays idempotent;
+latest-at-or-before returns the correct snapshot; equal timestamps tie-break
+deterministically; public trades normalize and dedupe; legitimate repeated
+trades remain representable; malformed records rejected/recorded; partial
+ingestion finalized correctly; failed runs finalized as `failed`; dry-run
+persists nothing; **no account-scoped column exists in the Kalshi schema**
+(asserted against `PRAGMA table_info`); the gateway is never imported. All
+against mocked transports — no live calls in the suite.
 
-**CLI:** `ingest-kalshi`.
+**CLI:** `ingest-kalshi --status {…} [--event-ticker] [--market-ticker]
+[--limit] [--include-orderbooks] [--include-trades] [--max-pages] [--db]
+[--dry-run]`.
 
-**Done when:** a mocked Kalshi sweep persists events, markets, books, and public
-trades with derived asks matching the provider client exactly.
+**Delivered:** a mocked Kalshi sweep persists events, markets, order books (with
+ladder levels), and public trades, with derived asks matching `KalshiOrderBook`
+exactly, twice, idempotently. Live public ingestion completed safely (5 events,
+8 markets, 3 empty order books; the public trades feed returned no trades for the
+sampled open markets — preserved as an honest empty response, not fabricated).
+No credential was required and every request was a GET.
+
+#### Implementation decisions (Phase C)
+
+| # | Decision | Why |
+| --- | --- | --- |
+| 1 | Migration is `c007_kalshi`, not `c001_kalshi` | Migration numbers are a single global sequence (§3.1); Phase B ended at 006, so Phase C is 007. |
+| 2 | Order-book **levels** are their own table (`kalshi_orderbook_levels`), keyed `UNIQUE (snapshot_id, side, price)` | The requirement asks to preserve every level with side/price/quantity/ordering and to reject duplicate price levels with conflicting quantities. A per-level table makes both a schema fact rather than JSON-parsing logic. |
+| 3 | Order-book history is **transition-aware** (`UNIQUE (market_ticker, observed_at, content_hash)` + immediate-predecessor comparison), mirroring the `b006` price fix | A book that returns to an earlier state (A→B→A) must be representable; a global content-hash key would drop the third state. |
+| 4 | Trade identity is `(market_ticker, content_hash)`, where the hash uses the provider `trade_id` when present, else a documented field-based identity | No trade id is ever invented; exact replays collapse while genuinely different trades (different id/time/price/side) coexist. |
+| 5 | `derived_yes_ask` / `derived_no_ask` are **stored**, computed `100 − opposing best bid` | A returned bid is never read as an ask; the derivation matches `KalshiOrderBook.executable_*_ask` exactly. |
+| 6 | Provider = `kalshi_public` | Makes it explicit in the corpus that this is the unauthenticated public surface, distinct from any future authenticated feed (which is out of scope permanently). |
+| 7 | `--limit` (default 20) bounds events, markets, **and** book/trade fan-out | Never sweeps every book on the exchange by default; truncation is reported, not silent. |
+| 8 | Dry-run persists **nothing** (no audit rows either) | Simplest guarantee to reason about and test; a dry run is a pure read. Pinned by `test_dry_run_persists_nothing`. |
+| 9 | `game_id` columns exist (nullable) but are **never set** in Phase C | Canonical game matching is Phase D; the column is created now so Phase D needs no table rebuild, but no fuzzy matching happens here. |
+
+**Deferred to Phase D (documented):** matching Kalshi markets to canonical
+MLB/NBA games (`game_id` / `match_decision_id`), `rules_hash`-change detection
+across an accepted match, and series/ticker sports classification. Phase C stores
+`rules_hash` but does not yet act on a change, because there is no accepted match
+to invalidate until Phase D.
 
 ---
 

@@ -24,12 +24,15 @@ and empty books yield ``None`` for the derived asks.
 
 from __future__ import annotations
 
+import time
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..http_policy import ReadOnlyHTTPPolicy, build_readonly_client
+from .raw_exchange import RawExchange, build_exchange
 
 DEFAULT_BASE_URL = "https://external-api.kalshi.com/trade-api/v2"
 
@@ -102,6 +105,23 @@ class KalshiOrderBook(BaseModel):
         """Cheapest executable price to BUY No, derived from the best Yes bid."""
 
         return None if self.best_yes_bid is None else PRICE_COMPLEMENT - self.best_yes_bid
+
+
+class KalshiCapturedPage(BaseModel):
+    """A paginated Kalshi listing plus the sanitized raw exchange of each page.
+
+    The ingestion lane needs the verbatim body of every page preserved *before*
+    normalization, so each page carries its own :class:`RawExchange`. ``items``
+    aggregates the parsed records across pages; ``cursor`` is the final cursor
+    (``None`` when the listing is exhausted).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+    items: list[dict[str, Any]] = Field(default_factory=list)
+    cursor: Optional[str] = None
+    exchanges: list[RawExchange] = Field(default_factory=list)
+    #: The parsed page bodies, one per exchange, aligned by index.
+    page_bodies: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class KalshiClient:
@@ -241,3 +261,128 @@ class KalshiClient:
 
     async def exchange_status(self) -> dict[str, Any]:
         return await self._get("/exchange/status")
+
+    # -- Captured endpoints (raw exchange preserved for the corpus) -----------
+    #
+    # These mirror the parsing methods above but additionally return the
+    # sanitized :class:`RawExchange` for each HTTP response, so the ingestion
+    # lane can persist the verbatim bytes before normalizing them. They are the
+    # same GET requests through the same policy-wrapped transport -- no second
+    # client, no credential, no signing.
+    async def _get_captured(
+        self, path: str, params: Optional[dict[str, Any]] = None
+    ) -> tuple[dict[str, Any], RawExchange]:
+        clean = {k: v for k, v in (params or {}).items() if v is not None}
+        requested_at = datetime.now(timezone.utc)
+        started_ns = time.monotonic_ns()
+        response = await self._client.get(path, params=clean)
+        exchange = build_exchange(
+            path=path,
+            params=clean,
+            response=response,
+            requested_at=requested_at,
+            elapsed_ns=time.monotonic_ns() - started_ns,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return (data if isinstance(data, dict) else {"data": data}), exchange
+
+    async def _paginate_captured(
+        self,
+        path: str,
+        item_key: str,
+        *,
+        params: Optional[dict[str, Any]] = None,
+        limit: Optional[int] = None,
+        max_pages: int = 1,
+        cursor: Optional[str] = None,
+    ) -> KalshiCapturedPage:
+        params = dict(params or {})
+        params["limit"] = limit or self.default_page_limit
+        page = KalshiCapturedPage()
+        for _ in range(max(1, max_pages)):
+            if cursor:
+                params["cursor"] = cursor
+            raw, exchange = await self._get_captured(path, params)
+            page.exchanges.append(exchange)
+            page.page_bodies.append(raw)
+            page.items.extend(raw.get(item_key, []) or [])
+            cursor = raw.get("cursor") or None
+            page.cursor = cursor
+            if not cursor:
+                break
+        return page
+
+    async def fetch_exchange_status(self) -> tuple[dict[str, Any], RawExchange]:
+        return await self._get_captured("/exchange/status")
+
+    async def fetch_events(
+        self,
+        *,
+        status: Optional[str] = None,
+        series_ticker: Optional[str] = None,
+        with_nested_markets: Optional[bool] = None,
+        limit: Optional[int] = None,
+        max_pages: int = 1,
+        cursor: Optional[str] = None,
+    ) -> KalshiCapturedPage:
+        params: dict[str, Any] = {"status": status, "series_ticker": series_ticker}
+        if with_nested_markets is not None:
+            params["with_nested_markets"] = str(with_nested_markets).lower()
+        return await self._paginate_captured(
+            "/events", "events", params=params, limit=limit, max_pages=max_pages, cursor=cursor
+        )
+
+    async def fetch_markets(
+        self,
+        *,
+        status: Optional[str] = None,
+        event_ticker: Optional[str] = None,
+        series_ticker: Optional[str] = None,
+        tickers: Optional[str] = None,
+        limit: Optional[int] = None,
+        max_pages: int = 1,
+        cursor: Optional[str] = None,
+    ) -> KalshiCapturedPage:
+        params: dict[str, Any] = {
+            "status": status,
+            "event_ticker": event_ticker,
+            "series_ticker": series_ticker,
+            "tickers": tickers,
+        }
+        return await self._paginate_captured(
+            "/markets", "markets", params=params, limit=limit, max_pages=max_pages, cursor=cursor
+        )
+
+    async def fetch_market_orderbook(
+        self, ticker: str, *, depth: Optional[int] = None
+    ) -> tuple[KalshiOrderBook, RawExchange]:
+        book, exchange = await self.fetch_market_orderbook_raw(ticker, depth=depth)
+        return KalshiOrderBook.from_raw(ticker, book), exchange
+
+    async def fetch_market_orderbook_raw(
+        self, ticker: str, *, depth: Optional[int] = None
+    ) -> tuple[dict[str, Any], RawExchange]:
+        """Fetch a market's order book and return the raw payload unparsed.
+
+        The ingestion lane needs the exact bytes preserved before parsing, so a
+        single malformed book cannot lose its response -- the parse into
+        :class:`KalshiOrderBook` happens downstream, defensively.
+        """
+
+        params = {"depth": depth} if depth is not None else None
+        return await self._get_captured(f"/markets/{ticker}/orderbook", params)
+
+    async def fetch_trades(
+        self,
+        *,
+        ticker: Optional[str] = None,
+        limit: Optional[int] = None,
+        max_pages: int = 1,
+        cursor: Optional[str] = None,
+    ) -> KalshiCapturedPage:
+        params: dict[str, Any] = {"ticker": ticker}
+        return await self._paginate_captured(
+            "/markets/trades", "trades", params=params, limit=limit, max_pages=max_pages,
+            cursor=cursor,
+        )

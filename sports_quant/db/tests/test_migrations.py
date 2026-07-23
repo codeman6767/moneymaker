@@ -13,7 +13,12 @@ from sports_quant.db.engine import (
     MigrationError,
     discover_migrations,
 )
-from sports_quant.db.schema import PHASE_A_TABLES, PHASE_B_TABLES, SCHEMA_VERSION_TABLE
+from sports_quant.db.schema import (
+    PHASE_A_TABLES,
+    PHASE_B_TABLES,
+    PHASE_C_TABLES,
+    SCHEMA_VERSION_TABLE,
+)
 
 EXPECTED_MIGRATIONS = (
     (1, "a001_core_entities"),
@@ -22,6 +27,7 @@ EXPECTED_MIGRATIONS = (
     (4, "b004_raw_responses"),
     (5, "b005_sportsbook"),
     (6, "b006_sportsbook_transition_dedup"),
+    (7, "c007_kalshi"),
 )
 
 
@@ -52,6 +58,8 @@ def test_first_migration_creates_every_phase_a_table(database: Database) -> None
     for table in PHASE_A_TABLES:
         assert table in names, f"{table} missing after migration"
     for table in PHASE_B_TABLES:
+        assert table in names, f"{table} missing after migration"
+    for table in PHASE_C_TABLES:
         assert table in names, f"{table} missing after migration"
     assert SCHEMA_VERSION_TABLE in names
 
@@ -266,7 +274,7 @@ def test_migration_003_rebuild_preserves_existing_history_rows(tmp_path: Path) -
 
     # Now apply the rest: 003 (and b004, which both rebuild game_status_history).
     result = database.migrate()
-    assert [m.version for m in result.applied] == [3, 4, 5, 6]
+    assert [m.version for m in result.applied] == [3, 4, 5, 6, 7]
 
     with database.connection() as conn:
         rows = conn.execute(
@@ -353,7 +361,7 @@ def test_migration_b006_rebuild_preserves_every_price_snapshot(tmp_path: Path) -
     partial_dir = tmp_path / "partial"
     partial_dir.mkdir()
     all_migrations = discover_migrations()
-    assert all_migrations[-1].name == "b006_sportsbook_transition_dedup"
+    assert all_migrations[5].name == "b006_sportsbook_transition_dedup"
     for migration in all_migrations[:5]:  # 001..b005
         (partial_dir / f"{migration.name}.sql").write_text(migration.sql, encoding="utf-8")
 
@@ -372,9 +380,10 @@ def test_migration_b006_rebuild_preserves_every_price_snapshot(tmp_path: Path) -
         assert "UNIQUE (sb_outcome_id, content_hash)" in old_sql
         assert "observed_at, content_hash" not in old_sql
 
-    # Apply b006.
+    # Apply the remaining migrations (b006 rebuilds the snapshot table; c007
+    # adds the Kalshi tables and touches nothing here).
     result = database.migrate()
-    assert [m.version for m in result.applied] == [6]
+    assert [m.version for m in result.applied] == [6, 7]
 
     with database.connection() as conn:
         after = conn.execute(

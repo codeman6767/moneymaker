@@ -347,6 +347,15 @@ missing data nobody notices.
 
 ## 6. Kalshi market matching
 
+> **Phase C status.** Kalshi public events, markets, order books, and trades are
+> now **ingested** (migration `c007_kalshi`), but matching is **not** performed —
+> Phase C deliberately does no fuzzy game matching and infers no sports meaning
+> from market text. `kalshi_events`/`kalshi_markets` store the provider's
+> `event_ticker` / `market_ticker` as the stable identity with `game_id` left
+> NULL, and `rules_hash` is stored but not yet acted upon. The procedure below —
+> series filtering, ticker parsing, title/rules cross-check, and writing an
+> `entity_match_decisions` row — is **Phase D**, when that table exists.
+
 Hardest of the three, because Kalshi identifies markets by ticker and prose
 rather than by structured team fields.
 

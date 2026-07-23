@@ -146,6 +146,22 @@ SPORT_ARG_TO_SPORT_KEY: Final[dict[str, str]] = {
     "nba": "basketball_nba",
 }
 
+# --------------------------------------------------------------------------- #
+# Kalshi public data (Phase C)
+# --------------------------------------------------------------------------- #
+#: Provider name recorded on every Kalshi public-data row. ``_public`` makes it
+#: explicit in the corpus that this is the unauthenticated public surface.
+KALSHI_PUBLIC_PROVIDER: Final = "kalshi_public"
+
+#: Order-book / trade sides.
+KALSHI_SIDES: Final[tuple[str, ...]] = ("yes", "no")
+
+#: Kalshi binary-market prices are integer cents in [1, 99]; a Yes and its No
+#: complement sum to 100 (mirrors ``providers.kalshi.PRICE_COMPLEMENT``).
+KALSHI_PRICE_MIN: Final = 1
+KALSHI_PRICE_MAX: Final = 99
+KALSHI_PRICE_COMPLEMENT: Final = 100
+
 # Sentinel meaning "not scoped to a provider". A NOT NULL sentinel rather than
 # NULL because SQLite treats two NULLs as distinct inside a UNIQUE constraint,
 # which would let identical seed rows insert twice on every re-run.
@@ -183,16 +199,30 @@ PHASE_B_TABLES: Final[tuple[str, ...]] = (
     "sportsbook_price_snapshots",
 )
 
+#: Every table created by Phase C migrations, in dependency order.
+PHASE_C_TABLES: Final[tuple[str, ...]] = (
+    "kalshi_events",
+    "kalshi_markets",
+    "kalshi_orderbook_snapshots",
+    "kalshi_orderbook_levels",
+    "kalshi_public_trades",
+)
+
 #: Tables that are immutable once written. UPDATE and DELETE are blocked by
 #: BEFORE triggers, not by convention.
 #:
 #: ``ingestion_runs`` is deliberately absent: a run is opened as ``started``
 #: and closed with its counters, which is a mutation of the same row. What a
-#: run produced -- its raw responses and price snapshots -- is immutable.
+#: run produced -- its raw responses and snapshots -- is immutable. Kalshi
+#: events and markets are mutable current-state (like sportsbook_events); their
+#: order-book snapshots, ladder levels, and public trades are append-only.
 APPEND_ONLY_TABLES: Final[tuple[str, ...]] = (
     "game_status_history",
     "raw_responses",
     "sportsbook_price_snapshots",
+    "kalshi_orderbook_snapshots",
+    "kalshi_orderbook_levels",
+    "kalshi_public_trades",
 )
 
 

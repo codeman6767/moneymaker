@@ -28,8 +28,9 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from ..http_policy import ReadOnlyHTTPPolicy, build_readonly_client
-from ..redaction import redact_secrets, sanitize_headers, sanitize_params, sanitize_url
+from ..redaction import sanitize_url
 from .cache import ResponseCache
+from .raw_exchange import RawExchange, build_exchange
 
 DEFAULT_BASE_URL = "https://api.the-odds-api.com"
 DEFAULT_REGIONS = "us"
@@ -100,48 +101,6 @@ class CreditHeaders(BaseModel):
             requests_used=headers.get("x-requests-used"),
             requests_last=headers.get("x-requests-last"),
         )
-
-
-class RawExchange(BaseModel):
-    """A sanitized, storable record of one HTTP exchange.
-
-    Phase B preserves every provider response in the corpus before normalizing
-    it, which needs more than the parsed JSON: the status code, the response
-    headers, the request that produced it, and the exact body bytes.
-
-    The model is constructed already-safe rather than trusting every downstream
-    caller to redact:
-
-    * ``endpoint`` is the request **path**; it never carries a query string, so
-      the ``?apiKey=`` the Odds API requires cannot travel with it.
-    * ``request_params`` is passed through :func:`sanitize_params`, which masks
-      by parameter *name*.
-    * ``response_headers`` passes the :func:`sanitize_headers` allow-list, so an
-      ``Authorization``-style header can never be captured.
-    * ``body`` has the configured key stripped as a final guard. The public
-      bodies of this provider do not echo it; the guard costs nothing and a
-      stored credential is unrecoverable damage.
-
-    Nothing here is a second Odds API client -- it is the existing client
-    reporting what it already did.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    endpoint: str
-    request_params: dict[str, str]
-    http_status: int
-    response_headers: dict[str, str]
-    content_type: Optional[str] = None
-    #: Wall-clock moment the request was issued.
-    requested_at: datetime
-    #: Wall-clock moment the response arrived. This is the corpus's
-    #: ``observed_at`` for every fact derived from this exchange.
-    received_at: datetime
-    #: Monotonic elapsed time; never derived from the two wall-clocks above,
-    #: which can step.
-    elapsed_ns: int
-    body: str
 
 
 class OddsApiHTTPError(httpx.HTTPStatusError):
@@ -286,18 +245,15 @@ class OddsApiClient:
         requested_at: datetime,
         elapsed_ns: int,
     ) -> RawExchange:
-        """Capture one exchange in already-sanitized form (see :class:`RawExchange`)."""
+        """Capture one exchange in already-sanitized form, redacting the API key."""
 
-        return RawExchange(
-            endpoint=path,
-            request_params={k: str(v) for k, v in sanitize_params(params).items()},
-            http_status=response.status_code,
-            response_headers=sanitize_headers(response.headers),
-            content_type=response.headers.get("content-type"),
+        return build_exchange(
+            path=path,
+            params=params,
+            response=response,
             requested_at=requested_at,
-            received_at=datetime.now(timezone.utc),
             elapsed_ns=elapsed_ns,
-            body=redact_secrets(response.text, [self._api_key.get_secret_value()]),
+            secrets=[self._api_key.get_secret_value()],
         )
 
     async def _get_json(

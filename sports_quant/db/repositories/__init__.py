@@ -20,6 +20,12 @@ from .ingestion_runs import (
     IngestionRunRepositoryProtocol,
     SqliteIngestionRunRepository,
 )
+from .kalshi import (
+    KalshiRepositoryProtocol,
+    SqliteKalshiRepository,
+    orderbook_content_hash,
+    trade_content_hash,
+)
 from .leagues import (
     LeagueRepositoryProtocol,
     SeasonRepositoryProtocol,
@@ -54,6 +60,7 @@ from .teams import (
 __all__ = [
     "GameRepositoryProtocol",
     "IngestionRunRepositoryProtocol",
+    "KalshiRepositoryProtocol",
     "LeagueRepositoryProtocol",
     "PlayerAliasRepositoryProtocol",
     "PlayerRepositoryProtocol",
@@ -64,6 +71,7 @@ __all__ = [
     "SportsbookRepositoryProtocol",
     "SqliteGameRepository",
     "SqliteIngestionRunRepository",
+    "SqliteKalshiRepository",
     "SqliteLeagueRepository",
     "SqlitePlayerAliasRepository",
     "SqlitePlayerRepository",
@@ -75,9 +83,11 @@ __all__ = [
     "TeamAliasRepositoryProtocol",
     "TeamRepositoryProtocol",
     "body_hash",
+    "orderbook_content_hash",
     "point_key",
     "price_content_hash",
     "response_content_hash",
     "status_content_hash",
     "to_db_bool",
+    "trade_content_hash",
 ]

@@ -278,3 +278,117 @@ class SportsbookPriceSnapshot:
     bookmaker_last_update: Optional[str] = None
     market_last_update: Optional[str] = None
     provider_timestamp: Optional[str] = None
+
+
+# --------------------------------------------------------------------------- #
+# Phase C: Kalshi public events, markets, order books, and trades
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class KalshiEvent:
+    """Public Kalshi event. ``event_ticker`` is the stable provider identity;
+    ``game_id`` (canonical, Phase D) stays NULL in Phase C."""
+
+    kalshi_event_id: str
+    event_ticker: str
+    raw_response_id: str
+    first_observed_at: str
+    last_observed_at: str
+    created_at: str
+    updated_at: str
+    series_ticker: Optional[str] = None
+    title: Optional[str] = None
+    sub_title: Optional[str] = None
+    category: Optional[str] = None
+    status: Optional[str] = None
+    mutually_exclusive: Optional[bool] = None
+    game_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class KalshiMarket:
+    """Public Kalshi market. ``market_ticker`` is the stable provider identity."""
+
+    kalshi_market_id: str
+    market_ticker: str
+    raw_response_id: str
+    first_observed_at: str
+    last_observed_at: str
+    created_at: str
+    updated_at: str
+    event_ticker: Optional[str] = None
+    kalshi_event_id: Optional[str] = None
+    series_ticker: Optional[str] = None
+    title: Optional[str] = None
+    subtitle: Optional[str] = None
+    yes_sub_title: Optional[str] = None
+    no_sub_title: Optional[str] = None
+    status: Optional[str] = None
+    open_time: Optional[str] = None
+    close_time: Optional[str] = None
+    expiration_time: Optional[str] = None
+    settlement_time: Optional[str] = None
+    result: Optional[str] = None
+    rules_primary: Optional[str] = None
+    rules_secondary: Optional[str] = None
+    rules_hash: Optional[str] = None
+    game_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class KalshiOrderbookLevel:
+    """One ladder level of an order-book snapshot. ``level_index`` 0 = best."""
+
+    level_id: str
+    snapshot_id: str
+    side: str
+    price: int
+    quantity: int
+    level_index: int
+    created_at: str
+
+
+@dataclass(frozen=True)
+class KalshiOrderbookSnapshot:
+    """Append-only order-book observation. Derived asks are stored, never a wire
+    ask: ``derived_yes_ask = 100 - best_no_bid`` and vice versa."""
+
+    snapshot_id: str
+    market_ticker: str
+    observed_at: str
+    ingested_at: str
+    run_id: str
+    raw_response_id: str
+    raw_response_hash: str
+    content_hash: str
+    created_at: str
+    yes_levels: int = 0
+    no_levels: int = 0
+    depth_levels: int = 0
+    kalshi_market_id: Optional[str] = None
+    best_yes_bid: Optional[int] = None
+    best_no_bid: Optional[int] = None
+    derived_yes_ask: Optional[int] = None
+    derived_no_ask: Optional[int] = None
+    provider_timestamp: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class KalshiPublicTrade:
+    """One anonymous public trade print. NOT an account fill (we have none)."""
+
+    trade_id: str
+    market_ticker: str
+    count: int
+    observed_at: str
+    ingested_at: str
+    run_id: str
+    raw_response_id: str
+    content_hash: str
+    created_at: str
+    provider_trade_id: Optional[str] = None
+    kalshi_market_id: Optional[str] = None
+    taker_side: Optional[str] = None
+    yes_price: Optional[int] = None
+    no_price: Optional[int] = None
+    trade_time: Optional[str] = None
+    provider_timestamp: Optional[str] = None

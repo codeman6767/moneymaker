@@ -53,6 +53,13 @@ SB_MARKET_PREFIX: Final = "sbm_"
 SB_OUTCOME_PREFIX: Final = "sbo_"
 SB_PRICE_SNAPSHOT_PREFIX: Final = "sbp_"
 
+# Phase C: Kalshi public events, markets, order books, and trades.
+KALSHI_EVENT_PREFIX: Final = "kev_"
+KALSHI_MARKET_PREFIX: Final = "kmk_"
+KALSHI_BOOK_PREFIX: Final = "kob_"
+KALSHI_LEVEL_PREFIX: Final = "kol_"
+KALSHI_TRADE_PREFIX: Final = "ktr_"
+
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
 
 
@@ -199,3 +206,23 @@ def new_sb_outcome_id() -> str:
 
 def new_sb_price_snapshot_id() -> str:
     return prefixed_id(SB_PRICE_SNAPSHOT_PREFIX)
+
+
+def new_kalshi_event_id() -> str:
+    return prefixed_id(KALSHI_EVENT_PREFIX)
+
+
+def new_kalshi_market_id() -> str:
+    return prefixed_id(KALSHI_MARKET_PREFIX)
+
+
+def new_kalshi_book_id() -> str:
+    return prefixed_id(KALSHI_BOOK_PREFIX)
+
+
+def new_kalshi_level_id() -> str:
+    return prefixed_id(KALSHI_LEVEL_PREFIX)
+
+
+def new_kalshi_trade_id() -> str:
+    return prefixed_id(KALSHI_TRADE_PREFIX)
