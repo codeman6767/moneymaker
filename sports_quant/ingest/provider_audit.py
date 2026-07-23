@@ -74,6 +74,30 @@ SUPPORTED_AUDIT_PROVIDERS = (
     PROVIDER_OPEN_METEO,
 )
 
+#: Providers that authenticate with a key. Only for these can the audit report a
+#: True/False ``authenticated`` verdict; keyless public providers are N/A.
+_KEYED_PROVIDERS = frozenset({PROVIDER_BALLDONTLIE})
+
+# Truthful overall audit statuses.
+AUDIT_SUCCEEDED = "succeeded"
+AUDIT_PARTIALLY_FAILED = "partially_failed"
+AUDIT_FAILED = "failed"
+
+#: Error kinds that are *active operational failures* -- they prevent the audit
+#: from trustworthily verifying a capability (as opposed to an honest tier
+#: restriction, a generic forbidden, or a dependency-based skip, none of which is
+#: an operational failure). Rate-limit here means retries were already exhausted.
+_ACTIVE_FAILURE_KINDS = frozenset(
+    {
+        ProviderErrorKind.NETWORK,
+        ProviderErrorKind.SERVER,
+        ProviderErrorKind.RATE_LIMITED,
+        ProviderErrorKind.INVALID_PAYLOAD,
+        ProviderErrorKind.PARSER,
+        ProviderErrorKind.UNEXPECTED,
+    }
+)
+
 
 # --------------------------------------------------------------------------- #
 # Probes
@@ -151,19 +175,37 @@ class ProviderAuditResult:
     status: str
     run_id: Optional[str] = None
     requests_made: int = 0
+    #: Keyed-provider auth verdict: True/False with evidence, None if unknown or
+    #: not applicable (a keyless public provider).
     authenticated: Optional[bool] = None
+    auth_applicable: bool = True
     tier_restricted: bool = False
     observations: list[CapabilityObservation] = field(default_factory=list)
     capabilities_recorded: int = 0
     observed_count: int = 0
     declared_only_count: int = 0
     issues_recorded: int = 0
+    # Probe accounting, evaluated from real outcomes -- never assumed.
+    probes_attempted: int = 0
+    probes_succeeded: int = 0
+    probes_skipped: int = 0
+    active_failures: int = 0
     error_type: Optional[str] = None
     error_message: Optional[str] = None
 
     @property
     def failed(self) -> bool:
-        return self.status == "failed"
+        return self.status == AUDIT_FAILED
+
+    @property
+    def has_active_failure(self) -> bool:
+        return self.active_failures > 0
+
+    @property
+    def needs_failure_exit(self) -> bool:
+        """CLI must return a non-zero exit for a failed OR partially-failed audit."""
+
+        return self.status in (AUDIT_FAILED, AUDIT_PARTIALLY_FAILED)
 
 
 @dataclass
@@ -262,20 +304,39 @@ async def audit_provider(
         )
 
     result = ProviderAuditResult(
-        provider=provider, tier=declaration.tier, dry_run=dry_run, status="succeeded"
+        provider=provider, tier=declaration.tier, dry_run=dry_run, status=AUDIT_SUCCEEDED
     )
+    result.auth_applicable = provider in _KEYED_PROVIDERS
 
     probe_results: list[_ProbeResult] = []
     probed_caps: set[ProviderCapability] = set()
     responses_by_name: dict[str, ProviderResponse] = {}
     auth_failed = False
+    auth_evidence = False  # a 2xx or a tier restriction proves the key was accepted
     for probe in probes:
         pr = await _run_probe(probe, responses_by_name)
         probe_results.append(pr)
-        if not pr.skipped:
+        # Attempted-capability bookkeeping happens BEFORE any early break, so a
+        # capability whose probe was attempted never also receives a second,
+        # declared-only outcome in the pass below.
+        probed_caps.update(probe.capabilities)
+        probed_caps.update(pr.extra_caps)
+        if pr.skipped:
+            result.probes_skipped += 1
+        else:
+            result.probes_attempted += 1
             result.requests_made += 1  # a skipped probe issued no GET
         if pr.observed_state is CapabilityState.PAID_TIER_REQUIRED:
             result.tier_restricted = True
+        if pr.observed_state in (CapabilityState.SUPPORTED, CapabilityState.PAID_TIER_REQUIRED):
+            auth_evidence = True  # the provider recognized the key
+        if pr.observed_state is not None:
+            result.probes_succeeded += 1  # a useful, completed probe
+        if pr.error_kind in _ACTIVE_FAILURE_KINDS and pr.observed_state is None:
+            result.active_failures += 1
+            if result.error_message is None:
+                result.error_type = pr.error_kind.value if pr.error_kind else None
+                result.error_message = pr.detail
         if pr.auth_failed:
             auth_failed = True
             # A shared key that fails auth on one endpoint fails everywhere;
@@ -283,17 +344,32 @@ async def audit_provider(
             break
         if pr.response is not None:
             responses_by_name[probe.name] = pr.response
-        # Capabilities this probe is responsible for (base + any verified extras)
-        # are considered "probed" so they are not also emitted as declared-only.
-        probed_caps.update(probe.capabilities)
-        probed_caps.update(pr.extra_caps)
 
-    # authenticated: True unless we saw an auth failure; None if no probe ran.
-    if auth_failed:
+    # -- Authentication verdict (evidence-based; N/A for keyless providers) ----
+    if not result.auth_applicable:
+        result.authenticated = None  # keyless public provider: not applicable
+    elif auth_failed:
         result.authenticated = False
-        result.status = "failed"
-    elif probes:
+    elif auth_evidence:
         result.authenticated = True
+    else:
+        # Only network/5xx/rate-limit/forbidden/malformed occurred: unknown.
+        result.authenticated = None
+
+    # -- Overall status (evaluated from real probe outcomes, never assumed) ----
+    if auth_failed:
+        result.status = AUDIT_FAILED
+        if result.error_message is None:
+            result.error_type = "authentication"
+            result.error_message = "provider authentication failed"
+    elif result.active_failures == 0:
+        result.status = AUDIT_SUCCEEDED
+    elif result.probes_succeeded > 0:
+        # At least one useful probe completed, but another actively failed.
+        result.status = AUDIT_PARTIALLY_FAILED
+    else:
+        # Active failures prevented any trustworthy verification.
+        result.status = AUDIT_FAILED
 
     # -- Build observations ---------------------------------------------------
     observations: list[CapabilityObservation] = []
@@ -513,10 +589,15 @@ def _persist(
                     )
                     result.issues_recorded += 1
 
+        run_status = {
+            AUDIT_FAILED: "failed",
+            AUDIT_PARTIALLY_FAILED: "partially_succeeded",
+            AUDIT_SUCCEEDED: "succeeded",
+        }[result.status]
         with transaction(conn):
             runs.complete(
                 run.run_id,
-                status="failed" if result.failed else "succeeded",
+                status=run_status,
                 duration_ns=time.monotonic_ns() - started,
                 requests_made=result.requests_made,
                 records_received=len(observations),
@@ -570,11 +651,15 @@ def build_balldontlie_probes(client) -> list[CapabilityProbe]:
     confirmed pregame starters are never inferred from lineup access.
     """
 
-    from ..providers.balldontlie import game_id_from_payload, substitutions_present
+    from ..providers.balldontlie import first_game_id_and_date, substitutions_present
 
     def game_id(prior: dict[str, ProviderResponse]) -> Optional[int]:
         resp = prior.get("games")
-        return None if resp is None else game_id_from_payload(resp.data)
+        return None if resp is None else first_game_id_and_date(resp.data)[0]
+
+    def game_date(prior: dict[str, ProviderResponse]) -> Optional[str]:
+        resp = prior.get("games")
+        return None if resp is None else first_game_id_and_date(resp.data)[1]
 
     def resolve_plays(prior):
         gid = game_id(prior)
@@ -586,12 +671,20 @@ def build_balldontlie_probes(client) -> list[CapabilityProbe]:
 
     def resolve_advanced(prior):
         gid = game_id(prior)
-        return None if gid is None else (lambda: client.fetch_advanced_stats(game_id=gid))
+        # Uses the documented game_ids[] array parameter with the single audit id.
+        return None if gid is None else (lambda: client.fetch_advanced_stats(game_ids=[gid]))
+
+    def resolve_box_scores(prior):
+        gdate = game_date(prior)
+        # The box-score endpoint requires a date; use the extracted game date, or
+        # skip honestly when no valid date is available (never a hardcoded date).
+        return None if gdate is None else (lambda: client.fetch_box_scores(date=gdate))
 
     def plays_extra(response: ProviderResponse) -> tuple[ProviderCapability, ...]:
         return (_C.SUBSTITUTIONS,) if substitutions_present(response.data) else ()
 
     _no_game = "no suitable provider game id was available from the games probe"
+    _no_date = "no suitable game date was available from the games probe"
 
     return [
         CapabilityProbe("teams", "/v1/teams", (_C.TEAMS,), lambda: client.fetch_teams()),
@@ -605,14 +698,15 @@ def build_balldontlie_probes(client) -> list[CapabilityProbe]:
             lambda: client.fetch_stats(),
         ),
         CapabilityProbe(
-            "box_scores", "/v1/box_scores", (_C.TEAM_STATISTICS,),
-            lambda: client.fetch_box_scores(),
-        ),
-        CapabilityProbe(
             "injuries", "/v1/player_injuries", (_C.INJURIES,),
             lambda: client.fetch_player_injuries(),
         ),
-        # Dependent probes: need a valid game id from the games response above.
+        # Dependent probes: need a valid game id (plays/lineups/advanced) or the
+        # game date (box scores) from the games response above.
+        CapabilityProbe(
+            "box_scores", "/v1/box_scores", (_C.TEAM_STATISTICS,),
+            resolve=resolve_box_scores, skip_reason=_no_date,
+        ),
         CapabilityProbe(
             "plays", "/v1/plays", (_C.PLAYS,),
             resolve=resolve_plays, skip_reason=_no_game, extra_capabilities=plays_extra,

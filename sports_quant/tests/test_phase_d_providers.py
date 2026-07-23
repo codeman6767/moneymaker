@@ -130,6 +130,45 @@ def test_generic_403_without_plan_wording_is_forbidden_not_tier() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"error":"this endpoint requires a higher plan tier"}',
+        '{"error":"please upgrade to access advanced stats"}',
+        '{"error_code":"tier_restricted"}',
+        '{"code":"upgrade_required"}',
+        "not available on your current plan",
+        "requires the GOAT subscription tier",
+    ],
+)
+def test_explicit_tier_evidence_is_tier_restricted(body: str) -> None:
+    assert (
+        classify_http_status(403, provider=PROVIDER_BALLDONTLIE, body_snippet=body)
+        is ProviderErrorKind.TIER_RESTRICTED
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "",                                            # empty body
+        "<html><body>403 Forbidden</body></html>",     # HTML error page
+        "{ this is not valid json",                    # malformed JSON
+        '{"error":"forbidden"}',                        # generic forbidden
+        '{"error":"your game plan for today is invalid"}',  # unrelated use of "plan"
+        '{"message":"access to this floor plan is denied"}',  # unrelated "plan"
+        '{"error":"the subscription form could not be rendered"}',  # unrelated "subscription"
+    ],
+)
+def test_generic_or_unrelated_403_is_forbidden_not_tier(body: str) -> None:
+    # A broad single word ("plan", "subscription") in an unrelated context must
+    # NOT be read as tier evidence; only explicit phrasing/codes qualify.
+    assert (
+        classify_http_status(403, provider=PROVIDER_BALLDONTLIE, body_snippet=body)
+        is ProviderErrorKind.FORBIDDEN
+    )
+
+
 def test_429_and_5xx_classified() -> None:
     assert classify_http_status(429) is ProviderErrorKind.RATE_LIMITED
     assert classify_http_status(503) is ProviderErrorKind.SERVER
@@ -317,17 +356,80 @@ def _ok_handler(seen: list[str]):
     return handler
 
 
-async def test_balldontlie_plays_lineups_advanced_hit_documented_paths() -> None:
-    seen: list[str] = []
-    client = _bdl_client(_ok_handler(seen))
+def _contract_handler(captured: list[httpx.Request]):
+    """A strict, documentation-faithful mock: it 400s a request that violates the
+    BALLDONTLIE contract (wrong path, singular params instead of arrays, bad
+    date), so a test cannot pass by sending the wrong shape."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        path = request.url.path
+        params = request.url.params
+        bad = None
+        if path == "/nba/v1/stats/advanced":
+            if "game_id" in params or "season" in params:
+                bad = "advanced stats must use game_ids[]/seasons[], not singular"
+            elif not (params.get_list("game_ids[]") or params.get_list("seasons[]")):
+                bad = "advanced stats requires game_ids[] or seasons[]"
+        elif path == "/v1/box_scores":
+            date = params.get("date")
+            if not date:
+                bad = "box_scores requires a date"
+            else:
+                import re as _re
+
+                if not _re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+                    bad = f"box_scores date must be YYYY-MM-DD (got {date!r})"
+        elif path == "/v1/plays":
+            if not params.get("game_id"):
+                bad = "plays requires game_id"
+        elif path == "/v1/lineups":
+            if not params.get_list("game_ids[]"):
+                bad = "lineups requires game_ids[]"
+        if bad is not None:
+            return httpx.Response(
+                400, json={"error": bad}, headers={"content-type": "application/json"}
+            )
+        return httpx.Response(200, json={"data": []}, headers={"content-type": "application/json"})
+
+    return handler
+
+
+async def test_balldontlie_advanced_stats_uses_documented_array_params() -> None:
+    captured: list[httpx.Request] = []
+    client = _bdl_client(_contract_handler(captured))
+    try:
+        await client.fetch_advanced_stats(game_ids=[18444208, 7])
+        await client.fetch_advanced_stats(seasons=[2023, 2024])
+    finally:
+        await client.aclose()
+    # Request 1: game_ids[] array present; NO singular game_id/season.
+    p1 = captured[0].url.params
+    assert captured[0].url.path == "/nba/v1/stats/advanced"
+    assert p1.get_list("game_ids[]") == ["18444208", "7"]
+    assert "game_id" not in p1 and "season" not in p1
+    # Request 2: seasons[] array present; NO singular params.
+    p2 = captured[1].url.params
+    assert p2.get_list("seasons[]") == ["2023", "2024"]
+    assert "game_id" not in p2 and "season" not in p2
+    # The raw URL carries the encoded array brackets, not a singular key.
+    assert "game_ids%5B%5D=18444208" in str(captured[0].url)
+
+
+async def test_balldontlie_plays_lineups_hit_documented_paths_and_params() -> None:
+    captured: list[httpx.Request] = []
+    client = _bdl_client(_contract_handler(captured))
     try:
         await client.fetch_plays(game_id=18444208)
         await client.fetch_lineups(game_ids=[18444208, 7])
-        await client.fetch_advanced_stats(game_id=18444208)
-        await client.fetch_advanced_stats(season=2024)
     finally:
         await client.aclose()
-    assert seen == ["/v1/plays", "/v1/lineups", "/nba/v1/stats/advanced", "/nba/v1/stats/advanced"]
+    assert captured[0].url.path == "/v1/plays"
+    assert captured[0].url.params.get("game_id") == "18444208"
+    assert captured[1].url.path == "/v1/lineups"
+    assert captured[1].url.params.get_list("game_ids[]") == ["18444208", "7"]
+    # None of these requests were 400'd by the contract mock.
+    # (a 400 would have raised ProviderError before returning)
 
 
 @pytest.mark.parametrize("bad", [None, "", "  ", "abc", 0, -5, 1.5, True, "12x"])
@@ -377,6 +479,49 @@ async def test_balldontlie_per_page_is_bounded() -> None:
     finally:
         await client.aclose()
     assert captured and captured[0].params.get("per_page") == "100"
+
+
+async def test_balldontlie_box_scores_requires_valid_date() -> None:
+    captured: list[httpx.Request] = []
+    client = _bdl_client(_contract_handler(captured))
+    try:
+        # A valid date is sent through as the documented `date` parameter.
+        await client.fetch_box_scores(date="2024-04-09")
+    finally:
+        await client.aclose()
+    assert captured[0].url.path == "/v1/box_scores"
+    assert captured[0].url.params.get("date") == "2024-04-09"
+
+
+@pytest.mark.parametrize(
+    "bad_date",
+    [None, "", "  ", "2024/04/09", "2024-13-01", "2024-04-31", "04-09-2024",
+     "2024-04-09T00:00:00Z", 20240409, "not-a-date"],
+)
+async def test_balldontlie_box_scores_rejects_bad_date_without_request(bad_date) -> None:  # noqa: ANN001
+    seen: list[str] = []
+    client = _bdl_client(_ok_handler(seen))
+    try:
+        with pytest.raises(ValueError):
+            await client.fetch_box_scores(date=bad_date)
+    finally:
+        await client.aclose()
+    assert seen == []  # rejected before any request
+
+
+async def test_balldontlie_advanced_stats_rejects_oversized_list() -> None:
+    seen: list[str] = []
+    client = _bdl_client(_ok_handler(seen))
+    try:
+        with pytest.raises(ValueError):
+            await client.fetch_advanced_stats(game_ids=list(range(1, 200)))  # > 100
+        with pytest.raises(ValueError):
+            await client.fetch_advanced_stats(game_ids=[])  # empty collection
+        with pytest.raises(ValueError):
+            await client.fetch_advanced_stats(seasons=[1800])  # implausible season
+    finally:
+        await client.aclose()
+    assert seen == []
 
 
 async def test_mlb_roster_and_person_reject_invalid_ids_without_request() -> None:

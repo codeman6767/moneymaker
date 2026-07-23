@@ -3,18 +3,22 @@
 Concrete, staged implementation design for official MLB/NBA data, weather, and
 canonical matching.
 
-> **Status: D1 provider infrastructure complete (incl. the `d010` audit-integrity
-> repair); D2–D5 not started.** D1 built the typed provider-capability system, the
-> four provider clients (MLB StatsAPI, BALLDONTLIE, NWS, Open-Meteo) over a shared
-> GET-only base, the `http_policy` allow-lists, the pinned/validated config,
-> migrations `d009_provider_infra` and `d010_provider_audit_integrity` (schema
-> v10), the references/venues/matching/data-quality/capabilities repositories, and
-> the evidence-backed multi-probe `provider-audit` + `ingest-venues` CLI commands —
-> all tested against mocked transports (no live provider call was made). The audit
-> separates declared from externally observed capabilities (§10). D2–D5
-> (MLB/NBA/weather ingestion + canonical matching) remain unbuilt. This document
-> is the build contract; providers are chosen in `PHASE_D_PROVIDER_DECISIONS.md`
-> (doc-review date 2026-07-23).
+> **Status: Phase D1 provider infrastructure code complete; D2–D5 not started.
+> Live provider access still requires an approved provider audit before any large
+> backfill.** D1 built the typed provider-capability system, the four provider
+> clients (MLB StatsAPI, BALLDONTLIE, NWS, Open-Meteo) over a shared GET-only base
+> (streamed size guard, exact base-URL pinning), the tightened `http_policy`
+> allow-lists, migrations `d009_provider_infra` and `d010_provider_audit_integrity`
+> (schema v10), the references/venues/matching/data-quality/capabilities
+> repositories, and the evidence-backed, dependency-aware `provider-audit` +
+> `ingest-venues` CLI commands with truthful `succeeded`/`partially_failed`/`failed`
+> statuses, evidence-based authentication reporting, and exact BALLDONTLIE request
+> contracts (`game_ids[]`/`seasons[]` arrays, required validated box-score `date`) —
+> all tested against mocked, contract-enforcing transports (no live provider call
+> was made). The audit separates declared from externally observed capabilities
+> (§10). D2–D5 (MLB/NBA/weather ingestion + canonical matching) remain unbuilt.
+> This document is the build contract; providers are chosen in
+> `PHASE_D_PROVIDER_DECISIONS.md` (doc-review date 2026-07-23).
 
 Companion documents: `PHASE_D_PROVIDER_DECISIONS.md`, `DATA_ARCHITECTURE.md`,
 `POINT_IN_TIME_DATA.md`, `ENTITY_MATCHING.md`, `DATA_FOUNDATION_PLAN.md`.
@@ -378,40 +382,71 @@ stats, box scores, plays, or lineups. One tier-restricted endpoint restricts onl
 its group; unrelated groups keep being probed. A `401` fails the run and records
 **no** supported observation.
 
-**Dependency-aware probing.** Some documented endpoints require a valid provider
-id, so the audit resolves it from an earlier probe rather than hardcoding one:
+**Dependency-aware probing (game id *and* game date).** Some documented
+endpoints require a valid provider id or date, so the audit resolves both from an
+earlier probe rather than hardcoding one:
 
 * BALLDONTLIE `/v1/plays?game_id=…`, `/v1/lineups?game_ids[]=…`, and
-  `/nba/v1/stats/advanced` each take a **game id** extracted from the sanitized
-  `/v1/games` response.
+  `/nba/v1/stats/advanced?game_ids[]=…` each take a **game id** extracted from the
+  sanitized `/v1/games` response. Advanced stats uses the **documented array
+  parameters** `game_ids[]` / `seasons[]` (never the undocumented singular
+  `game_id`/`season`), with positive-int ids, valid seasons, non-empty and
+  size-bounded lists, and bounded pagination.
+* BALLDONTLIE `/v1/box_scores?date=YYYY-MM-DD` requires a **date**; the audit
+  extracts and validates the game date from the same games response. `date` is
+  required and strictly validated (`YYYY-MM-DD`) in the client before any request.
 * MLB **players** is verified via `/teams/{id}/roster` (a team id from the teams
   response) and then optionally `/people/{id}` (a person id from the roster) —
   never marked supported just because `/teams` returned 200.
 
-When no suitable id is available the dependent capability is recorded
+When no suitable id or date is available the dependent capability is recorded
 `unknown_until_audited` (skipped, no request issued, never supported, never an
-auth failure); an id is never fabricated. A 2xx with an empty result verifies
-*endpoint access* only, not historical coverage or payload completeness. Lineup
-*endpoint access*, confirmed pregame starters, substitutions, and play-by-play
-stay distinct: starters are never inferred from lineup access, and substitutions
-are marked observed **only** when the returned play data actually contains
-substitution events. Groups probed:
+auth failure); an id or date is never fabricated. A 2xx with an empty result
+verifies *endpoint access* only, not historical coverage or payload completeness.
+Lineup *endpoint access*, confirmed pregame starters, substitutions, and
+play-by-play stay distinct: starters are never inferred from lineup access, and
+substitutions are marked observed **only** when the returned play data actually
+contains substitution events (read from the documented event type / `text` /
+`description` fields). Groups probed:
 
 MLB StatsAPI — teams · schedules/games · venues · roster/person (players).
 BALLDONTLIE (GOAT) — teams · players · games/schedules · player game statistics ·
-box/team statistics · injuries · plays · lineups · advanced statistics
-(`/nba/v1/stats/advanced`) — each a documented endpoint on the tightened
-allow-list; the previously-listed `/v1/advanced_stats` was undocumented and was
-removed.
+box/team statistics (date-dependent) · injuries · plays · lineups · advanced
+statistics (`/nba/v1/stats/advanced`) — each a documented endpoint on the
+tightened allow-list; the previously-listed `/v1/advanced_stats` was undocumented
+and was removed.
 NWS / Open-Meteo — one current-forecast probe each; a current forecast never
 implies historical-forecast reconstruction.
 
-Each observed/declared capability is one of the §2.2 states (e.g. a GOAT-only
-endpoint answering a **plan-worded** 403 → `paid_tier_required`; a generic 403
-with no plan evidence → `forbidden`/`unavailable`, never `paid_tier_required`).
-The audit is the authoritative source for observed capability history; snapshots
-are append-only, so an earlier belief is preserved and never overwritten. A tier
-limitation it finds is a recorded capability state, never a failed run.
+**Truthful overall status + exit codes.** The audit result is computed from real
+probe outcomes, never assumed: `succeeded` (completed with no active operational
+failure — it may include honestly unsupported, tier-restricted, or skipped
+capabilities), `partially_failed` (a useful probe succeeded but another hit an
+active failure), or `failed` (authentication failed, or active failures prevented
+any trustworthy verification). Active operational failures are network failure
+after retries, upstream 5xx after retries, exhausted rate limits, invalid/parser
+payloads, and unexpected errors — an honest tier restriction, generic forbidden,
+or dependency skip is **not** one. `provider-audit` exits 0 for a completed honest
+audit, 1 for any active failure (`failed` or `partially_failed`), 2 for a
+read-only startup violation, and 3 for a missing/unmigrated database.
+
+**Authentication evidence.** For the keyed provider (BALLDONTLIE), `authenticated`
+is `True` only with evidence (a successful 2xx, or a plan-worded tier 403 that
+proves the key was recognized), `False` for a verified invalid-key/auth response,
+and `None` (unknown) when only network/5xx/rate-limit/malformed/generic-forbidden
+occurred. Keyless providers (MLB StatsAPI, NWS, Open-Meteo) report authentication
+as **not applicable** (`None`) — the audit never claims a keyless provider was
+authenticated. A tier restriction is a recorded capability state, never a failed
+run; the tier-restriction classifier requires **explicit** plan/subscription/
+upgrade phrasing or a documented error code, so a broad unrelated use of a word
+like “plan” is not enough. Each declared capability receives exactly **one**
+outcome per audit run (a 401 that halts probing yields one authentication outcome
+for the attempted capability and honest unprobed rows for the rest — never a
+duplicate or a supported fallback). Snapshots are append-only, so an earlier
+belief is preserved across runs. Automated tests drive all of this through
+**strict contract-level mocks** that 4xx a request violating the documented shape
+(wrong path, singular instead of array params, missing/invalid date), so a test
+cannot pass by sending the wrong request.
 
 ---
 
@@ -447,23 +482,27 @@ Model column = recommended driver.
 > `Content-Length` over the cap before reading and otherwise counts bytes and
 > aborts mid-stream, so an oversized body never buffers or reaches storage; no
 > redirect chasing), the four clients (`mlb_statsapi` incl. roster/person,
-> `balldontlie` incl. plays/lineups/advanced-stats with id validation and bounded
-> pages, `nws`, `open_meteo`), `http_policy` allow-lists + `for_*` (BALLDONTLIE
-> tightened to explicit documented endpoints incl. `/v1/plays`, `/v1/lineups`,
-> `/nba/v1/stats/advanced`; the undocumented `/v1/advanced_stats` removed; no path
-> wildcard), pinned/validated config (exact host + normalized base path; rejects
-> userinfo/port/query/fragment, duplicate slashes, dot segments, and deceptive
-> prefixes), migrations `d009_provider_infra` (v9) and
+> `balldontlie` incl. plays/lineups/advanced-stats and date-required box scores,
+> with id/season/date validation, `game_ids[]`/`seasons[]` array params, and
+> bounded pages/lists, `nws`, `open_meteo`), `http_policy` allow-lists + `for_*`
+> (BALLDONTLIE tightened to explicit documented endpoints incl. `/v1/plays`,
+> `/v1/lineups`, `/nba/v1/stats/advanced`; the undocumented `/v1/advanced_stats`
+> removed; no path wildcard), pinned/validated config (exact host + normalized base
+> path; rejects userinfo/port/query/fragment, duplicate slashes, dot segments, and
+> deceptive prefixes), migrations `d009_provider_infra` (v9) and
 > `d010_provider_audit_integrity` (v10), repositories (`references`, `venues`,
 > `matching`, `data_quality`, `capabilities`), the **evidence-backed,
-> dependency-aware** `provider-audit` + `ingest-venues` CLI, and full mocked
-> tests. The audit separates declared from externally observed capabilities (§10):
-> one GET per group, dependent probes resolve a game/team id from an earlier
-> response (skipping honestly as `unknown_until_audited` when none is available),
-> observed capabilities carry probe/endpoint/status/error/raw-response evidence,
-> unprobed/unverified capabilities stay declared-only, and audit history is
-> append-only. No historical backfill; no live call. Live-verification of provider
-> docs/terms (decisions §7) is still owed before D2/D3 backfill.
+> dependency-aware** `provider-audit` + `ingest-venues` CLI, and full mocked,
+> contract-enforcing tests. The audit separates declared from externally observed
+> capabilities (§10): one GET per group, dependent probes resolve a game id / game
+> date / team id from an earlier response (skipping honestly as
+> `unknown_until_audited` when none is available), observed capabilities carry
+> probe/endpoint/status/error/raw-response evidence, each capability gets exactly
+> one outcome per run, overall status is a truthful
+> `succeeded`/`partially_failed`/`failed`, authentication is evidence-based (N/A for
+> keyless providers), and the CLI exits non-zero on any active failure. No
+> historical backfill; no live call. Live-verification of provider docs/terms
+> (decisions §7) is still owed before D2/D3 backfill.
 
 - **Provider(s):** infrastructure for all selected providers; **required tier:**
   BALLDONTLIE **GOAT** declared (not yet exercised for backfill). **Optional:**

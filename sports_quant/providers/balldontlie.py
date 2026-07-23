@@ -17,6 +17,8 @@ log, or CLI/JSON output.
 
 from __future__ import annotations
 
+import re
+from datetime import date
 from typing import Any, Iterable, Optional
 
 import httpx
@@ -31,6 +33,10 @@ DEFAULT_BALLDONTLIE_BASE_URL = "https://api.balldontlie.io"
 
 #: Hard cap on page size sent to BALLDONTLIE (its documented maximum is 100).
 _MAX_PER_PAGE = 100
+#: Hard cap on the number of ids/seasons in one array-parameter request, so a
+#: dependent probe can never build an unbounded request URL.
+_MAX_LIST_SIZE = 100
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _validate_game_id(game_id: object) -> int:
@@ -59,6 +65,55 @@ def _validate_game_id(game_id: object) -> int:
     return value
 
 
+def _validate_season(season: object) -> int:
+    """Coerce a season to a plausible 4-digit year, or reject it."""
+
+    if isinstance(season, bool) or not isinstance(season, int):
+        raise ValueError(f"season must be a 4-digit year integer (got {season!r})")
+    if not (1900 <= season <= 2100):
+        raise ValueError(f"season must be a 4-digit year (got {season})")
+    return season
+
+
+def _validate_ids(values: Iterable[object], *, label: str) -> list[int]:
+    """Validate a non-empty, bounded collection of positive integer ids."""
+
+    validated = [_validate_game_id(v) for v in values]
+    if not validated:
+        raise ValueError(f"{label} requires at least one id")
+    if len(validated) > _MAX_LIST_SIZE:
+        raise ValueError(f"{label} accepts at most {_MAX_LIST_SIZE} ids (got {len(validated)})")
+    return validated
+
+
+def _validate_seasons(values: Iterable[object]) -> list[int]:
+    validated = [_validate_season(v) for v in values]
+    if not validated:
+        raise ValueError("seasons requires at least one season")
+    if len(validated) > _MAX_LIST_SIZE:
+        raise ValueError(f"seasons accepts at most {_MAX_LIST_SIZE} values (got {len(validated)})")
+    return validated
+
+
+def validate_iso_date(value: object) -> str:
+    """Strictly validate a ``YYYY-MM-DD`` calendar date, or raise ``ValueError``.
+
+    Rejects anything with a time component, a non-string, or an out-of-range
+    calendar date -- so a malformed provider value is never sent as ``date=``.
+    """
+
+    if not isinstance(value, str):
+        raise ValueError(f"date must be a YYYY-MM-DD string (got {type(value).__name__})")
+    text = value.strip()
+    if not _ISO_DATE_RE.match(text):
+        raise ValueError(f"date must be a YYYY-MM-DD calendar date (got {value!r})")
+    try:
+        date.fromisoformat(text)
+    except ValueError as exc:
+        raise ValueError(f"date is not a valid calendar date (got {value!r})") from exc
+    return text
+
+
 def _clamp_per_page(per_page: int) -> int:
     if per_page < 1:
         raise ValueError(f"per_page must be >= 1 (got {per_page})")
@@ -72,18 +127,42 @@ def game_id_from_payload(data: object) -> Optional[int]:
     than fabricating an id. Never raises.
     """
 
+    gid, _date = first_game_id_and_date(data)
+    return gid
+
+
+def first_game_id_and_date(data: object) -> tuple[Optional[int], Optional[str]]:
+    """Extract ``(game_id, game_date)`` from the first valid game in a payload.
+
+    ``game_id`` is the first row's validated positive id; ``game_date`` is that
+    same row's ``date`` normalized to ``YYYY-MM-DD`` (its leading date part) when
+    it is a valid calendar date, else ``None``. Both are ``None`` for an empty or
+    unexpected payload. A date is never fabricated -- an invalid provider date
+    yields ``None`` so the box-score probe skips rather than sending garbage.
+    """
+
     if not isinstance(data, dict):
-        return None
+        return None, None
     rows = data.get("data")
     if not isinstance(rows, list):
-        return None
+        return None, None
     for row in rows:
-        if isinstance(row, dict) and "id" in row:
+        if not isinstance(row, dict) or "id" not in row:
+            continue
+        try:
+            gid = _validate_game_id(row["id"])
+        except ValueError:
+            continue
+        game_date: Optional[str] = None
+        raw_date = row.get("date")
+        if isinstance(raw_date, str):
+            candidate = raw_date.split("T", 1)[0].strip()
             try:
-                return _validate_game_id(row["id"])
+                game_date = validate_iso_date(candidate)
             except ValueError:
-                continue
-    return None
+                game_date = None
+        return gid, game_date
+    return None, None
 
 
 def substitutions_present(data: object) -> bool:
@@ -91,8 +170,8 @@ def substitutions_present(data: object) -> bool:
 
     Substitutions are marked observed **only** when the returned play data
     contains and validates at least one substitution-typed play -- never inferred
-    from lineup or play *endpoint access* alone. A play qualifies when its type
-    or description names a substitution.
+    from lineup or play *endpoint access* alone. A play qualifies when its
+    documented event type, play ``text``, or ``description`` names a substitution.
     """
 
     if not isinstance(data, dict):
@@ -104,10 +183,12 @@ def substitutions_present(data: object) -> bool:
         if not isinstance(row, dict):
             continue
         event_type = str(row.get("type") or row.get("event_type") or "").lower()
-        description = str(row.get("description") or "").lower()
-        if "substitution" in event_type or event_type == "sub":
+        # BALLDONTLIE play rows carry the human text under ``text`` (some feeds use
+        # ``description``); check both documented fields, not just one.
+        text = str(row.get("text") or row.get("description") or "").lower()
+        if "substitution" in event_type or event_type in ("sub", "substitution"):
             return True
-        if "substitution" in description:
+        if "substitution" in text or "enters the game" in text:
             return True
     return False
 
@@ -173,13 +254,17 @@ class BalldontlieClient(BaseProviderClient):
 
         return await self._get("/v1/stats", params={"per_page": _clamp_per_page(per_page)})
 
-    async def fetch_box_scores(self, *, date: Optional[str] = None) -> ProviderResponse:
-        """GET /v1/box_scores -- team/box statistics group (GOAT-gated)."""
+    async def fetch_box_scores(self, *, date: object) -> ProviderResponse:
+        """GET /v1/box_scores?date=YYYY-MM-DD -- team/box statistics (GOAT-gated).
 
-        params: dict[str, Any] = {}
-        if date is not None:
-            params["date"] = date
-        return await self._get("/v1/box_scores", params=params)
+        ``date`` is **required** and strictly validated as a ``YYYY-MM-DD``
+        calendar date before any request is issued; the documented endpoint takes
+        a single date, so an audit sends the game date extracted from the games
+        probe rather than an unbounded scan.
+        """
+
+        valid_date = validate_iso_date(date)
+        return await self._get("/v1/box_scores", params={"date": valid_date})
 
     async def fetch_player_injuries(self, *, per_page: int = 1) -> ProviderResponse:
         """GET /v1/player_injuries -- injuries group (tier-gated)."""
@@ -220,28 +305,28 @@ class BalldontlieClient(BaseProviderClient):
     async def fetch_advanced_stats(
         self,
         *,
-        game_id: Optional[object] = None,
-        season: Optional[int] = None,
+        game_ids: Optional[Iterable[object]] = None,
+        seasons: Optional[Iterable[object]] = None,
         cursor: Optional[int] = None,
         per_page: int = 25,
     ) -> ProviderResponse:
         """GET /nba/v1/stats/advanced -- advanced statistics (GOAT-gated).
 
-        Requires a bounding filter: at least one of ``game_id`` or ``season`` so
-        the query is never an unbounded full scan. ``game_id`` (when given) is
-        validated to a positive integer; ``season`` must be a plausible 4-digit
-        year. Page size is bounded.
+        Uses the **documented array parameters** ``game_ids[]`` and ``seasons[]``
+        (never the undocumented singular ``game_id``/``season``). Requires a
+        bounding filter: at least one of ``game_ids`` or ``seasons``. Every id is a
+        positive integer, every season a 4-digit year, each collection non-empty
+        and bounded (`<= 100`), and the page size is bounded -- so the request URL
+        can never grow unbounded.
         """
 
+        if game_ids is None and seasons is None:
+            raise ValueError("fetch_advanced_stats requires game_ids or seasons")
         params: dict[str, Any] = {"per_page": _clamp_per_page(per_page)}
-        if game_id is None and season is None:
-            raise ValueError("fetch_advanced_stats requires a game_id or a season filter")
-        if game_id is not None:
-            params["game_id"] = _validate_game_id(game_id)
-        if season is not None:
-            if not isinstance(season, int) or isinstance(season, bool) or not (1900 <= season <= 2100):
-                raise ValueError(f"season must be a 4-digit year (got {season!r})")
-            params["season"] = season
+        if game_ids is not None:
+            params["game_ids[]"] = _validate_ids(game_ids, label="game_ids")
+        if seasons is not None:
+            params["seasons[]"] = _validate_seasons(seasons)
         if cursor is not None:
             params["cursor"] = cursor
         return await self._get("/nba/v1/stats/advanced", params=params)

@@ -91,10 +91,16 @@ def _bdl_client(handler, **kwargs) -> BalldontlieClient:
     return BalldontlieClient(SENTINEL_KEY, client=http, **kwargs)
 
 
-#: A deterministic BALLDONTLIE handler with a game to seed dependent probes.
+#: A deterministic BALLDONTLIE handler with a game (id + date) to seed dependent
+#: probes. The default games row carries a valid ISO date so the box-score probe
+#: can extract it.
 def _bdl_routing_handler(*, plays_body: Optional[dict] = None, games_body: Optional[dict] = None):
     plays = plays_body if plays_body is not None else {"data": [{"id": 1, "type": "shot"}]}
-    games = games_body if games_body is not None else {"data": [{"id": 18444208}]}
+    games = (
+        games_body
+        if games_body is not None
+        else {"data": [{"id": 18444208, "date": "2024-04-09"}]}
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -248,7 +254,9 @@ async def test_audit_mlb_marks_only_probed_groups_observed(db: Database) -> None
     )
     await client.aclose()
     assert result.status == "succeeded"
-    assert result.authenticated is True
+    # MLB StatsAPI is keyless -> authentication is not applicable (None).
+    assert result.authenticated is None
+    assert result.auth_applicable is False
 
     with db.connection() as conn:
         observed = {
@@ -258,7 +266,8 @@ async def test_audit_mlb_marks_only_probed_groups_observed(db: Database) -> None
                 "WHERE provider='mlb_statsapi' AND is_observed = 1"
             )
         }
-        # Only the probed groups are observed.
+        # Only the probed groups are observed (players via roster/person is
+        # dependency-aware and here has no team id, so it stays unobserved).
         assert observed == {"teams", "schedules", "games", "venues"}
         # An observed row carries evidence: a raw_response_id and an http_status.
         row = conn.execute(
@@ -730,6 +739,327 @@ async def test_audit_oversized_response_never_stored(db: Database) -> None:
         for (body,) in conn.execute("SELECT body FROM raw_responses"):
             assert len(body) <= 256
     assert result.observed_count == 0
+
+
+# --------------------------------------------------------------------------- #
+# Box-score date dependency
+# --------------------------------------------------------------------------- #
+async def test_audit_box_scores_uses_extracted_game_date(db: Database) -> None:
+    """The box-score probe sends the date extracted from the games fixture."""
+
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        if request.url.path == "/v1/games":
+            body = {"data": [{"id": 55, "date": "2024-04-09T00:00:00.000Z"}]}
+        else:
+            body = {"data": []}
+        return httpx.Response(200, json=body, headers={"content-type": "application/json"})
+
+    client = _bdl_client(handler)
+    await audit_provider(
+        database=db, provider=PROVIDER_BALLDONTLIE,
+        probes=build_balldontlie_probes(client), declaration=_bdl_decl(),
+    )
+    await client.aclose()
+    box = [r for r in captured if r.url.path == "/v1/box_scores"]
+    assert box, "box-score probe never issued a request"
+    # The date is the normalized calendar date extracted from the game row.
+    assert box[0].url.params.get("date") == "2024-04-09"
+    with db.connection() as conn:
+        row = conn.execute(
+            "SELECT is_observed, endpoint FROM provider_capabilities "
+            "WHERE provider='balldontlie' AND capability='team_statistics' AND is_observed=1"
+        ).fetchone()
+        assert row is not None and row["endpoint"] == "/v1/box_scores"
+
+
+async def test_audit_box_scores_skipped_when_no_game_date(db: Database) -> None:
+    """A games row without a usable date -> box scores skipped (unknown), no call."""
+
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        if request.url.path == "/v1/games":
+            body = {"data": [{"id": 55}]}  # no date field
+        else:
+            body = {"data": []}
+        return httpx.Response(200, json=body, headers={"content-type": "application/json"})
+
+    client = _bdl_client(handler)
+    await audit_provider(
+        database=db, provider=PROVIDER_BALLDONTLIE,
+        probes=build_balldontlie_probes(client), declaration=_bdl_decl(),
+    )
+    await client.aclose()
+    assert not [r for r in captured if r.url.path == "/v1/box_scores"]
+    with db.connection() as conn:
+        row = conn.execute(
+            "SELECT is_observed, state, detail FROM provider_capabilities "
+            "WHERE provider='balldontlie' AND capability='team_statistics'"
+        ).fetchone()
+        assert row["is_observed"] == 0
+        assert row["state"] == "unknown_until_audited"
+        assert "game date" in (row["detail"] or "")
+
+
+async def test_audit_box_scores_skipped_when_game_date_malformed(db: Database) -> None:
+    """A malformed provider date is not used; box scores skip rather than send it."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/games":
+            body = {"data": [{"id": 55, "date": "not-a-date"}]}
+        else:
+            body = {"data": []}
+        return httpx.Response(200, json=body, headers={"content-type": "application/json"})
+
+    client = _bdl_client(handler)
+    await audit_provider(
+        database=db, provider=PROVIDER_BALLDONTLIE,
+        probes=build_balldontlie_probes(client), declaration=_bdl_decl(),
+    )
+    await client.aclose()
+    with db.connection() as conn:
+        row = conn.execute(
+            "SELECT is_observed, state FROM provider_capabilities "
+            "WHERE provider='balldontlie' AND capability='team_statistics'"
+        ).fetchone()
+        assert row["is_observed"] == 0 and row["state"] == "unknown_until_audited"
+
+
+# --------------------------------------------------------------------------- #
+# Overall audit status semantics + authentication evidence
+# --------------------------------------------------------------------------- #
+def _bdl_status_client(handler, **kwargs) -> BalldontlieClient:
+    return _bdl_client(handler, max_retries=0, **kwargs)
+
+
+async def test_audit_network_failure_is_overall_failure(db: Database) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    client = _bdl_status_client(handler)
+    result = await audit_provider(
+        database=db, provider=PROVIDER_BALLDONTLIE,
+        probes=build_balldontlie_probes(client), declaration=_bdl_decl(),
+    )
+    await client.aclose()
+    assert result.status == "failed"
+    assert result.has_active_failure is True
+    assert result.probes_succeeded == 0
+    # No auth evidence either way -> unknown, never falsely True.
+    assert result.authenticated is None
+
+
+async def test_audit_5xx_after_retries_is_overall_failure(db: Database) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"error": "down"}, headers={"content-type": "application/json"})
+
+    client = _bdl_status_client(handler)
+    result = await audit_provider(
+        database=db, provider=PROVIDER_BALLDONTLIE,
+        probes=build_balldontlie_probes(client), declaration=_bdl_decl(),
+    )
+    await client.aclose()
+    assert result.status == "failed"
+    assert result.active_failures > 0
+    assert result.error_type == "server"
+
+
+async def test_audit_exhausted_rate_limit_is_active_failure(db: Database) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, json={"error": "slow down"},
+                              headers={"content-type": "application/json"})
+
+    client = _bdl_status_client(handler)
+    result = await audit_provider(
+        database=db, provider=PROVIDER_BALLDONTLIE,
+        probes=build_balldontlie_probes(client), declaration=_bdl_decl(),
+    )
+    await client.aclose()
+    assert result.has_active_failure is True
+    assert result.status == "failed"  # nothing verified + active failures
+
+
+async def test_audit_mixed_success_and_active_failure_is_partial(db: Database) -> None:
+    """teams succeeds but games hits a 5xx after retries -> partially_failed, not
+    a fully-successful audit."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/games":
+            return httpx.Response(500, json={"error": "boom"},
+                                  headers={"content-type": "application/json"})
+        return httpx.Response(200, json={"data": [{"id": 1}]},
+                              headers={"content-type": "application/json"})
+
+    client = _bdl_status_client(handler)
+    result = await audit_provider(
+        database=db, provider=PROVIDER_BALLDONTLIE,
+        probes=build_balldontlie_probes(client), declaration=_bdl_decl(),
+    )
+    await client.aclose()
+    assert result.status == "partially_failed"
+    assert result.probes_succeeded > 0
+    assert result.has_active_failure is True
+    # teams (a 2xx) proves the key was accepted.
+    assert result.authenticated is True
+
+
+async def test_audit_authenticated_none_without_evidence(db: Database) -> None:
+    """Only network/5xx/forbidden occurred -> authentication unknown, not True."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"error": "forbidden"},
+                              headers={"content-type": "application/json"})
+
+    client = _bdl_status_client(handler)
+    result = await audit_provider(
+        database=db, provider=PROVIDER_BALLDONTLIE,
+        probes=build_balldontlie_probes(client), declaration=_bdl_decl(),
+    )
+    await client.aclose()
+    # A generic forbidden is not authentication evidence in either direction.
+    assert result.authenticated is None
+
+
+async def test_audit_tier_restriction_counts_as_auth_evidence(db: Database) -> None:
+    """A plan-worded 403 proves the key was recognized -> authenticated True."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/teams":
+            return httpx.Response(
+                403, json={"error": "this endpoint requires a higher plan tier"},
+                headers={"content-type": "application/json"},
+            )
+        return httpx.Response(200, json={"data": []}, headers={"content-type": "application/json"})
+
+    client = _bdl_status_client(handler)
+    result = await audit_provider(
+        database=db, provider=PROVIDER_BALLDONTLIE,
+        probes=build_balldontlie_probes(client), declaration=_bdl_decl(),
+    )
+    await client.aclose()
+    assert result.authenticated is True
+    assert result.tier_restricted is True
+
+
+async def test_audit_keyless_provider_auth_is_not_applicable(db: Database) -> None:
+    client = _mlb_client(VENUES_BODY)
+    result = await audit_provider(
+        database=db, provider=PROVIDER_MLB_STATSAPI,
+        probes=build_mlb_statsapi_probes(client), declaration=_mlb_decl(),
+    )
+    await client.aclose()
+    assert result.auth_applicable is False
+    assert result.authenticated is None
+
+
+# --------------------------------------------------------------------------- #
+# Capability-outcome uniqueness (no duplicate rows)
+# --------------------------------------------------------------------------- #
+async def test_audit_401_produces_one_outcome_per_capability(db: Database) -> None:
+    """A 401 on the first probe: exactly one outcome per capability, no duplicate,
+    no falsely-supported rows, honest unprobed rows for the rest."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": "unauthorized"},
+                              headers={"content-type": "application/json"})
+
+    client = _bdl_status_client(handler)
+    result = await audit_provider(
+        database=db, provider=PROVIDER_BALLDONTLIE,
+        probes=build_balldontlie_probes(client), declaration=_bdl_decl(),
+    )
+    await client.aclose()
+    assert result.status == "failed" and result.authenticated is False
+    with db.connection() as conn:
+        rows = conn.execute(
+            "SELECT capability, COUNT(*) c FROM provider_capabilities "
+            "WHERE provider='balldontlie' GROUP BY capability HAVING c > 1"
+        ).fetchall()
+        assert rows == [], f"duplicate capability outcomes: {[dict(r) for r in rows]}"
+        # teams (the attempted capability) has exactly one row and it is the
+        # authentication outcome, not a supported fallback.
+        teams = conn.execute(
+            "SELECT COUNT(*) c, MAX(error_kind) k, MAX(is_observed) obs FROM provider_capabilities "
+            "WHERE provider='balldontlie' AND capability='teams'"
+        ).fetchone()
+        assert teams["c"] == 1 and teams["k"] == "authentication" and teams["obs"] == 0
+        supported = conn.execute(
+            "SELECT COUNT(*) FROM provider_capabilities "
+            "WHERE provider='balldontlie' AND observed_state='supported'"
+        ).fetchone()[0]
+        assert supported == 0
+
+
+async def test_audit_every_capability_has_one_outcome(db: Database) -> None:
+    """A normal successful audit yields exactly one outcome per declared capability."""
+
+    client = _bdl_client(_bdl_routing_handler())
+    result = await audit_provider(
+        database=db, provider=PROVIDER_BALLDONTLIE,
+        probes=build_balldontlie_probes(client), declaration=_bdl_decl(),
+    )
+    await client.aclose()
+    seen: dict[str, int] = {}
+    for obs in result.observations:
+        seen[obs.capability] = seen.get(obs.capability, 0) + 1
+    dupes = {c: n for c, n in seen.items() if n > 1}
+    assert dupes == {}, f"duplicate outcomes within one audit run: {dupes}"
+    # Every declared capability is represented exactly once.
+    declared = {c.value for c in _bdl_decl().states}
+    assert set(seen) == declared
+
+
+# --------------------------------------------------------------------------- #
+# Substitution evidence vs endpoint access
+# --------------------------------------------------------------------------- #
+async def test_audit_plays_access_alone_does_not_prove_substitutions(db: Database) -> None:
+    """A 200 from /v1/plays with no substitution events keeps substitutions
+    declared-only, even though plays endpoint access is observed."""
+
+    client = _bdl_client(
+        _bdl_routing_handler(plays_body={"data": [{"id": 1, "type": "shot", "text": "made 3"}]})
+    )
+    await audit_provider(
+        database=db, provider=PROVIDER_BALLDONTLIE,
+        probes=build_balldontlie_probes(client), declaration=_bdl_decl(),
+    )
+    await client.aclose()
+    with db.connection() as conn:
+        plays = conn.execute(
+            "SELECT COUNT(*) FROM provider_capabilities "
+            "WHERE provider='balldontlie' AND capability='plays' AND is_observed=1"
+        ).fetchone()[0]
+        subs = conn.execute(
+            "SELECT COUNT(*) FROM provider_capabilities "
+            "WHERE provider='balldontlie' AND capability='substitutions' AND is_observed=1"
+        ).fetchone()[0]
+        assert plays == 1  # plays endpoint access observed
+        assert subs == 0   # but substitutions NOT inferred from it
+
+
+async def test_audit_substitution_recognized_via_documented_text_field(db: Database) -> None:
+    """Substitution evidence is read from the documented ``text`` play field."""
+
+    client = _bdl_client(
+        _bdl_routing_handler(
+            plays_body={"data": [{"id": 1, "type": "sub", "text": "Player A substitution"}]}
+        )
+    )
+    await audit_provider(
+        database=db, provider=PROVIDER_BALLDONTLIE,
+        probes=build_balldontlie_probes(client), declaration=_bdl_decl(),
+    )
+    await client.aclose()
+    with db.connection() as conn:
+        subs = conn.execute(
+            "SELECT is_observed, endpoint FROM provider_capabilities "
+            "WHERE provider='balldontlie' AND capability='substitutions' AND is_observed=1"
+        ).fetchone()
+        assert subs is not None and subs["endpoint"] == "/v1/plays"
 
 
 # --------------------------------------------------------------------------- #

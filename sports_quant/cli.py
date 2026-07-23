@@ -616,6 +616,12 @@ def _report_audit(result: ProviderAuditResult, out: Printer, *, as_json: bool) -
             "run_id": result.run_id,
             "requests_made": result.requests_made,
             "authenticated": result.authenticated,
+            "auth_applicable": result.auth_applicable,
+            "active_failure": result.has_active_failure,
+            "active_failures": result.active_failures,
+            "probes_attempted": result.probes_attempted,
+            "probes_succeeded": result.probes_succeeded,
+            "probes_skipped": result.probes_skipped,
             "tier_restricted": result.tier_restricted,
             "capabilities_recorded": result.capabilities_recorded,
             "observed_count": result.observed_count,
@@ -645,8 +651,13 @@ def _report_audit(result: ProviderAuditResult, out: Printer, *, as_json: bool) -
     if result.status == "failed":
         out(f"[FAILED ] {result.error_type}: {result.error_message}")
         return
+    auth_display = "n/a" if not result.auth_applicable else str(result.authenticated)
     out(f"  requests: {result.requests_made} (GET-only, one probe per group)")
-    out(f"  authenticated: {result.authenticated}  tier-restricted: {result.tier_restricted}")
+    out(
+        f"  probes: {result.probes_succeeded} succeeded, "
+        f"{result.probes_skipped} skipped, {result.active_failures} active failure(s)"
+    )
+    out(f"  authenticated: {auth_display}  tier-restricted: {result.tier_restricted}")
     out(
         f"  capabilities recorded: {result.capabilities_recorded} "
         f"(observed: {result.observed_count}, declared-only: {result.declared_only_count})  "
@@ -658,7 +669,13 @@ def _report_audit(result: ProviderAuditResult, out: Printer, *, as_json: bool) -
         else:
             marker = "declared-only" + (f" (probe {obs.probe_name} inconclusive)" if obs.probe_name else "")
         out(f"    - {obs.capability}: {obs.state}  [{marker}]")
-    out(f"[{'OK     ' if result.status == 'succeeded' else result.status.upper()}] {result.status}")
+    if result.status == "partially_failed":
+        out(
+            f"[PARTIAL] partially_failed -- an active failure occurred "
+            f"({result.error_type}: {result.error_message})"
+        )
+    else:
+        out("[OK     ] succeeded")
 
 
 def run_provider_audit(
@@ -710,7 +727,9 @@ def run_provider_audit(
 
     result = asyncio.run(_run())
     _report_audit(result, out, as_json=as_json)
-    return EXIT_ACTIVE_FAILURE if result.failed else 0
+    # Exit 1 for any genuine active failure -- a failed run OR a partially-failed
+    # one where some probes succeeded but another actively failed.
+    return EXIT_ACTIVE_FAILURE if result.needs_failure_exit else 0
 
 
 def _report_venues(result: VenueIngestResult, out: Printer, *, as_json: bool) -> None:

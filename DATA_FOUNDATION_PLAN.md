@@ -28,7 +28,8 @@ account/balance/position/fill/order column in the schema. All 559 tests pass
 under Ruff and mypy.
 
 **Phase D provider selection and implementation design are complete, and D1
-provider infrastructure is implemented (schema v10).** The providers are chosen
+provider infrastructure code is complete (schema v10); live provider access still
+requires an approved provider audit before any large backfill.** The providers are chosen
 (MLB StatsAPI; **BALLDONTLIE at the GOAT tier** for NBA — the free tier does
 *not* supply box scores, player stats, injuries, plays, or lineups; NWS primary
 + Open-Meteo secondary/historical-forecast for weather; hoopR as an offline-only
@@ -45,17 +46,23 @@ absolutely nothing) — see `PHASE_D_PROVIDER_DECISIONS.md` and
 runs one minimal approved GET **per capability group** and records only what a
 probe verified (with the probe, endpoint, HTTP status, error classification, and
 raw-response evidence), leaving unprobed capabilities declared-only; provider
-403s are only ever classified as tier-restricted with explicit plan evidence;
-and the BALLDONTLIE allow-list is tightened to explicit documented endpoints.
-D2–D5 are not started. Every D1 test uses mocked transports; no live provider
-call was made for this work. Phase E remains planning.
+403s are only ever classified as tier-restricted with explicit plan/subscription
+evidence (never a broad word alone); and the BALLDONTLIE allow-list is tightened
+to explicit documented endpoints. A subsequent contract-correctness pass added
+dependency-aware game-id **and game-date** extraction, the documented
+`game_ids[]`/`seasons[]` array parameters, a required validated box-score `date`,
+truthful `succeeded`/`partially_failed`/`failed` audit statuses with matching CLI
+exit codes, evidence-based authentication reporting (not-applicable for keyless
+providers), one clear outcome per capability per run, and strict contract-level
+mocks. D2–D5 are not started. Every D1 test uses mocked transports; no live
+provider call was made for this work. Phase E remains planning.
 
 | Phase | Scope | Status |
 | --- | --- | --- |
 | A | Database engine, migrations, core entities, `db-init` | ✅ Complete (schema v3) |
 | B | Raw responses, ingestion runs, sportsbook odds | ✅ Complete (schema v6, incl. `b006` integrity repair) |
 | C | Kalshi public events, markets, books, trades | ✅ Complete (schema v8, incl. `c008` integrity repair) |
-| D | Official providers, weather, canonical matching | ◧ **D1 provider infrastructure complete (schema v10, incl. `d010` audit-integrity repair); D2–D5 not started** |
+| D | Official providers, weather, canonical matching | ◧ **D1 provider infrastructure code complete (schema v10, incl. `d010` audit-integrity repair); D2–D5 not started** |
 | E | Point-in-time builder, quality rules, leakage tests | ◻ Not started |
 
 Companion documents:
@@ -567,7 +574,7 @@ is never miscounted as a new insert.
 ### Phase D — Official providers, weather, and canonical matching
 
 > **Provider selection and implementation design complete; D1 provider
-> infrastructure implemented (schema v10), D2–D5 not started.** The
+> infrastructure code complete (schema v10), D2–D5 not started.** The
 > authoritative, up-to-date Phase D plan lives in two dedicated documents —
 > `PHASE_D_PROVIDER_DECISIONS.md` (provider evaluation, selection, credentials,
 > cost/coverage, licensing risk) and `PHASE_D_IMPLEMENTATION_PLAN.md` (schema,

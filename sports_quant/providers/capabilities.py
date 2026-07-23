@@ -308,19 +308,45 @@ class ProviderErrorKind(str, enum.Enum):
 
 TIER_UNAVAILABLE_MESSAGE = "capability unavailable for current subscription tier"
 
-#: Words in a sanitized response body that specifically indicate a plan/tier
-#: restriction (as opposed to a generic forbidden). Matched case-insensitively.
+#: **Explicit multi-token phrases** (and documented structured error codes) in a
+#: sanitized response body that specifically indicate a subscription/tier
+#: restriction -- as opposed to a generic forbidden. Deliberately NOT bare single
+#: tokens like "plan", "tier", "upgrade" or "subscription": those appear in
+#: unrelated 403 messages and produced false positives, so a broad word alone is
+#: no longer sufficient evidence. Matched case-insensitively as substrings.
 _TIER_EVIDENCE = (
-    "tier",
-    "plan",
-    "subscription",
-    "upgrade",
-    "goat",
-    "all-star",
-    "all star",
-    "not included in your",
-    "requires a higher",
+    # Explicit upgrade / subscription-access phrasing.
+    "upgrade required",
+    "upgrade your plan",
+    "upgrade to access",
+    "please upgrade",
+    "requires a higher",          # "requires a higher plan tier"
+    "higher plan",
+    "higher tier",
+    "higher subscription",
+    "subscription tier",
+    "subscription plan",
     "paid plan",
+    "paid subscription",
+    "not included in your",       # "...your plan/subscription"
+    "not available on your plan",
+    "not available on your current plan",
+    "not available on your subscription",
+    "not in your subscription",
+    "requires the goat",
+    "goat plan",
+    "goat tier",
+    "all-star plan",
+    "all star plan",
+    "all-star tier",
+    "upgrade to the goat",
+    # Documented structured error codes / machine fields.
+    "tier_restricted",
+    "tier-restricted",
+    "upgrade_required",
+    "subscription_required",
+    "plan_required",
+    "insufficient_tier",
 )
 
 #: Words indicating the key itself is bad/invalid (a subtype of authentication).
@@ -328,6 +354,12 @@ _INVALID_KEY_EVIDENCE = ("invalid api key", "invalid key", "invalid authorizatio
 
 
 def _has_tier_evidence(body_snippet: str) -> bool:
+    """Whether a sanitized body carries explicit plan/tier-restriction evidence.
+
+    Requires one of the curated :data:`_TIER_EVIDENCE` phrases/codes; a broad,
+    unrelated use of a single word such as "plan" is intentionally not enough.
+    """
+
     lowered = body_snippet.lower()
     return any(token in lowered for token in _TIER_EVIDENCE)
 
