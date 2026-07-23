@@ -108,6 +108,111 @@ def odds_api_host_rule(host: str = "api.the-odds-api.com") -> HostRule:
     )
 
 
+# --------------------------------------------------------------------------- #
+# Phase D providers (official data). GET-only; explicit path allow-lists.
+# --------------------------------------------------------------------------- #
+# Account / subscription / payment / auth-management surfaces to reject even via
+# GET, in addition to being outside each allow-list below.
+FORBIDDEN_PROVIDER_SEGMENTS: frozenset[str] = frozenset(
+    {
+        "account",
+        "accounts",
+        "subscription",
+        "subscriptions",
+        "billing",
+        "payment",
+        "payments",
+        "checkout",
+        "profile",
+        "user",
+        "users",
+        "login",
+        "logout",
+        "auth",
+        "token",
+        "orders",
+        "order",
+        "balance",
+        "positions",
+        "portfolio",
+    }
+)
+
+
+def mlb_statsapi_host_rule(host: str = "statsapi.mlb.com") -> HostRule:
+    """MLB StatsAPI allow-list.
+
+    D1 needs only the venue surface; the schedule/game/box/roster paths are added
+    when D2 uses them. Kept tight so an unplanned path is blocked by default.
+    """
+
+    return HostRule(
+        host=host,
+        forbidden_segments=FORBIDDEN_PROVIDER_SEGMENTS,
+        allowed_patterns=(
+            re.compile(r"/api/v1/venues/?"),
+            re.compile(r"/api/v1/venues/[0-9]+/?"),
+        ),
+    )
+
+
+def balldontlie_host_rule(host: str = "api.balldontlie.io") -> HostRule:
+    """BALLDONTLIE allow-list (public read endpoints)."""
+
+    return HostRule(
+        host=host,
+        forbidden_segments=FORBIDDEN_PROVIDER_SEGMENTS,
+        allowed_patterns=(
+            re.compile(r"/v1/teams/?"),
+            re.compile(r"/v1/teams/[0-9]+/?"),
+            re.compile(r"/v1/players/?"),
+            re.compile(r"/v1/players/[0-9]+/?"),
+            re.compile(r"/v1/players/active/?"),
+            re.compile(r"/v1/games/?"),
+            re.compile(r"/v1/games/[0-9]+/?"),
+            # Read data surfaces (exercised from D3; declared here so the audit
+            # can probe them). Still GET-only, still no account surface.
+            re.compile(r"/v1/stats/?"),
+            re.compile(r"/v1/season_averages/?"),
+            re.compile(r"/v1/box_scores/?"),
+            re.compile(r"/v1/box_scores/live/?"),
+            re.compile(r"/v1/player_injuries/?"),
+            re.compile(r"/v1/standings/?"),
+            re.compile(r"/nba/v1/[a-z_]+/?"),  # versioned namespace variants
+        ),
+    )
+
+
+def nws_host_rule(host: str = "api.weather.gov") -> HostRule:
+    """US National Weather Service allow-list (points, gridpoints, stations)."""
+
+    return HostRule(
+        host=host,
+        forbidden_segments=FORBIDDEN_PROVIDER_SEGMENTS,
+        allowed_patterns=(
+            re.compile(r"/points/[^/]+/?"),
+            re.compile(r"/gridpoints/[^/]+/[0-9]+,[0-9]+/?"),
+            re.compile(r"/gridpoints/[^/]+/[0-9]+,[0-9]+/forecast/?"),
+            re.compile(r"/gridpoints/[^/]+/[0-9]+,[0-9]+/forecast/hourly/?"),
+            re.compile(r"/stations/[^/]+/observations/?"),
+            re.compile(r"/stations/[^/]+/observations/[^/]+/?"),
+        ),
+    )
+
+
+def open_meteo_host_rule(host: str = "api.open-meteo.com") -> HostRule:
+    """Open-Meteo allow-list (forecast + archive + previous-runs)."""
+
+    return HostRule(
+        host=host,
+        forbidden_segments=FORBIDDEN_PROVIDER_SEGMENTS,
+        allowed_patterns=(
+            re.compile(r"/v1/forecast/?"),
+            re.compile(r"/v1/archive/?"),
+        ),
+    )
+
+
 class ReadOnlyHTTPPolicy:
     """Validates ``(method, url)`` pairs against the read-only allow-list."""
 
@@ -121,6 +226,22 @@ class ReadOnlyHTTPPolicy:
     @classmethod
     def for_odds_api(cls, host: str = "api.the-odds-api.com") -> "ReadOnlyHTTPPolicy":
         return cls([odds_api_host_rule(host)])
+
+    @classmethod
+    def for_mlb_statsapi(cls, host: str = "statsapi.mlb.com") -> "ReadOnlyHTTPPolicy":
+        return cls([mlb_statsapi_host_rule(host)])
+
+    @classmethod
+    def for_balldontlie(cls, host: str = "api.balldontlie.io") -> "ReadOnlyHTTPPolicy":
+        return cls([balldontlie_host_rule(host)])
+
+    @classmethod
+    def for_nws(cls, host: str = "api.weather.gov") -> "ReadOnlyHTTPPolicy":
+        return cls([nws_host_rule(host)])
+
+    @classmethod
+    def for_open_meteo(cls, host: str = "api.open-meteo.com") -> "ReadOnlyHTTPPolicy":
+        return cls([open_meteo_host_rule(host)])
 
     def enforce(self, method: str, url: httpx.URL | str) -> None:
         """Raise :class:`ReadOnlyPolicyError` unless the request is permitted."""

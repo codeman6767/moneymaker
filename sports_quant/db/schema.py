@@ -208,6 +208,59 @@ PHASE_C_TABLES: Final[tuple[str, ...]] = (
     "kalshi_public_trades",
 )
 
+# --------------------------------------------------------------------------- #
+# Phase D (D1): provider infrastructure. Later D-stages add more tables.
+# --------------------------------------------------------------------------- #
+#: Tables created by the D1 migration d009_provider_infra, in dependency order.
+PHASE_D1_TABLES: Final[tuple[str, ...]] = (
+    "provider_team_references",
+    "provider_player_references",
+    "provider_game_references",
+    "venues",
+    "venue_aliases",
+    "entity_match_decisions",
+    "match_candidates",
+    "data_quality_issues",
+    "provider_capabilities",
+)
+
+#: Approved venue roof-type vocabulary (mirrors the CHECK in d009).
+VENUE_ROOF_TYPES: Final[tuple[str, ...]] = ("open", "retractable", "dome", "fixed", "indoor")
+
+#: Entity kinds a match decision can resolve.
+MATCH_ENTITY_TYPES: Final[tuple[str, ...]] = (
+    "team",
+    "player",
+    "game",
+    "venue",
+    "sportsbook_event",
+    "kalshi_event",
+    "kalshi_market",
+)
+
+#: Match-decision outcomes (mirrors ENTITY_MATCHING.md §7 + the CHECK in d009).
+MATCH_OUTCOMES: Final[tuple[str, ...]] = (
+    "accepted",
+    "rejected",
+    "ambiguous",
+    "no_candidate",
+    "manual_override",
+)
+
+#: Data-quality severities (reuses the backtest vocabulary).
+DATA_QUALITY_SEVERITIES: Final[tuple[str, ...]] = ("blocking", "issue", "note")
+
+#: Provider-capability states (mirrors providers.capabilities.CapabilityState).
+CAPABILITY_STATES: Final[tuple[str, ...]] = (
+    "supported",
+    "unsupported",
+    "paid_tier_required",
+    "best_effort",
+    "unavailable",
+    "unknown_until_audited",
+    "provider_history_limited",
+)
+
 #: Tables that are immutable once written. UPDATE and DELETE are blocked by
 #: BEFORE triggers, not by convention.
 #:
@@ -223,6 +276,12 @@ APPEND_ONLY_TABLES: Final[tuple[str, ...]] = (
     "kalshi_orderbook_snapshots",
     "kalshi_orderbook_levels",
     "kalshi_public_trades",
+    # Phase D1: candidate rows and capability snapshots are immutable audit
+    # records. `entity_match_decisions` is append-only *except* its review
+    # columns (a partial trigger in d009), so it is deliberately absent here.
+    # `data_quality_issues` is mutable (a `resolved_at`/resolution can be set).
+    "match_candidates",
+    "provider_capabilities",
 )
 
 

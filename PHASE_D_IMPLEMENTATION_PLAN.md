@@ -3,11 +3,16 @@
 Concrete, staged implementation design for official MLB/NBA data, weather, and
 canonical matching.
 
-> **Status: Provider selection and implementation design complete; implementation
-> not started.** No Phase D provider client, migration, repository, ingestion
-> service, or CLI command has been written, and no live provider call was made.
-> This document is the build contract; providers are chosen in
-> `PHASE_D_PROVIDER_DECISIONS.md` (doc-review date 2026-07-23).
+> **Status: D1 provider infrastructure complete; D2–D5 not started.** D1 built
+> the typed provider-capability system, the four provider clients (MLB StatsAPI,
+> BALLDONTLIE, NWS, Open-Meteo) over a shared GET-only base, the `http_policy`
+> allow-lists, the pinned/validated config, migration `d009_provider_infra`
+> (schema v9), the references/venues/matching/data-quality/capabilities
+> repositories, and the `provider-audit` + `ingest-venues` CLI commands — all
+> tested against mocked transports (no live provider call was made). D2–D5
+> (MLB/NBA/weather ingestion + canonical matching) remain unbuilt. This document
+> is the build contract; providers are chosen in `PHASE_D_PROVIDER_DECISIONS.md`
+> (doc-review date 2026-07-23).
 
 Companion documents: `PHASE_D_PROVIDER_DECISIONS.md`, `DATA_ARCHITECTURE.md`,
 `POINT_IN_TIME_DATA.md`, `ENTITY_MATCHING.md`, `DATA_FOUNDATION_PLAN.md`.
@@ -388,7 +393,20 @@ source, or CI. Read-only startup invariants unchanged.
 Each subphase is independently green under Ruff + mypy + pytest before the next.
 Model column = recommended driver.
 
-### D1 — Provider infrastructure  ·  model: **OpusPlan**
+### D1 — Provider infrastructure  ·  model: **OpusPlan**  ·  ✅ COMPLETE
+
+> **Built.** Capability system (`providers/capabilities.py` — typed
+> `ProviderCapability` × `CapabilityState`, `BalldontlieTier`, per-provider
+> declarations, tier-error classifier), shared client base
+> (`providers/base_provider.py` — GET-only, `RawExchange`, bounded
+> timeouts/retries + `Retry-After`, content-type/size guards, no redirect
+> chasing), the four clients (`mlb_statsapi`, `balldontlie`, `nws`,
+> `open_meteo`), `http_policy` allow-lists + `for_*`, pinned/validated config,
+> migration `d009_provider_infra` (v9), repositories
+> (`references`, `venues`, `matching`, `data_quality`, `capabilities`),
+> `provider-audit` + `ingest-venues` CLI, and full mocked tests. No historical
+> backfill; no live call. Live-verification of provider docs/terms (decisions
+> §7) is still owed before D2/D3 backfill via `provider-audit`.
 
 - **Provider(s):** infrastructure for all selected providers; **required tier:**
   BALLDONTLIE **GOAT** declared (not yet exercised for backfill). **Optional:**

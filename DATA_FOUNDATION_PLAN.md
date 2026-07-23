@@ -47,7 +47,7 @@ call was made. Phase E remains planning.
 | A | Database engine, migrations, core entities, `db-init` | ✅ Complete (schema v3) |
 | B | Raw responses, ingestion runs, sportsbook odds | ✅ Complete (schema v6, incl. `b006` integrity repair) |
 | C | Kalshi public events, markets, books, trades | ✅ Complete (schema v8, incl. `c008` integrity repair) |
-| D | Official providers, weather, canonical matching | ◻ **Provider selection & design complete; implementation not started** (targets schema v9–v12) |
+| D | Official providers, weather, canonical matching | ◧ **D1 provider infrastructure complete (schema v9); D2–D5 not started** |
 | E | Point-in-time builder, quality rules, leakage tests | ◻ Not started |
 
 Companion documents:

@@ -20,6 +20,7 @@ through ``repr``/``str``; nothing in this module prints or logs it.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -43,6 +44,52 @@ PRODUCTION_KALSHI_REST_URL = "https://external-api.kalshi.com/trade-api/v2"
 
 # Environment name that means "real, production, read-only public data".
 PRODUCTION_ENVIRONMENT = "production"
+
+# --------------------------------------------------------------------------- #
+# Phase D (official data) provider base URLs -- pinned and validated.
+# --------------------------------------------------------------------------- #
+# These are the ONLY hosts the Phase D providers may reach. They are pinned here
+# (like PRODUCTION_KALSHI_REST_URL) so an arbitrary provider host can never be
+# substituted through an environment variable, and are validated at startup for
+# scheme + host + port + path prefix. The transport policy blocks anything else
+# too, but pinning fails closed before any I/O.
+DEFAULT_MLB_STATS_API_BASE_URL = "https://statsapi.mlb.com/api/v1"
+DEFAULT_NWS_BASE_URL = "https://api.weather.gov"
+DEFAULT_OPEN_METEO_BASE_URL = "https://api.open-meteo.com/v1"
+
+# (host, required-path-prefix) each pinned URL must exactly satisfy. The scheme
+# must be https and no port may be supplied (default 443).
+_PINNED_URL_SPECS: dict[str, tuple[str, str]] = {
+    "mlb_stats_api_base_url": ("statsapi.mlb.com", "/api/v1"),
+    "nws_base_url": ("api.weather.gov", ""),
+    "open_meteo_base_url": ("api.open-meteo.com", "/v1"),
+}
+
+# Accepted BALLDONTLIE tiers (mirrors providers.capabilities.BalldontlieTier).
+_VALID_NBA_TIERS: frozenset[str] = frozenset({"free", "all_star", "goat"})
+
+
+def _pinned_url_violation(field: str, value: str) -> Optional[str]:
+    """Return a human-readable violation for a pinned base URL, or ``None``.
+
+    Rejects a non-https scheme, an unexpected host, an explicit port, or a path
+    that does not start with the required prefix -- so environment substitution
+    cannot redirect a provider to an arbitrary host.
+    """
+
+    from urllib.parse import urlsplit
+
+    host, prefix = _PINNED_URL_SPECS[field]
+    parts = urlsplit(value.rstrip("/"))
+    if parts.scheme != "https":
+        return f"{field} must use https (got {parts.scheme or 'no'} scheme)"
+    if parts.hostname != host:
+        return f"{field} host must be {host!r} (got {parts.hostname!r})"
+    if parts.port is not None:
+        return f"{field} must not specify a port (got {parts.port})"
+    if prefix and not parts.path.startswith(prefix):
+        return f"{field} path must start with {prefix!r} (got {parts.path!r})"
+    return None
 
 
 class ReadOnlyStartupError(RuntimeError):
@@ -78,6 +125,24 @@ class Settings(BaseSettings):
     # Kalshi public REST (no authentication is used).
     kalshi_public_rest_url: str = PRODUCTION_KALSHI_REST_URL
     kalshi_environment: str = PRODUCTION_ENVIRONMENT
+
+    # -- Phase D (official data). Optional; unused until Phase D ingestion. ----
+    # BALLDONTLIE key for NBA data. Endpoint access depends on the ACCOUNT TIER,
+    # not on possessing a key; the selected Phase D path expects GOAT (see
+    # `nba_data_tier`). Held as SecretStr; never printed or stored.
+    nba_data_api_key: SecretStr = Field(default=SecretStr(""))
+    # Expected BALLDONTLIE tier: 'free' | 'all_star' | 'goat'. The selected
+    # project tier is GOAT. Never inferred from key possession.
+    nba_data_tier: str = "goat"
+    # Optional keys for a keyed weather provider / professional feeds. Blank on
+    # the no-paid MVP path.
+    weather_api_key: SecretStr = Field(default=SecretStr(""))
+    sportradar_mlb_api_key: SecretStr = Field(default=SecretStr(""))
+    sportradar_nba_api_key: SecretStr = Field(default=SecretStr(""))
+    # Pinned, validated public base URLs for the key-less providers.
+    mlb_stats_api_base_url: str = DEFAULT_MLB_STATS_API_BASE_URL
+    nws_base_url: str = DEFAULT_NWS_BASE_URL
+    open_meteo_base_url: str = DEFAULT_OPEN_METEO_BASE_URL
 
     # Local historical corpus. Relative paths resolve against the repository
     # root so the value is portable across checkouts.
@@ -118,6 +183,21 @@ class Settings(BaseSettings):
                 f"{PRODUCTION_KALSHI_REST_URL!r} in production read-only mode "
                 f"(got {self.kalshi_public_rest_url!r})"
             )
+        # Pin the Phase D provider base URLs (fail closed before any I/O).
+        for field, value in (
+            ("mlb_stats_api_base_url", self.mlb_stats_api_base_url),
+            ("nws_base_url", self.nws_base_url),
+            ("open_meteo_base_url", self.open_meteo_base_url),
+        ):
+            violation = _pinned_url_violation(field, value)
+            if violation is not None:
+                violations.append(violation)
+        # Validate the declared NBA tier against the known set.
+        if self.nba_data_tier not in _VALID_NBA_TIERS:
+            violations.append(
+                f"NBA_DATA_TIER must be one of {sorted(_VALID_NBA_TIERS)} "
+                f"(got {self.nba_data_tier!r})"
+            )
         return violations
 
     def enforce_read_only(self) -> None:
@@ -131,6 +211,15 @@ class Settings(BaseSettings):
         """True if an Odds API key is configured (its value is never revealed)."""
 
         return bool(self.odds_api_key.get_secret_value().strip())
+
+    def has_nba_data_api_key(self) -> bool:
+        """True if a BALLDONTLIE key is configured (value never revealed).
+
+        A configured key does **not** imply GOAT access -- endpoint availability
+        depends on the account tier (see :attr:`nba_data_tier`).
+        """
+
+        return bool(self.nba_data_api_key.get_secret_value().strip())
 
     def resolved_database_path(self) -> Path:
         """Absolute path to the corpus database.

@@ -17,6 +17,7 @@ from sports_quant.db.schema import (
     PHASE_A_TABLES,
     PHASE_B_TABLES,
     PHASE_C_TABLES,
+    PHASE_D1_TABLES,
     SCHEMA_VERSION_TABLE,
 )
 
@@ -29,6 +30,7 @@ EXPECTED_MIGRATIONS = (
     (6, "b006_sportsbook_transition_dedup"),
     (7, "c007_kalshi"),
     (8, "c008_kalshi_metadata_integrity"),
+    (9, "d009_provider_infra"),
 )
 
 
@@ -61,6 +63,8 @@ def test_first_migration_creates_every_phase_a_table(database: Database) -> None
     for table in PHASE_B_TABLES:
         assert table in names, f"{table} missing after migration"
     for table in PHASE_C_TABLES:
+        assert table in names, f"{table} missing after migration"
+    for table in PHASE_D1_TABLES:
         assert table in names, f"{table} missing after migration"
     assert SCHEMA_VERSION_TABLE in names
 
@@ -275,7 +279,7 @@ def test_migration_003_rebuild_preserves_existing_history_rows(tmp_path: Path) -
 
     # Now apply the rest: 003 (and b004, which both rebuild game_status_history).
     result = database.migrate()
-    assert [m.version for m in result.applied] == [3, 4, 5, 6, 7, 8]
+    assert [m.version for m in result.applied] == [3, 4, 5, 6, 7, 8, 9]
 
     with database.connection() as conn:
         rows = conn.execute(
@@ -384,7 +388,7 @@ def test_migration_b006_rebuild_preserves_every_price_snapshot(tmp_path: Path) -
     # Apply the remaining migrations (b006 rebuilds the snapshot table; c007
     # adds the Kalshi tables and touches nothing here).
     result = database.migrate()
-    assert [m.version for m in result.applied] == [6, 7, 8]
+    assert [m.version for m in result.applied] == [6, 7, 8, 9]
 
     with database.connection() as conn:
         after = conn.execute(
@@ -473,7 +477,9 @@ def test_migration_c008_preserves_rows_and_builds_provenance(tmp_path: Path) -> 
         assert "raw_response_id" in pre and "current_raw_response_id" not in pre
 
     result = database.migrate()
-    assert [m.version for m in result.applied] == [8]
+    # c008 is applied here (plus any later migrations that follow it, e.g. d009).
+    assert result.applied[0].version == 8
+    assert [m.version for m in result.applied] == list(range(8, 8 + len(result.applied)))
 
     with database.connection() as conn:
         for table, ident, ident_val in (

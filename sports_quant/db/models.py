@@ -410,3 +410,133 @@ class KalshiPublicTrade:
     no_price: Optional[int] = None
     trade_time: Optional[str] = None
     provider_timestamp: Optional[str] = None
+
+
+# --------------------------------------------------------------------------- #
+# Phase D1: provider infrastructure, venues, matching, data quality
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class ProviderReference:
+    """A provider id crosswalk to a canonical entity.
+
+    Used for teams/players/games (``kind`` records which). ``canonical_id`` is
+    ``None`` until a match decision links it; ``first_raw_response_id`` is
+    immutable, ``current_*`` move only on a strictly-newer observation (c008).
+    """
+
+    reference_id: str
+    kind: str  # 'team' | 'player' | 'game'
+    provider: str
+    provider_entity_id: str
+    first_raw_response_id: str
+    current_raw_response_id: str
+    current_raw_response_hash: str
+    first_observed_at: str
+    last_observed_at: str
+    created_at: str
+    updated_at: str
+    canonical_id: Optional[str] = None
+    match_decision_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class Venue:
+    venue_id: str
+    name: str
+    normalized_name: str
+    first_raw_response_id: str
+    current_raw_response_id: str
+    current_raw_response_hash: str
+    first_observed_at: str
+    last_observed_at: str
+    created_at: str
+    updated_at: str
+    city: Optional[str] = None
+    country: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    timezone: Optional[str] = None
+    roof_type: Optional[str] = None
+    is_outdoor: Optional[bool] = None
+
+
+@dataclass(frozen=True)
+class VenueAlias:
+    alias_id: str
+    venue_id: str
+    alias: str
+    normalized: str
+    source: str
+    created_at: str
+    provider: str = ""
+    provider_venue_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class MatchDecision:
+    match_id: str
+    entity_type: str
+    source_provider: str
+    source_ref: str
+    outcome: str
+    method: str
+    score: float
+    threshold: float
+    matcher_version: str
+    decided_at: str
+    created_at: str
+    matched_entity_id: Optional[str] = None
+    rejection_reason: Optional[str] = None
+    needs_manual_review: bool = False
+    reviewed_by: Optional[str] = None
+    reviewed_at: Optional[str] = None
+    raw_response_id: Optional[str] = None
+    run_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class MatchCandidate:
+    candidate_id: str
+    match_id: str
+    score: float
+    tier: str
+    rank: int
+    created_at: str
+    candidate_entity_id: Optional[str] = None
+    method: Optional[str] = None
+    evidence: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class DataQualityIssue:
+    issue_id: str
+    severity: str
+    rule_code: str
+    entity_type: str
+    description: str
+    detected_at: str
+    created_at: str
+    entity_id: Optional[str] = None
+    provider: Optional[str] = None
+    detail_json: Optional[str] = None
+    run_id: Optional[str] = None
+    raw_response_id: Optional[str] = None
+    resolved_at: Optional[str] = None
+    resolution_note: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ProviderCapabilityRecord:
+    """One append-only observation of a provider capability state at a tier."""
+
+    capability_id: str
+    provider: str
+    capability: str
+    state: str
+    observed_at: str
+    content_hash: str
+    created_at: str
+    tier: Optional[str] = None
+    detail: Optional[str] = None
+    run_id: Optional[str] = None
+    raw_response_id: Optional[str] = None

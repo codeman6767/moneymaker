@@ -60,6 +60,17 @@ KALSHI_BOOK_PREFIX: Final = "kob_"
 KALSHI_LEVEL_PREFIX: Final = "kol_"
 KALSHI_TRADE_PREFIX: Final = "ktr_"
 
+# Phase D (D1): provider infrastructure, venues, matching, data quality.
+PROVIDER_TEAM_REF_PREFIX: Final = "ptr_"
+PROVIDER_PLAYER_REF_PREFIX: Final = "ppr_"
+PROVIDER_GAME_REF_PREFIX: Final = "pgr_"
+VENUE_PREFIX: Final = "ven_"
+VENUE_ALIAS_PREFIX: Final = "val_"
+MATCH_DECISION_PREFIX: Final = "mtc_"
+MATCH_CANDIDATE_PREFIX: Final = "mcn_"
+DATA_QUALITY_PREFIX: Final = "dqi_"
+PROVIDER_CAPABILITY_PREFIX: Final = "cap_"
+
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
 
 
@@ -226,3 +237,39 @@ def new_kalshi_level_id() -> str:
 
 def new_kalshi_trade_id() -> str:
     return prefixed_id(KALSHI_TRADE_PREFIX)
+
+
+def new_provider_team_ref_id() -> str:
+    return prefixed_id(PROVIDER_TEAM_REF_PREFIX)
+
+
+def new_provider_player_ref_id() -> str:
+    return prefixed_id(PROVIDER_PLAYER_REF_PREFIX)
+
+
+def new_provider_game_ref_id() -> str:
+    return prefixed_id(PROVIDER_GAME_REF_PREFIX)
+
+
+def new_venue_id() -> str:
+    return prefixed_id(VENUE_PREFIX)
+
+
+def new_venue_alias_id() -> str:
+    return prefixed_id(VENUE_ALIAS_PREFIX)
+
+
+def new_match_decision_id() -> str:
+    return prefixed_id(MATCH_DECISION_PREFIX)
+
+
+def new_match_candidate_id() -> str:
+    return prefixed_id(MATCH_CANDIDATE_PREFIX)
+
+
+def new_data_quality_id() -> str:
+    return prefixed_id(DATA_QUALITY_PREFIX)
+
+
+def new_provider_capability_id() -> str:
+    return prefixed_id(PROVIDER_CAPABILITY_PREFIX)
