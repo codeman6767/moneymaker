@@ -45,6 +45,14 @@ TEAM_ALIAS_PREFIX: Final = "tal_"
 PLAYER_ALIAS_PREFIX: Final = "pal_"
 GAME_STATUS_PREFIX: Final = "gst_"
 
+# Phase B: ingestion provenance and sportsbook prices.
+INGESTION_RUN_PREFIX: Final = "run_"
+RAW_RESPONSE_PREFIX: Final = "raw_"
+SB_EVENT_PREFIX: Final = "sbe_"
+SB_MARKET_PREFIX: Final = "sbm_"
+SB_OUTCOME_PREFIX: Final = "sbo_"
+SB_PRICE_SNAPSHOT_PREFIX: Final = "sbp_"
+
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
 
 
@@ -167,3 +175,27 @@ def new_player_alias_id() -> str:
 
 def new_game_status_id() -> str:
     return prefixed_id(GAME_STATUS_PREFIX)
+
+
+def new_ingestion_run_id() -> str:
+    return prefixed_id(INGESTION_RUN_PREFIX)
+
+
+def new_raw_response_id() -> str:
+    return prefixed_id(RAW_RESPONSE_PREFIX)
+
+
+def new_sb_event_id() -> str:
+    return prefixed_id(SB_EVENT_PREFIX)
+
+
+def new_sb_market_id() -> str:
+    return prefixed_id(SB_MARKET_PREFIX)
+
+
+def new_sb_outcome_id() -> str:
+    return prefixed_id(SB_OUTCOME_PREFIX)
+
+
+def new_sb_price_snapshot_id() -> str:
+    return prefixed_id(SB_PRICE_SNAPSHOT_PREFIX)

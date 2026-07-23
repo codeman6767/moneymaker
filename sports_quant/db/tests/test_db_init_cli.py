@@ -42,7 +42,9 @@ def test_first_run_creates_migrates_and_seeds(db_path: Path) -> None:
     assert "applied migration 001 a001_core_entities" in output
     assert "applied migration 002 a002_games" in output
     assert "applied migration 003 a003_integrity_guards" in output
-    assert "Schema version: 3" in output
+    assert "applied migration 004 b004_raw_responses" in output
+    assert "applied migration 005 b005_sportsbook" in output
+    assert "Schema version: 5" in output
     assert "MLB: 30 teams (30 new)" in output
     assert "NBA: 30 teams (30 new)" in output
 

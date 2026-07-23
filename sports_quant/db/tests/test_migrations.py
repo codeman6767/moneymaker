@@ -13,12 +13,14 @@ from sports_quant.db.engine import (
     MigrationError,
     discover_migrations,
 )
-from sports_quant.db.schema import PHASE_A_TABLES, SCHEMA_VERSION_TABLE
+from sports_quant.db.schema import PHASE_A_TABLES, PHASE_B_TABLES, SCHEMA_VERSION_TABLE
 
 EXPECTED_MIGRATIONS = (
     (1, "a001_core_entities"),
     (2, "a002_games"),
     (3, "a003_integrity_guards"),
+    (4, "b004_raw_responses"),
+    (5, "b005_sportsbook"),
 )
 
 
@@ -47,6 +49,8 @@ def test_first_migration_creates_every_phase_a_table(database: Database) -> None
             r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
     for table in PHASE_A_TABLES:
+        assert table in names, f"{table} missing after migration"
+    for table in PHASE_B_TABLES:
         assert table in names, f"{table} missing after migration"
     assert SCHEMA_VERSION_TABLE in names
 
@@ -179,7 +183,7 @@ def test_migration_003_applies_once_and_is_idempotent(database: Database) -> Non
     second = database.migrate()
     third = database.migrate()
     assert second.applied == () and third.applied == ()
-    assert second.schema_version == third.schema_version == 3
+    assert second.schema_version == third.schema_version == len(EXPECTED_MIGRATIONS)
 
     with database.connection() as conn:
         applied = database.applied_migrations(conn)
@@ -259,9 +263,9 @@ def test_migration_003_rebuild_preserves_existing_history_rows(tmp_path: Path) -
             (start, ts, ts, ts),
         )
 
-    # Now apply 003, which rebuilds game_status_history.
+    # Now apply the rest: 003 (and b004, which both rebuild game_status_history).
     result = database.migrate()
-    assert [m.version for m in result.applied] == [3]
+    assert [m.version for m in result.applied] == [3, 4, 5]
 
     with database.connection() as conn:
         rows = conn.execute(

@@ -5,16 +5,18 @@ betting **recommendation** engine.
 
 ## Status
 
-**Phase A is complete**, including the a003 integrity patch (migrations 001–003,
-227 tests). **Phase B has not started** — there is no raw-response storage, no
-ingestion, and no provider request anywhere in the corpus code.
+**Phase A is complete**, including the a003 integrity patch. **Phase B is
+complete** (migrations 001–005, schema v5): raw-response storage, ingestion-run
+tracking, sportsbook events/markets/outcomes, point-in-time price snapshots, the
+Odds API ingestion service, and the `ingest-odds` CLI now exist. All 454 tests
+pass under Ruff and mypy.
 
-Phases B–E below remain planning; each begins only on explicit instruction.
+Phases C–E below remain planning; each begins only on explicit instruction.
 
 | Phase | Scope | Status |
 | --- | --- | --- |
 | A | Database engine, migrations, core entities, `db-init` | ✅ Complete (schema v3) |
-| B | Raw responses, ingestion runs, sportsbook odds | ◻ Not started |
+| B | Raw responses, ingestion runs, sportsbook odds | ✅ Complete (schema v5) |
 | C | Kalshi public events, markets, books, trades | ◻ Not started |
 | D | Official providers, canonical matching | ◻ Not started |
 | E | Point-in-time builder, quality rules, leakage tests | ◻ Not started |
@@ -327,38 +329,63 @@ insert. See §5.1 below.
 
 ---
 
-### Phase B — Raw responses, ingestion runs, sportsbook odds
+### Phase B — Raw responses, ingestion runs, sportsbook odds ✅ COMPLETE
 
-**Depends on:** A (complete). Phase B additionally: adds the
-`raw_responses` foreign key to `game_status_history`, builds the `InMemory*`
-repositories now that ingestors consume them, and consolidates `intel/base.py`
-onto the shared `canonical_json`.
+**Depended on:** A (complete). Phase B additionally added the `raw_responses`
+foreign key to `game_status_history` and consolidated `intel/base.py` onto the
+shared `canonical_json`.
 
-**Create:** `sports_quant/db/migrations/{b001_raw_responses,b002_sportsbook}.sql`;
+**Created:** `sports_quant/db/migrations/{b004_raw_responses,b005_sportsbook}.sql`;
 `sports_quant/db/repositories/{raw_responses,ingestion_runs,sportsbook}.py`;
 `sports_quant/ingest/{__init__,runner,odds_ingestor}.py`;
-`sports_quant/ingest/tests/{test_runner,test_odds_ingestor,test_no_secrets}.py`.
+`sports_quant/ingest/tests/{__init__,conftest,test_runner,test_odds_ingestor,test_no_secrets}.py`;
+`sports_quant/db/tests/test_sportsbook_repositories.py`;
+`sports_quant/tests/test_ingest_cli.py`.
 
-**Modify:** `sports_quant/cli.py` (`ingest-odds`); `intel/base.py` (adopt shared
-`canonical_json`).
+**Modified:** `sports_quant/cli.py` (`ingest-odds`); `sports_quant/providers/odds_api.py`
+(sanitized `RawExchange` + `fetch_odds_raw`, no second client); `sports_quant/redaction.py`
+(header allow-list); `sports_quant/db/{schema,ids,models}.py`; `intel/base.py`
+(adopt shared `canonical_json`); `pyproject.toml`.
 
 **Tables:** `ingestion_runs`, `raw_responses`, `sportsbook_events`,
 `sportsbook_markets`, `sportsbook_outcomes`, `sportsbook_price_snapshots`.
 
-**Repositories:** `RawResponseRepository`, `IngestionRunRepository`,
-`SportsbookRepository`.
+**Repositories:** `SqliteRawResponseRepository`, `SqliteIngestionRunRepository`,
+`SqliteSportsbookRepository` — each a `Protocol` plus a SQLite implementation.
 
-**Tests:** raw response persisted before parsing; every normalized row resolves
-to a raw response; re-ingestion is a no-op; append-only enforced;
-**whole-database secret sweep** (every TEXT column of every table scanned for a
-sentinel key); headers stored via allow-list; `http_method` CHECK rejects
-non-GET; run lifecycle records `partial` on parse failure. All against mocked
+**Tests delivered:** migration applies once and idempotently; API keys sanitized
+from URLs and request parameters; authorization/`set-cookie` headers never
+stored (allow-list); raw responses preserved and immutable; every normalized
+row traces to a raw response (id **and** hash); MLB and NBA odds normalized;
+h2h/spreads/totals all persist; repeated ingestion writes zero new snapshots; a
+changed price appends a new snapshot; an older backfill is preserved;
+latest-at-or-before returns the correct historical price; partial responses
+handled safely; malformed data rejected and counted; run counters correct;
+dry-run persists nothing; CLI exit codes (0/1/2/3) correct; **whole-database
+secret sweep**; `http_method` CHECK and repository guard reject non-GET; run
+lifecycle records `partially_succeeded` on partial data. All against mocked
 transports — no live calls in the suite.
 
-**CLI:** `ingest-odds --sport {mlb,nba}`.
+**CLI:** `ingest-odds --sport {mlb,nba}` with `--markets`, `--regions`,
+`--bookmakers`, `--commence-from`, `--commence-to`, `--db`, `--dry-run`.
 
-**Done when:** an `ingest-odds` run against a mocked transport produces a fully
-traceable corpus slice, twice, with identical row counts.
+**Delivered:** an `ingest-odds` run against a mocked transport produces a fully
+traceable corpus slice, twice, with idempotent snapshot counts. Live MLB and NBA
+Odds API checks completed safely (MLB: 14 events → 590 price snapshots; NBA:
+out-of-season → 0 events, reported as a clean zero not a failure). No API key
+appears in any stored column or any output.
+
+#### Deviations from the original Phase B sketch
+
+| # | Change | Why |
+| --- | --- | --- |
+| 1 | Migrations are `b004`/`b005`, not `b001`/`b002` | Migration numbers are a single global sequence (§3.1); `b001` would parse to version 1 and collide with `a001`. Phase A ended at 003, so Phase B continues at 004. |
+| 2 | `game_status_history.raw_response_id` gains its FK but stays **nullable**; `raw_response_hash` stays nullable | The sketch tightened both to `NOT NULL` here. Phase A's `record_status()` creates status rows from schedule data with no owning provider response, and the official-provider ingestion that would supply one is Phase D. A column made `NOT NULL` before it has a producer is filled with an invented value — worse than an honest NULL. The FK still rejects a *dangling* pointer. |
+| 3 | `InMemory*` repositories were **not** built | They still have no consumer: the ingestor writes through the SQLite repositories against a temporary database in tests, exactly as Phase A does, and an in-memory repository cannot reproduce SQLite's constraint/trigger semantics — an unverified reimplementation gives false test confidence. Deferred until something actually needs one. |
+| 4 | `raw_responses` is **not** deduplicated on `content_hash` | Two fetches returning identical bytes are two distinct observations, each owned by its own run; collapsing them would leave the second run unable to name the response it received. `content_hash` is indexed for traceability, but idempotency is enforced where it matters — on the derived price snapshots (`UNIQUE (sb_outcome_id, content_hash)`). |
+| 5 | Added `RawExchange` + `fetch_odds_raw()` to the existing adapter | The ingestor needs the raw bytes *and* the exchange metadata before parsing, and must survive one malformed record. `get_odds()` normalizes eagerly and can raise mid-parse, so a raw fetch that normalizes per-event downstream is the required feature — added additively to the one client, never a second one. |
+| 6 | Outcome identity key is `(market, normalized_name, point_key)` with a NOT NULL `point_key` sentinel | The line is part of the identity ("Over 8.5" ≠ "Over 9.5"); a nullable point would let an h2h outcome insert twice, since SQLite treats two NULLs as distinct in a UNIQUE constraint. |
+| 7 | `implied_probability` is stored (raw, vig-inclusive) | An exact arithmetic transform of the preserved American price, stored for convenience. **No de-vigging** — fair value is a later phase. The original price is preserved exactly regardless. |
 
 ---
 

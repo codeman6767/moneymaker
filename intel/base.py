@@ -19,14 +19,16 @@ from __future__ import annotations
 
 import enum
 import hashlib
-import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-
-def _canonical(data: Any) -> str:
-    return json.dumps(data, sort_keys=True, separators=(",", ":"), default=str, ensure_ascii=False)
+# One content hasher across the corpus. ``streaming.event_envelope`` is the
+# established shared-foundation module (evaluation, gateway, state, probability
+# all import from it), so this reuses ``canonical_json`` rather than keeping a
+# second canonicalizer -- two that disagree produce two hashes for one content
+# and silently defeat deduplication.
+from streaming.event_envelope import canonical_json as _canonical
 
 
 def content_hash(data: Any) -> str:

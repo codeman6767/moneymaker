@@ -141,3 +141,140 @@ class GameStatusRecord:
     raw_response_id: Optional[str] = None
     raw_response_hash: Optional[str] = None
     created_at: str = ""
+
+
+# --------------------------------------------------------------------------- #
+# Phase B: ingestion provenance and sportsbook prices
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class IngestionRun:
+    """One invocation of an ingest command, from request to terminal status.
+
+    ``records_*`` are five separate counters on purpose: "1000 received, 0
+    inserted" and "0 received" are different incidents and must stay
+    distinguishable after the fact.
+    """
+
+    run_id: str
+    command: str
+    provider: str
+    operation: str
+    args_json: str
+    status: str
+    requested_at: str
+    started_at: str
+    started_monotonic_ns: int
+    tool_version: str
+    created_at: str
+    sport: Optional[str] = None
+    completed_at: Optional[str] = None
+    duration_ns: Optional[int] = None
+    requests_made: int = 0
+    records_received: int = 0
+    records_normalized: int = 0
+    records_inserted: int = 0
+    records_deduplicated: int = 0
+    records_rejected: int = 0
+    error_type: Optional[str] = None
+    error_message: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class RawResponse:
+    """A provider response preserved exactly as received, minus any credential.
+
+    ``received_at`` is the ``observed_at`` every derived fact inherits, so all
+    facts parsed from one response share one point-in-time cutoff.
+    """
+
+    raw_response_id: str
+    run_id: str
+    provider: str
+    endpoint: str
+    request_params_json: str
+    http_status: int
+    response_headers_json: str
+    requested_at: str
+    received_at: str
+    elapsed_ns: int
+    body: str
+    body_bytes: int
+    body_hash: str
+    content_hash: str
+    created_at: str
+    http_method: str = "GET"
+    content_type: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class SportsbookEvent:
+    sb_event_id: str
+    provider: str
+    provider_event_id: str
+    sport_key: str
+    commence_time: str
+    home_team_raw: str
+    away_team_raw: str
+    raw_response_id: str
+    first_observed_at: str
+    last_observed_at: str
+    created_at: str
+    updated_at: str
+    league_id: Optional[str] = None
+    game_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class SportsbookMarket:
+    sb_market_id: str
+    sb_event_id: str
+    bookmaker_key: str
+    market_key: str
+    raw_response_id: str
+    first_observed_at: str
+    last_observed_at: str
+    created_at: str
+    updated_at: str
+    bookmaker_title: Optional[str] = None
+    bookmaker_last_update: Optional[str] = None
+    market_last_update: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class SportsbookOutcome:
+    """The stable identity of a betting line, separate from its price.
+
+    A changed price is never a new identity; the line (``point``) is part of
+    the identity, because "Over 8.5" and "Over 9.5" settle differently.
+    """
+
+    sb_outcome_id: str
+    sb_market_id: str
+    outcome_name: str
+    provider_outcome_name: str
+    outcome_role: str
+    point_key: str
+    created_at: str
+    point: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class SportsbookPriceSnapshot:
+    """One append-only observation of a price. ``price_american`` is exact."""
+
+    snapshot_id: str
+    sb_outcome_id: str
+    price_american: int
+    observed_at: str
+    ingested_at: str
+    raw_response_id: str
+    raw_response_hash: str
+    run_id: str
+    content_hash: str
+    created_at: str
+    price_decimal: Optional[float] = None
+    implied_probability: Optional[float] = None
+    point: Optional[float] = None
+    bookmaker_last_update: Optional[str] = None
+    market_last_update: Optional[str] = None
+    provider_timestamp: Optional[str] = None

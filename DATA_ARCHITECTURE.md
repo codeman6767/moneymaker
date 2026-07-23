@@ -207,6 +207,8 @@ version 1 and collide. Applied so far:
 | 001 | `a001_core_entities` | leagues, seasons, teams, team_aliases, players, player_aliases |
 | 002 | `a002_games` | games, game_status_history, append-only triggers |
 | 003 | `a003_integrity_guards` | league-consistency triggers, `original_start` immutability, `game_status_history` rebuild (§3.4.1) |
+| 004 | `b004_raw_responses` | ingestion_runs, raw_responses (append-only), `game_status_history` rebuilt to add the `raw_response_id` FK |
+| 005 | `b005_sportsbook` | sportsbook_events, sportsbook_markets, sportsbook_outcomes, sportsbook_price_snapshots (append-only), identity-immutability triggers |
 
 **Migrations are applied statement-by-statement, not via `executescript`.**
 `sqlite3.Cursor.executescript` issues an implicit `COMMIT` before running,
@@ -521,6 +523,28 @@ already enforced in `sports_quant/http_policy.py` at the transport layer; this
 makes the storage layer independently incapable of recording a write verb, so a
 future bug cannot quietly persist evidence of one.
 
+**Implemented in migration `b004_raw_responses`** — the migration is
+authoritative; deltas from the sketch above, each a correction found during
+implementation:
+
+- `ingestion_runs` statuses are `started | succeeded | partially_succeeded |
+  failed` (the requirement's vocabulary), and the run carries `sport`,
+  `operation`, `requested_at`, and **five** record counters —
+  `records_received`, `records_normalized`, `records_inserted`,
+  `records_deduplicated`, `records_rejected` — because "1000 received, 0
+  inserted" and "0 received" are different incidents. A completion `CHECK`
+  binds `completed_at` to any terminal status. It is deliberately **not**
+  append-only: a run is opened `started` and closed with its counters.
+- `raw_responses` is **not** deduplicated on `content_hash`. Two fetches
+  returning identical bytes are two observations, each owned by its run;
+  `content_hash` is indexed for traceability, and idempotency is enforced on
+  the derived price snapshots instead. `endpoint` additionally carries
+  `CHECK (endpoint NOT LIKE '%?%')`, so a query string (which would carry the
+  key) cannot be stored even by accident.
+- `b004` rebuilds `game_status_history` to add the nullable `raw_response_id`
+  foreign key (see the note in §3.4 — it stays nullable because Phase A status
+  rows have no owning response, and inventing one is worse than an honest NULL).
+
 ### 3.6 Sportsbook (The Odds API)
 
 ```sql
@@ -591,6 +615,30 @@ problem instead of an indexed scan.
 
 `UNIQUE (sb_outcome_id, content_hash)` gives idempotent re-ingestion: polling
 the same unchanged price twice writes one row, not two.
+
+**Implemented in migration `b005_sportsbook`** — the migration is
+authoritative; deltas from the sketch above:
+
+- Every provider-scoped row carries a `raw_response_id NOT NULL` back to the
+  response that created it, and each price snapshot additionally carries
+  `raw_response_hash` and `run_id` (the two-link provenance contract, §4.1).
+- The `match_decision_id` / `game_id` / `team_id` matching columns are **Phase
+  D** and are not created yet: Phase B performs no matching, so `game_id`
+  stays absent rather than nullable-and-unused. `league_id` *is* set, from the
+  static `sport_key` map — a provider-enum lookup, not a name match.
+- `sportsbook_outcomes` stores both `outcome_name` (normalized, part of the
+  identity) and `provider_outcome_name` (verbatim), plus `point` and a NOT NULL
+  `point_key` sentinel — the line is part of the identity, and a nullable point
+  would let an h2h outcome insert twice. `outcome_role` includes `unknown`, so
+  an unclassifiable outcome is recorded, never silently dropped.
+- `sportsbook_price_snapshots.price_american` is `NOT NULL` and CHECK-bounded
+  (`<= -100 OR >= 100`); `price_decimal` and `implied_probability` are exact
+  arithmetic transforms stored for convenience. `implied_probability` is the
+  **raw, vig-inclusive** number — no de-vigging happens in Phase B.
+- Identity columns on events, markets and outcomes are frozen by
+  `BEFORE UPDATE` triggers, so an upsert can refresh mutable current-state
+  (commence time, `last_observed_at`, provider update times) without the
+  identity drifting underneath its children.
 
 ### 3.7 Kalshi (public data only)
 
@@ -963,9 +1011,10 @@ BEGIN
 END;
 ```
 
-Applied in Phase A to `game_status_history` (the only snapshot table that
-exists yet), and in later phases to `raw_responses`,
-`sportsbook_price_snapshots`, `kalshi_orderbook_snapshots`,
+Applied in Phase A to `game_status_history`, in **Phase B** to `raw_responses`
+and `sportsbook_price_snapshots` (both now in
+`sports_quant.db.schema.APPEND_ONLY_TABLES`), and in later phases to
+`kalshi_orderbook_snapshots`,
 `kalshi_trade_snapshots`, `injury_snapshots`, `lineup_snapshots`,
 `probable_pitchers`, `weather_snapshots`, and `entity_match_decisions`.
 `sports_quant.db.schema.APPEND_ONLY_TABLES` is the registry.
@@ -999,18 +1048,24 @@ sports_quant/
     migrations/
 ✅    a001_core_entities.sql
 ✅    a002_games.sql
-◻     b003_raw_responses.sql ...
+✅    a003_integrity_guards.sql
+✅    b004_raw_responses.sql
+✅    b005_sportsbook.sql
+◻     c006_kalshi.sql ...
     repositories/
 ✅    __init__.py  base.py
 ✅    leagues.py           # LeagueRepository + SeasonRepository
 ✅    teams.py             # TeamRepository + TeamAliasRepository
 ✅    players.py           # PlayerRepository + PlayerAliasRepository
 ✅    games.py             # GameRepository + status history
-◻     raw_responses.py  ingestion_runs.py  sportsbook.py  kalshi.py
-◻     intel_tables.py   matching.py       data_quality.py
+✅    raw_responses.py     # RawResponseRepository + content hashing
+✅    ingestion_runs.py    # IngestionRunRepository
+✅    sportsbook.py        # SportsbookRepository + as-of price queries
+◻     kalshi.py  matching.py  data_quality.py
     seeds/
 ✅    __init__.py  loader.py  mlb_teams.py  nba_teams.py
-◻ ingest/                 # runner.py, odds_ingestor.py, kalshi_ingestor.py
+✅ ingest/                 # __init__.py, runner.py, odds_ingestor.py
+                          #   (kalshi_ingestor.py is Phase C)
 ◻ matching/               # teams.py, players.py, games.py, markets.py
                           #   (imports db/normalize.py -- one normalizer only)
 ◻ pit/                    # asof.py, dataset.py

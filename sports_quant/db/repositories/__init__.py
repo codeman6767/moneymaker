@@ -16,6 +16,10 @@ from .games import (
     SqliteGameRepository,
     status_content_hash,
 )
+from .ingestion_runs import (
+    IngestionRunRepositoryProtocol,
+    SqliteIngestionRunRepository,
+)
 from .leagues import (
     LeagueRepositoryProtocol,
     SeasonRepositoryProtocol,
@@ -28,6 +32,18 @@ from .players import (
     SqlitePlayerAliasRepository,
     SqlitePlayerRepository,
 )
+from .raw_responses import (
+    RawResponseRepositoryProtocol,
+    SqliteRawResponseRepository,
+    body_hash,
+    response_content_hash,
+)
+from .sportsbook import (
+    SportsbookRepositoryProtocol,
+    SqliteSportsbookRepository,
+    point_key,
+    price_content_hash,
+)
 from .teams import (
     SqliteTeamAliasRepository,
     SqliteTeamRepository,
@@ -37,21 +53,31 @@ from .teams import (
 
 __all__ = [
     "GameRepositoryProtocol",
+    "IngestionRunRepositoryProtocol",
     "LeagueRepositoryProtocol",
     "PlayerAliasRepositoryProtocol",
     "PlayerRepositoryProtocol",
+    "RawResponseRepositoryProtocol",
     "Repository",
     "RepositoryError",
     "SeasonRepositoryProtocol",
+    "SportsbookRepositoryProtocol",
     "SqliteGameRepository",
+    "SqliteIngestionRunRepository",
     "SqliteLeagueRepository",
     "SqlitePlayerAliasRepository",
     "SqlitePlayerRepository",
+    "SqliteRawResponseRepository",
     "SqliteSeasonRepository",
+    "SqliteSportsbookRepository",
     "SqliteTeamAliasRepository",
     "SqliteTeamRepository",
     "TeamAliasRepositoryProtocol",
     "TeamRepositoryProtocol",
+    "body_hash",
+    "point_key",
+    "price_content_hash",
+    "response_content_hash",
     "status_content_hash",
     "to_db_bool",
 ]

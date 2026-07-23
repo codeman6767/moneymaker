@@ -11,18 +11,24 @@ headers (``x-requests-remaining`` / ``x-requests-used`` / ``x-requests-last``),
 caches identical requests so development does not waste credits, and never
 prints or logs the API key (the key is a query-string secret; all outbound URLs
 and any error messages are sanitized).
+
+Each call also returns a :class:`RawExchange` -- the sanitized status code,
+headers, timestamps and body bytes of the HTTP exchange -- so the ingestion
+lane can preserve the response in the corpus without a second HTTP client and
+without ever handling the key itself.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 from typing import Any, Optional, Sequence
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from ..http_policy import ReadOnlyHTTPPolicy, build_readonly_client
-from ..redaction import sanitize_url
+from ..redaction import redact_secrets, sanitize_headers, sanitize_params, sanitize_url
 from .cache import ResponseCache
 
 DEFAULT_BASE_URL = "https://api.the-odds-api.com"
@@ -96,6 +102,68 @@ class CreditHeaders(BaseModel):
         )
 
 
+class RawExchange(BaseModel):
+    """A sanitized, storable record of one HTTP exchange.
+
+    Phase B preserves every provider response in the corpus before normalizing
+    it, which needs more than the parsed JSON: the status code, the response
+    headers, the request that produced it, and the exact body bytes.
+
+    The model is constructed already-safe rather than trusting every downstream
+    caller to redact:
+
+    * ``endpoint`` is the request **path**; it never carries a query string, so
+      the ``?apiKey=`` the Odds API requires cannot travel with it.
+    * ``request_params`` is passed through :func:`sanitize_params`, which masks
+      by parameter *name*.
+    * ``response_headers`` passes the :func:`sanitize_headers` allow-list, so an
+      ``Authorization``-style header can never be captured.
+    * ``body`` has the configured key stripped as a final guard. The public
+      bodies of this provider do not echo it; the guard costs nothing and a
+      stored credential is unrecoverable damage.
+
+    Nothing here is a second Odds API client -- it is the existing client
+    reporting what it already did.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint: str
+    request_params: dict[str, str]
+    http_status: int
+    response_headers: dict[str, str]
+    content_type: Optional[str] = None
+    #: Wall-clock moment the request was issued.
+    requested_at: datetime
+    #: Wall-clock moment the response arrived. This is the corpus's
+    #: ``observed_at`` for every fact derived from this exchange.
+    received_at: datetime
+    #: Monotonic elapsed time; never derived from the two wall-clocks above,
+    #: which can step.
+    elapsed_ns: int
+    body: str
+
+
+class OddsApiHTTPError(httpx.HTTPStatusError):
+    """An Odds API HTTP failure that still carries its sanitized exchange.
+
+    Subclasses :class:`httpx.HTTPStatusError` so existing handlers keep
+    working unchanged, while letting an ingestor preserve the bytes of a failed
+    response instead of discarding the only evidence of what went wrong.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        request: httpx.Request,
+        response: httpx.Response,
+        exchange: RawExchange,
+    ) -> None:
+        super().__init__(message, request=request, response=response)
+        self.exchange = exchange
+
+
 class OddsApiResult(BaseModel):
     """Odds for one sport: raw payload preserved alongside normalized events."""
 
@@ -104,6 +172,7 @@ class OddsApiResult(BaseModel):
     raw: list[dict[str, Any]]
     events: list[NormalizedEvent]
     credits: CreditHeaders
+    exchange: Optional[RawExchange] = None
     from_cache: bool = False
 
 
@@ -114,6 +183,7 @@ class SportsResult(BaseModel):
     raw: list[dict[str, Any]]
     sports: list[Sport]
     credits: CreditHeaders
+    exchange: Optional[RawExchange] = None
     from_cache: bool = False
 
 
@@ -207,20 +277,57 @@ class OddsApiClient:
         safe = sorted((k, str(v)) for k, v in params.items() if k != "apiKey")
         return f"GET {path}?{safe}"
 
-    async def _get_json(self, path: str, params: dict[str, Any]) -> tuple[Any, CreditHeaders]:
+    def _build_exchange(
+        self,
+        *,
+        path: str,
+        params: dict[str, Any],
+        response: httpx.Response,
+        requested_at: datetime,
+        elapsed_ns: int,
+    ) -> RawExchange:
+        """Capture one exchange in already-sanitized form (see :class:`RawExchange`)."""
+
+        return RawExchange(
+            endpoint=path,
+            request_params={k: str(v) for k, v in sanitize_params(params).items()},
+            http_status=response.status_code,
+            response_headers=sanitize_headers(response.headers),
+            content_type=response.headers.get("content-type"),
+            requested_at=requested_at,
+            received_at=datetime.now(timezone.utc),
+            elapsed_ns=elapsed_ns,
+            body=redact_secrets(response.text, [self._api_key.get_secret_value()]),
+        )
+
+    async def _get_json(
+        self, path: str, params: dict[str, Any]
+    ) -> tuple[Any, CreditHeaders, RawExchange]:
         request_params = {"apiKey": self._api_key.get_secret_value(), **params}
+        requested_at = datetime.now(timezone.utc)
+        started_ns = time.monotonic_ns()
+        response = await self._client.get(path, params=request_params)
+        # Built before raise_for_status so an error response keeps its bytes:
+        # a 4xx/5xx body is the only evidence of why a run failed.
+        exchange = self._build_exchange(
+            path=path,
+            params=request_params,
+            response=response,
+            requested_at=requested_at,
+            elapsed_ns=time.monotonic_ns() - started_ns,
+        )
         try:
-            response = await self._client.get(path, params=request_params)
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             # Never let the raw URL (which carries apiKey) reach a log/traceback.
-            raise httpx.HTTPStatusError(
+            raise OddsApiHTTPError(
                 f"Odds API request failed ({exc.response.status_code}) for "
                 f"{sanitize_url(str(exc.request.url))}",
                 request=exc.request,
                 response=exc.response,
+                exchange=exchange,
             ) from None
-        return response.json(), CreditHeaders.from_headers(response.headers)
+        return response.json(), CreditHeaders.from_headers(response.headers), exchange
 
     # -- Public endpoints -----------------------------------------------------
     async def get_sports(self, *, all_sports: bool = False) -> SportsResult:
@@ -234,14 +341,72 @@ class OddsApiClient:
         if isinstance(cached, SportsResult):
             return cached.model_copy(update={"from_cache": True})
 
-        raw, credits = await self._get_json("/v4/sports", params)
+        raw, credits, exchange = await self._get_json("/v4/sports", params)
         result = SportsResult(
             raw=raw,
             sports=[Sport.model_validate(item) for item in raw],
             credits=credits,
+            exchange=exchange,
         )
         self._cache.set(cache_key, result)
         return result
+
+    def _odds_params(
+        self,
+        *,
+        regions: Optional[str],
+        markets: Optional[str],
+        odds_format: Optional[str],
+        bookmakers: Optional[str | Sequence[str]],
+        commence_time_from: Optional[str],
+        commence_time_to: Optional[str],
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "regions": regions or self.default_regions,
+            "markets": markets or self.default_markets,
+            "oddsFormat": odds_format or self.default_odds_format,
+        }
+        if bookmakers:
+            params["bookmakers"] = (
+                bookmakers if isinstance(bookmakers, str) else ",".join(bookmakers)
+            )
+        if commence_time_from:
+            params["commenceTimeFrom"] = commence_time_from
+        if commence_time_to:
+            params["commenceTimeTo"] = commence_time_to
+        return params
+
+    async def fetch_odds_raw(
+        self,
+        sport_key: str,
+        *,
+        regions: Optional[str] = None,
+        markets: Optional[str] = None,
+        odds_format: Optional[str] = None,
+        bookmakers: Optional[str | Sequence[str]] = None,
+        commence_time_from: Optional[str] = None,
+        commence_time_to: Optional[str] = None,
+    ) -> tuple[list[dict[str, Any]], CreditHeaders, RawExchange]:
+        """Fetch odds and return the raw payload without normalizing it.
+
+        The ingestion lane needs the exact bytes *and* the exchange metadata
+        before any parsing, so a single malformed record cannot lose the whole
+        response (normalization is applied per-event, defensively, downstream).
+        This is not a cache path: capture-forward ingestion must observe the
+        live response every run.
+        """
+
+        path = f"/v4/sports/{sport_key}/odds"
+        params = self._odds_params(
+            regions=regions,
+            markets=markets,
+            odds_format=odds_format,
+            bookmakers=bookmakers,
+            commence_time_from=commence_time_from,
+            commence_time_to=commence_time_to,
+        )
+        raw, credits, exchange = await self._get_json(path, params)
+        return list(raw), credits, exchange
 
     async def get_odds(
         self,
@@ -256,19 +421,14 @@ class OddsApiClient:
     ) -> OddsApiResult:
         """GET /v4/sports/{sport_key}/odds -- odds for one sport."""
 
-        params: dict[str, Any] = {
-            "regions": regions or self.default_regions,
-            "markets": markets or self.default_markets,
-            "oddsFormat": odds_format or self.default_odds_format,
-        }
-        if bookmakers:
-            params["bookmakers"] = (
-                bookmakers if isinstance(bookmakers, str) else ",".join(bookmakers)
-            )
-        if commence_time_from:
-            params["commenceTimeFrom"] = commence_time_from
-        if commence_time_to:
-            params["commenceTimeTo"] = commence_time_to
+        params = self._odds_params(
+            regions=regions,
+            markets=markets,
+            odds_format=odds_format,
+            bookmakers=bookmakers,
+            commence_time_from=commence_time_from,
+            commence_time_to=commence_time_to,
+        )
 
         path = f"/v4/sports/{sport_key}/odds"
         cache_key = self._cache_key(path, params)
@@ -276,12 +436,13 @@ class OddsApiClient:
         if isinstance(cached, OddsApiResult):
             return cached.model_copy(update={"from_cache": True})
 
-        raw, credits = await self._get_json(path, params)
+        raw, credits, exchange = await self._get_json(path, params)
         result = OddsApiResult(
             sport_key=sport_key,
             raw=raw,
             events=[normalize_event(item) for item in raw],
             credits=credits,
+            exchange=exchange,
         )
         self._cache.set(cache_key, result)
         return result

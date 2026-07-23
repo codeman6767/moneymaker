@@ -17,6 +17,26 @@ REDACTED = "***REDACTED***"
 # Query-parameter names that carry secrets and must always be masked.
 SECRET_QUERY_PARAMS: frozenset[str] = frozenset({"apiKey", "api_key", "apikey", "key", "token"})
 
+# Response headers that may be preserved in the corpus, as an **allow-list**.
+#
+# A deny-list ("store everything except authorization") fails open the day a
+# provider introduces a new header carrying something sensitive. An allow-list
+# fails closed: an unrecognized header is simply not stored. ``authorization``,
+# ``set-cookie``, ``x-api-key`` and anything else outside this set can therefore
+# never reach a stored column, whatever a provider decides to send.
+STORABLE_RESPONSE_HEADERS: frozenset[str] = frozenset(
+    {
+        "content-type",
+        "date",
+        "cache-control",
+        "etag",
+        # The Odds API credit accounting.
+        "x-requests-remaining",
+        "x-requests-used",
+        "x-requests-last",
+    }
+)
+
 
 def redact_secrets(text: str, secrets: Iterable[str]) -> str:
     """Replace every non-empty secret value found in ``text`` with a marker."""
@@ -51,4 +71,20 @@ def sanitize_params(params: Mapping[str, object]) -> dict[str, object]:
     return {
         name: (REDACTED if name in SECRET_QUERY_PARAMS else value)
         for name, value in params.items()
+    }
+
+
+def sanitize_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    """Return only the headers on :data:`STORABLE_RESPONSE_HEADERS`.
+
+    Names are lower-cased so the result is comparable regardless of how the
+    provider capitalized them. Anything not explicitly allowed is dropped, so
+    an ``Authorization`` (or any future credential-bearing) header cannot be
+    persisted even by accident.
+    """
+
+    return {
+        name.lower(): value
+        for name, value in headers.items()
+        if name.lower() in STORABLE_RESPONSE_HEADERS
     }

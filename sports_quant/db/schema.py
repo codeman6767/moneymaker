@@ -104,6 +104,48 @@ ALIAS_SOURCES: Final[tuple[str, ...]] = ("seed", "manual", "provider_observed")
 
 DOUBLEHEADER_TYPES: Final[tuple[str, ...]] = ("traditional", "split")
 
+# --------------------------------------------------------------------------- #
+# Ingestion (Phase B)
+# --------------------------------------------------------------------------- #
+#: Lifecycle of one ingestion run. ``partially_succeeded`` is a real outcome,
+#: not a euphemism: a sweep that stored eight events and refused two malformed
+#: ones neither succeeded nor failed, and flattening it into either loses the
+#: only signal that something needs looking at.
+INGESTION_RUN_STATUSES: Final[tuple[str, ...]] = (
+    "started",
+    "succeeded",
+    "partially_succeeded",
+    "failed",
+)
+
+#: The only HTTP verb the corpus can record. Mirrors the CHECK constraint on
+#: ``raw_responses.http_method`` and the transport policy.
+ALLOWED_HTTP_METHOD: Final = "GET"
+
+#: Provider name recorded on every Odds API row.
+THE_ODDS_API_PROVIDER: Final = "the_odds_api"
+
+#: Sportsbook market keys supported in Phase B. Mirrors the CHECK constraint on
+#: ``sportsbook_markets.market_key``.
+SUPPORTED_MARKET_KEYS: Final[tuple[str, ...]] = ("h2h", "spreads", "totals")
+
+#: Roles an outcome can play. ``unknown`` records an outcome whose role could
+#: not be determined rather than dropping it.
+OUTCOME_ROLES: Final[tuple[str, ...]] = ("home", "away", "over", "under", "draw", "unknown")
+
+#: Provider sport keys to league codes. A static enum map, not a name match:
+#: no fuzzy matching happens anywhere in Phase B.
+SPORT_KEY_TO_LEAGUE_CODE: Final[dict[str, str]] = {
+    "baseball_mlb": "MLB",
+    "basketball_nba": "NBA",
+}
+
+#: CLI sport arguments to provider sport keys.
+SPORT_ARG_TO_SPORT_KEY: Final[dict[str, str]] = {
+    "mlb": "baseball_mlb",
+    "nba": "basketball_nba",
+}
+
 # Sentinel meaning "not scoped to a provider". A NOT NULL sentinel rather than
 # NULL because SQLite treats two NULLs as distinct inside a UNIQUE constraint,
 # which would let identical seed rows insert twice on every re-run.
@@ -131,9 +173,27 @@ PHASE_A_TABLES: Final[tuple[str, ...]] = (
     "game_status_history",
 )
 
+#: Every table created by Phase B migrations, in dependency order.
+PHASE_B_TABLES: Final[tuple[str, ...]] = (
+    "ingestion_runs",
+    "raw_responses",
+    "sportsbook_events",
+    "sportsbook_markets",
+    "sportsbook_outcomes",
+    "sportsbook_price_snapshots",
+)
+
 #: Tables that are immutable once written. UPDATE and DELETE are blocked by
 #: BEFORE triggers, not by convention.
-APPEND_ONLY_TABLES: Final[tuple[str, ...]] = ("game_status_history",)
+#:
+#: ``ingestion_runs`` is deliberately absent: a run is opened as ``started``
+#: and closed with its counters, which is a mutation of the same row. What a
+#: run produced -- its raw responses and price snapshots -- is immutable.
+APPEND_ONLY_TABLES: Final[tuple[str, ...]] = (
+    "game_status_history",
+    "raw_responses",
+    "sportsbook_price_snapshots",
+)
 
 
 def is_valid_status(status: str) -> bool:

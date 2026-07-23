@@ -56,9 +56,12 @@ trade's execution time.
 ### `observed_at` — transaction time, our clock, the load-bearing one
 
 When *we* received the response containing this fact. Taken from the owning
-`raw_responses.responded_at`, so every fact derived from one response shares
-one `observed_at`. This is the only timestamp that answers "was this knowable
-to us?".
+`raw_responses.received_at` (the column name in migration `b004`), so every
+fact derived from one response shares one `observed_at`. In the Phase B
+sportsbook path this is enforced structurally: the odds ingestor reads
+`observed_at` from the stored raw response and stamps every derived price
+snapshot with it. This is the only timestamp that answers "was this knowable to
+us?".
 
 - **Never NULL.** A fact with no observation time cannot be used safely and is
   rejected at write time.
@@ -178,6 +181,9 @@ Phase A landed the temporal foundations these rules rest on. What exists today:
 | `games.original_start` never updated | ✅ enforced by trigger (`a003`), not convention |
 | Stale backfill cannot regress current state | ✅ `a003` patch — see below |
 | Transition-aware status deduplication | ✅ `a003` — a repeated state is a real transition, not a duplicate |
+| Sportsbook price snapshots append-only with `observed_at` / `provider_timestamp` | ✅ **Phase B** migration `b005_sportsbook`, `raw_responses.received_at` supplies `observed_at` |
+| As-of price accessor filtering on `observed_at` (DQ-PIT-005/006 shape) | ✅ **Phase B** `SportsbookRepository.price_as_of()` / `latest_price()` / `prices_in_range()` |
+| Idempotent re-ingestion + preserved backfill (DQ-PIT-008) | ✅ **Phase B** `UNIQUE (sb_outcome_id, content_hash)` + `INSERT OR IGNORE`; append-only triggers |
 | Full `pit/asof.py`, `pit/dataset.py`, adversarial leak fixtures | ◻ Phase E |
 
 `GameRepository.status_as_of()` is the first working instance of the §3

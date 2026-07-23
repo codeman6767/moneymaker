@@ -46,6 +46,7 @@ packages = [
     "sports_quant.db",
     "sports_quant.db.repositories",
     "sports_quant.db.seeds",
+    "sports_quant.ingest",
     "streaming",
     "state",
     "probability",
@@ -68,6 +69,7 @@ python_files = ["test_*.py"]
 testpaths = [
     "sports_quant/tests",
     "sports_quant/db/tests",
+    "sports_quant/ingest/tests",
     "streaming/tests",
     "state/tests",
     "tracking/tests",
