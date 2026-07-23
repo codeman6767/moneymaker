@@ -221,6 +221,79 @@ async def test_unsupported_market_is_rejected(
     assert "player_props" not in keys
 
 
+async def test_blank_home_team_is_rejected(database: Database, make_client, client_for) -> None:
+    payload = copy.deepcopy(mlb_payload())
+    payload[0]["home_team"] = "   "
+    result = await ingest_odds(
+        database=database, client=make_client(client_for(payload)), sport="mlb"
+    )
+    assert result.events_seen == 0
+    assert result.events_rejected == 1
+    assert any("home team" in r for r in result.rejections)
+    assert _snap_count(database) == 0
+    with database.connection() as conn:
+        assert int(conn.execute("SELECT COUNT(*) FROM sportsbook_events").fetchone()[0]) == 0
+
+
+async def test_missing_away_team_is_rejected(database: Database, make_client, client_for) -> None:
+    payload = copy.deepcopy(mlb_payload())
+    del payload[0]["away_team"]
+    result = await ingest_odds(
+        database=database, client=make_client(client_for(payload)), sport="mlb"
+    )
+    assert result.events_rejected == 1
+    assert any("away team" in r for r in result.rejections)
+    assert _snap_count(database) == 0
+
+
+async def test_identical_teams_are_rejected(database: Database, make_client, client_for) -> None:
+    payload = copy.deepcopy(mlb_payload())
+    # Same name, different punctuation/case -> identical after normalization.
+    payload[0]["home_team"] = "New York Yankees"
+    payload[0]["away_team"] = "new york yankees"
+    result = await ingest_odds(
+        database=database, client=make_client(client_for(payload)), sport="mlb"
+    )
+    assert result.events_rejected == 1
+    assert any("identical" in r for r in result.rejections)
+    assert _snap_count(database) == 0
+
+
+async def test_sport_key_mismatch_is_rejected(database: Database, make_client, client_for) -> None:
+    """A basketball payload returned to the baseball endpoint is not persisted."""
+
+    payload = copy.deepcopy(mlb_payload())
+    payload[0]["sport_key"] = "basketball_nba"  # wrong league for this endpoint
+    result = await ingest_odds(
+        database=database, client=make_client(client_for(payload)), sport="mlb"
+    )
+    assert result.events_seen == 0
+    assert result.events_rejected == 1
+    assert any("sport_key mismatch" in r for r in result.rejections)
+    with database.connection() as conn:
+        assert int(conn.execute("SELECT COUNT(*) FROM sportsbook_events").fetchone()[0]) == 0
+        assert int(
+            conn.execute("SELECT COUNT(*) FROM sportsbook_price_snapshots").fetchone()[0]
+        ) == 0
+
+
+async def test_valid_event_survives_alongside_a_mismatched_one(
+    database: Database, make_client, client_for
+) -> None:
+    payload = mlb_payload() + copy.deepcopy(mlb_payload())
+    payload[1]["id"] = "mlb-event-2"
+    payload[1]["sport_key"] = "basketball_nba"  # mismatch
+    result = await ingest_odds(
+        database=database, client=make_client(client_for(payload)), sport="mlb"
+    )
+    assert result.events_seen == 1
+    assert result.events_rejected == 1
+    assert result.status == "partially_succeeded"
+    with database.connection() as conn:
+        ids = {r[0] for r in conn.execute("SELECT provider_event_id FROM sportsbook_events")}
+    assert ids == {"mlb-event-1"}
+
+
 async def test_no_games_available_is_success_not_failure(
     database: Database, make_client, client_for
 ) -> None:
@@ -288,18 +361,43 @@ async def test_http_failure_marks_run_failed_but_preserves_bytes(
     assert result.failed is True
     assert result.status == "failed"
     assert result.error_type is not None
+    # A completed 4xx/5xx round-trip counts as one request.
+    assert result.requests_made == 1
     # The failed run is recorded, and its response body is still preserved for a
     # later re-parse -- a parse/HTTP failure never loses the bytes.
     with database.connection() as conn:
         run = conn.execute(
-            "SELECT status, error_type FROM ingestion_runs WHERE run_id = ?", (result.run_id,)
+            "SELECT status, error_type, requests_made FROM ingestion_runs WHERE run_id = ?",
+            (result.run_id,),
         ).fetchone()
         raw = conn.execute(
             "SELECT http_status, body FROM raw_responses WHERE run_id = ?", (result.run_id,)
         ).fetchone()
     assert run["status"] == "failed"
+    assert run["requests_made"] == 1
     assert raw["http_status"] == 429
     assert "quota exceeded" in raw["body"]
+
+
+async def test_pre_request_failure_counts_zero_requests(database: Database, make_client) -> None:
+    """A connect/DNS failure before any response arrives records requests_made = 0."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("dns failure")
+
+    result = await ingest_odds(database=database, client=make_client(handler), sport="mlb")
+    assert result.status == "failed"
+    assert result.requests_made == 0
+    with database.connection() as conn:
+        run = conn.execute(
+            "SELECT requests_made FROM ingestion_runs WHERE run_id = ?", (result.run_id,)
+        ).fetchone()
+        # No HTTP response arrived, so nothing was preserved for this run.
+        raw_count = conn.execute(
+            "SELECT COUNT(*) FROM raw_responses WHERE run_id = ?", (result.run_id,)
+        ).fetchone()[0]
+    assert run["requests_made"] == 0
+    assert raw_count == 0
 
 
 async def test_every_request_is_a_get(database: Database, make_client) -> None:

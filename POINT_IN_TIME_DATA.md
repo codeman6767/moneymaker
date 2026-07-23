@@ -183,7 +183,8 @@ Phase A landed the temporal foundations these rules rest on. What exists today:
 | Transition-aware status deduplication | ✅ `a003` — a repeated state is a real transition, not a duplicate |
 | Sportsbook price snapshots append-only with `observed_at` / `provider_timestamp` | ✅ **Phase B** migration `b005_sportsbook`, `raw_responses.received_at` supplies `observed_at` |
 | As-of price accessor filtering on `observed_at` (DQ-PIT-005/006 shape) | ✅ **Phase B** `SportsbookRepository.price_as_of()` / `latest_price()` / `prices_in_range()` |
-| Idempotent re-ingestion + preserved backfill (DQ-PIT-008) | ✅ **Phase B** `UNIQUE (sb_outcome_id, content_hash)` + `INSERT OR IGNORE`; append-only triggers |
+| Transition-aware idempotent re-ingestion + preserved backfill (DQ-PIT-008) | ✅ **Phase B** `b006`: `UNIQUE (sb_outcome_id, observed_at, content_hash)` + immediate-predecessor comparison; append-only triggers |
+| Current event/market metadata never regressed by a stale backfill | ✅ **Phase B** integrity repair — event/market upserts refresh only on a strictly-newer `observed_at` (see below) |
 | Full `pit/asof.py`, `pit/dataset.py`, adversarial leak fixtures | ◻ Phase E |
 
 `GameRepository.status_as_of()` is the first working instance of the §3
@@ -320,10 +321,31 @@ silently stops reflecting what was known then. This corrupts every historical
 dataset built afterwards and is undetectable after the fact.
 
 **Defence.** `BEFORE UPDATE` / `BEFORE DELETE` triggers that `RAISE(ABORT)` on
-every snapshot table (`DATA_ARCHITECTURE.md` §5). Idempotency is achieved with
-`UNIQUE (entity, content_hash)` + `INSERT OR IGNORE`, so re-ingesting identical
+every snapshot table (`DATA_ARCHITECTURE.md` §5). Idempotency is achieved with a
+`content_hash` uniqueness key + `INSERT OR IGNORE`, so re-ingesting identical
 content is a no-op rather than a rewrite. Corrections append with
 `is_correction = 1`.
+
+**Transition-aware refinement (sportsbook prices, migration `b006`).** A purely
+global `UNIQUE (sb_outcome_id, content_hash)` is too strong: a price that
+reverts to an earlier value (`-110 → -120 → -110`) hashes its third observation
+identically to its first, so a global key would drop a real transition — exactly
+the `game_status_history` defect `a003` fixed. The price key therefore includes
+`observed_at` (`UNIQUE (sb_outcome_id, observed_at, content_hash)`), and the
+repository collapses an observation only when it equals its **immediate temporal
+predecessor**. Consecutive unchanged re-polls collapse; a reversal appends;
+exact replay and repeated backfill stay idempotent; no historical row is
+mutated. See `DATA_ARCHITECTURE.md` §3.6.1.
+
+**Stale-metadata protection (Phase B integrity repair).** The mutable
+current-state columns on `sportsbook_events` and `sportsbook_markets` (commence
+time, team text, provider update times, `last_observed_at`) obey the same
+stale-backfill rule as `games.status`: they are refreshed only from a strictly
+**newer** `observed_at`, so a late-arriving observation of an *earlier* moment is
+preserved through its snapshots but never rewinds the current metadata. Equal
+`observed_at` retains the earlier-recorded value — deterministic under ordered
+replay. Point-in-time reads use the append-only snapshots as of the cutoff, not
+these current-state columns.
 
 **Test.** Attempt `UPDATE` and `DELETE` on each snapshot table; assert both
 raise. Re-run an identical ingestion twice; assert row counts are unchanged and

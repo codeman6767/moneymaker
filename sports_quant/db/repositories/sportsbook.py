@@ -56,13 +56,17 @@ def price_content_hash(
     market_last_update: Optional[str],
     provider_timestamp: Optional[str],
 ) -> str:
-    """Identity of a *price observation*, deliberately excluding ``observed_at``.
+    """Content of a *price observation*, deliberately excluding ``observed_at``.
 
-    Two polls returning the same price and the same provider update times are
-    the same observation and collapse to one row; a genuinely new price, or the
-    same price the provider re-stamps with a later ``last_update``, is a new
-    observation and appends. Excluding ``observed_at`` is what makes an
-    unchanged re-poll idempotent.
+    Covers the reported price, line, and the provider's own update times only.
+    Two observations with identical content hash identically **on purpose** --
+    that is what lets the repository detect "nothing changed" against the
+    immediate temporal predecessor. It is *not* a global uniqueness key: a line
+    that reverts to an earlier price (``-110 -> -120 -> -110``) reports the same
+    content twice, and both must be recorded. The append/collapse decision is
+    made in :meth:`SqliteSportsbookRepository.append_price_snapshot`, and the
+    ``UNIQUE (sb_outcome_id, observed_at, content_hash)`` constraint keeps an
+    exact-duplicate observation idempotent.
     """
 
     payload = {
@@ -173,11 +177,19 @@ class SqliteSportsbookRepository(Repository):
     ) -> SportsbookEvent:
         """Insert an event, or refresh the mutable current-state of an existing one.
 
-        Identity is ``(provider, provider_event_id)``. On a repeat sighting the
-        commence time, team strings and ``last_observed_at`` are refreshed --
-        a provider legitimately moves a game -- while the surrogate id, the
+        Identity is ``(provider, provider_event_id)``. The surrogate id, the
         creating response, and ``first_observed_at`` never change. ``game_id``
         stays untouched here: linking to a canonical game is Phase D.
+
+        **Stale backfill cannot regress current metadata.** Mutable current
+        state (``commence_time``, the team strings, ``last_observed_at``) is
+        refreshed *only* when the incoming observation is strictly newer than
+        the row's ``last_observed_at``. An older backfill is preserved through
+        its raw response and price snapshots but never overwrites newer current
+        metadata. On an **equal** ``observed_at`` the existing value is retained
+        -- a deterministic tie-break: raw responses are replayed in a fixed
+        order, so "first-recorded wins" reproduces identically on a rebuild.
+        This mirrors the ``game_status_history`` rule (POINT_IN_TIME_DATA §4).
         """
 
         existing = self.get_event_by_provider(provider, provider_event_id)
@@ -210,22 +222,23 @@ class SqliteSportsbookRepository(Repository):
             assert fetched is not None  # noqa: S101 - just inserted
             return fetched
 
-        # Refresh mutable current state. last_observed_at advances only forward.
-        latest_observed = max(existing.last_observed_at, observed_at)
-        self._conn.execute(
-            "UPDATE sportsbook_events SET "
-            "league_id = ?, commence_time = ?, home_team_raw = ?, away_team_raw = ?, "
-            "last_observed_at = ?, updated_at = ? WHERE sb_event_id = ?",
-            (
-                league_id if league_id is not None else existing.league_id,
-                commence_time,
-                home_team_raw,
-                away_team_raw,
-                latest_observed,
-                now,
-                existing.sb_event_id,
-            ),
-        )
+        # Strictly newer observation: advance current state. Older-or-equal:
+        # leave every mutable column untouched (no regression, deterministic).
+        if observed_at > existing.last_observed_at:
+            self._conn.execute(
+                "UPDATE sportsbook_events SET "
+                "league_id = ?, commence_time = ?, home_team_raw = ?, away_team_raw = ?, "
+                "last_observed_at = ?, updated_at = ? WHERE sb_event_id = ?",
+                (
+                    league_id if league_id is not None else existing.league_id,
+                    commence_time,
+                    home_team_raw,
+                    away_team_raw,
+                    observed_at,
+                    now,
+                    existing.sb_event_id,
+                ),
+            )
         refreshed = self.get_event(existing.sb_event_id)
         assert refreshed is not None  # noqa: S101
         return refreshed
@@ -277,7 +290,15 @@ class SqliteSportsbookRepository(Repository):
         bookmaker_last_update: Optional[str] = None,
         market_last_update: Optional[str] = None,
     ) -> SportsbookMarket:
-        """Insert a market, or refresh an existing one's provider update times."""
+        """Insert a market, or refresh an existing one's provider update times.
+
+        Same stale-backfill protection as :meth:`upsert_event`: the bookmaker
+        title and the bookmaker/market update times are refreshed only when the
+        incoming observation is strictly newer than ``last_observed_at``. An
+        older backfill is preserved through its snapshots but does not regress
+        the current market metadata; an equal ``observed_at`` retains the
+        existing value (deterministic under ordered replay).
+        """
 
         existing = self.get_market_by_key(sb_event_id, bookmaker_key, market_key)
         now = utc_now_iso()
@@ -308,20 +329,20 @@ class SqliteSportsbookRepository(Repository):
             assert fetched is not None  # noqa: S101
             return fetched
 
-        latest_observed = max(existing.last_observed_at, observed_at)
-        self._conn.execute(
-            "UPDATE sportsbook_markets SET "
-            "bookmaker_title = ?, bookmaker_last_update = ?, market_last_update = ?, "
-            "last_observed_at = ?, updated_at = ? WHERE sb_market_id = ?",
-            (
-                bookmaker_title if bookmaker_title is not None else existing.bookmaker_title,
-                bookmaker_last_update,
-                market_last_update,
-                latest_observed,
-                now,
-                existing.sb_market_id,
-            ),
-        )
+        if observed_at > existing.last_observed_at:
+            self._conn.execute(
+                "UPDATE sportsbook_markets SET "
+                "bookmaker_title = ?, bookmaker_last_update = ?, market_last_update = ?, "
+                "last_observed_at = ?, updated_at = ? WHERE sb_market_id = ?",
+                (
+                    bookmaker_title if bookmaker_title is not None else existing.bookmaker_title,
+                    bookmaker_last_update,
+                    market_last_update,
+                    observed_at,
+                    now,
+                    existing.sb_market_id,
+                ),
+            )
         refreshed = self.get_market(existing.sb_market_id)
         assert refreshed is not None  # noqa: S101
         return refreshed
@@ -450,11 +471,42 @@ class SqliteSportsbookRepository(Repository):
     ) -> tuple[Optional[SportsbookPriceSnapshot], bool]:
         """Append a price observation. Returns ``(snapshot, inserted)``.
 
-        Idempotent on ``(sb_outcome_id, content_hash)`` via ``INSERT OR
-        IGNORE``: re-ingesting an unchanged price writes nothing and returns
-        ``inserted=False``. A later price, or an older backfill, appends a new
-        row without touching what is already stored -- the table is append-only.
+        **Transition-aware deduplication.** The observation is compared against
+        its *immediate temporal predecessor* -- the latest snapshot for this
+        outcome at or before ``observed_at`` -- not against the whole history.
+        It is skipped only when its ``content_hash`` equals that predecessor's,
+        so:
+
+        * a consecutive unchanged re-poll collapses (predecessor is identical);
+        * a changed price appends;
+        * a reversal ``-110 -> -120 -> -110`` keeps all three, because the third
+          differs from its predecessor ``-120`` even though it equals the first;
+        * an exact replay of an existing observation is idempotent (its
+          predecessor is itself, and the ``UNIQUE (sb_outcome_id, observed_at,
+          content_hash)`` constraint is the backstop);
+        * a backfill is compared against its own temporal neighbour, so a
+          repeated backfill is idempotent while a genuinely new earlier
+          observation appends.
+
+        No historical row is ever updated or deleted -- the table is append-only.
         """
+
+        predecessor = self._fetch_one(
+            "SELECT content_hash FROM sportsbook_price_snapshots "
+            "WHERE sb_outcome_id = ? AND observed_at <= ? "
+            "ORDER BY observed_at DESC, snapshot_id DESC LIMIT 1",
+            (sb_outcome_id, observed_at),
+        )
+        if predecessor is not None and str(predecessor["content_hash"]) == content_hash:
+            # Unchanged from the immediately preceding observation: no new
+            # information. Return that predecessor row for reference.
+            existing = self._fetch_one(
+                f"SELECT {self._SNAPSHOT_COLUMNS} FROM sportsbook_price_snapshots "
+                "WHERE sb_outcome_id = ? AND observed_at <= ? AND content_hash = ? "
+                "ORDER BY observed_at DESC, snapshot_id DESC LIMIT 1",
+                (sb_outcome_id, observed_at, content_hash),
+            )
+            return (None if existing is None else self._to_snapshot(existing)), False
 
         snapshot_id = new_sb_price_snapshot_id()
         now = utc_now_iso()
@@ -485,10 +537,13 @@ class SqliteSportsbookRepository(Repository):
             ),
         )
         if cursor.rowcount == 0:
+            # The predecessor differed, but an exact (outcome, observed_at,
+            # content) row already exists -- e.g. a reversal replayed at the same
+            # observation time. The UNIQUE constraint makes this idempotent.
             existing = self._fetch_one(
                 f"SELECT {self._SNAPSHOT_COLUMNS} FROM sportsbook_price_snapshots "
-                "WHERE sb_outcome_id = ? AND content_hash = ?",
-                (sb_outcome_id, content_hash),
+                "WHERE sb_outcome_id = ? AND observed_at = ? AND content_hash = ?",
+                (sb_outcome_id, observed_at, content_hash),
             )
             return (None if existing is None else self._to_snapshot(existing)), False
 

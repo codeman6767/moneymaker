@@ -245,10 +245,13 @@ async def _ingest_dry_run(
             commence_to=commence_to,
         )
     except OddsApiHTTPError as exc:
+        # A completed 4xx/5xx round-trip still counts as one request.
+        result.requests_made = 1
         result.status = "failed"
         result.error_type, result.error_message = sanitize_error(exc)
         return result
     except Exception as exc:  # noqa: BLE001 - classify, never leak
+        # No response arrived, so no request completed: requests_made stays 0.
         result.status = "failed"
         result.error_type, result.error_message = sanitize_error(exc)
         return result
@@ -257,7 +260,9 @@ async def _ingest_dry_run(
     result.credits = credits
     counters = RunCounters()
     for raw_event in raw:
-        _normalize_and_count_only(raw_event, result=result, counters=counters)
+        _normalize_and_count_only(
+            raw_event, expected_sport_key=sport_key, result=result, counters=counters
+        )
     _apply_counters(result, counters)
     if result.records_rejected and result.records_normalized == 0 and result.records_received:
         result.status = "partially_succeeded"
@@ -312,12 +317,16 @@ async def _ingest_persisting(
                 commence_to=commence_to,
             )
         except OddsApiHTTPError as exc:
-            # A well-formed HTTP failure still carries its bytes: preserve them
-            # under this run so a later re-parse is possible, then fail.
+            # A 4xx/5xx is a completed round-trip: the request WAS made, so it
+            # counts as one. Its bytes still carry a body, preserved here under
+            # this run so a later re-parse is possible, then the run fails.
+            result.requests_made = 1
             _persist_failed_exchange(conn, run_id=run.run_id, exchange=exc.exchange)
             _finish_failed(conn, runs, run.run_id, exc, started_monotonic_ns, result)
             return result
         except Exception as exc:  # noqa: BLE001
+            # A failure before any HTTP response arrived (connect/DNS/timeout):
+            # no request completed, so requests_made stays 0.
             _finish_failed(conn, runs, run.run_id, exc, started_monotonic_ns, result)
             return result
 
@@ -362,6 +371,7 @@ async def _ingest_persisting(
                         run_id=run.run_id,
                         observed_at=observed_at,
                         league_id=league_id,
+                        expected_sport_key=sport_key,
                         result=result,
                         counters=counters,
                     )
@@ -463,8 +473,19 @@ def _count_event_observations(raw_event: dict[str, Any]) -> int:
     return total
 
 
-def _validate_event(raw_event: dict[str, Any]) -> tuple[Optional[Any], Optional[str]]:
-    """Normalize and validate one event. Returns ``(NormalizedEvent, None)`` or ``(None, reason)``."""
+def _validate_event(
+    raw_event: dict[str, Any], *, expected_sport_key: str
+) -> tuple[Optional[Any], Optional[str]]:
+    """Normalize and validate one event.
+
+    Returns ``(NormalizedEvent, None)`` or ``(None, reason)``. Team names are
+    validated here rather than defaulted to empty strings: a blank team, or two
+    teams that normalize identically, is a corrupt event -- storing it with
+    ``home_team_raw = ''`` would fabricate a row that no later matcher could
+    resolve and that silently pollutes every join. ``expected_sport_key`` is the
+    key of the endpoint we actually requested; a payload whose ``sport_key``
+    disagrees is rejected rather than stored under the wrong league.
+    """
 
     try:
         event = normalize_event(raw_event)
@@ -474,8 +495,19 @@ def _validate_event(raw_event: dict[str, Any]) -> tuple[Optional[Any], Optional[
         return None, "missing provider event id"
     if not event.sport_key:
         return None, "missing sport key"
+    if event.sport_key != expected_sport_key:
+        return None, (
+            f"sport_key mismatch: payload {event.sport_key!r} != "
+            f"requested {expected_sport_key!r}"
+        )
     if event.commence_time is None:
         return None, "invalid or missing commence time"
+    if event.home_team is None or not event.home_team.strip():
+        return None, "missing or blank home team"
+    if event.away_team is None or not event.away_team.strip():
+        return None, "missing or blank away team"
+    if normalized_key(event.home_team) == normalized_key(event.away_team):
+        return None, "home and away teams are identical after normalization"
     return event, None
 
 
@@ -487,26 +519,28 @@ def _ingest_event(
     run_id: str,
     observed_at: str,
     league_id: Optional[str],
+    expected_sport_key: str,
     result: OddsIngestResult,
     counters: RunCounters,
 ) -> None:
-    event, reason = _validate_event(raw_event)
+    event, reason = _validate_event(raw_event, expected_sport_key=expected_sport_key)
     if event is None:
         assert reason is not None  # noqa: S101
         _reject(result, counters, reason, count=max(1, _count_event_observations(raw_event)))
         result.events_rejected += 1
         return
 
-    home_norm = normalized_key(event.home_team or "")
-    away_norm = normalized_key(event.away_team or "")
+    # Validation has proven both names are present and distinct.
+    home_norm = normalized_key(event.home_team)
+    away_norm = normalized_key(event.away_team)
 
     sb_event = sportsbook.upsert_event(
         provider=THE_ODDS_API_PROVIDER,
         provider_event_id=event.provider_event_id,
         sport_key=event.sport_key,
         commence_time=to_iso(event.commence_time),
-        home_team_raw=event.home_team or "",
-        away_team_raw=event.away_team or "",
+        home_team_raw=event.home_team,
+        away_team_raw=event.away_team,
         raw_response_id=raw_response.raw_response_id,
         observed_at=observed_at,
         league_id=league_id,
@@ -651,19 +685,23 @@ def _append_reason(result: OddsIngestResult, reason: str) -> None:
 
 
 def _normalize_and_count_only(
-    raw_event: dict[str, Any], *, result: OddsIngestResult, counters: RunCounters
+    raw_event: dict[str, Any],
+    *,
+    expected_sport_key: str,
+    result: OddsIngestResult,
+    counters: RunCounters,
 ) -> None:
     """Dry-run path: run the same validation, count, but write nothing."""
 
-    event, reason = _validate_event(raw_event)
+    event, reason = _validate_event(raw_event, expected_sport_key=expected_sport_key)
     if event is None:
         assert reason is not None  # noqa: S101
         _reject(result, counters, reason, count=max(1, _count_event_observations(raw_event)))
         result.events_rejected += 1
         return
 
-    home_norm = normalized_key(event.home_team or "")
-    away_norm = normalized_key(event.away_team or "")
+    home_norm = normalized_key(event.home_team)
+    away_norm = normalized_key(event.away_team)
     result.events_seen += 1
     for bookmaker in event.bookmakers:
         if not bookmaker.key:

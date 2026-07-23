@@ -209,6 +209,7 @@ version 1 and collide. Applied so far:
 | 003 | `a003_integrity_guards` | league-consistency triggers, `original_start` immutability, `game_status_history` rebuild (§3.4.1) |
 | 004 | `b004_raw_responses` | ingestion_runs, raw_responses (append-only), `game_status_history` rebuilt to add the `raw_response_id` FK |
 | 005 | `b005_sportsbook` | sportsbook_events, sportsbook_markets, sportsbook_outcomes, sportsbook_price_snapshots (append-only), identity-immutability triggers |
+| 006 | `b006_price_transition_dedup` | `sportsbook_price_snapshots` rebuilt: `UNIQUE (sb_outcome_id, content_hash)` → `UNIQUE (sb_outcome_id, observed_at, content_hash)` for transition-aware dedup (§3.6.1) |
 
 **Migrations are applied statement-by-statement, not via `executescript`.**
 `sqlite3.Cursor.executescript` issues an implicit `COMMIT` before running,
@@ -535,6 +536,13 @@ implementation:
   inserted" and "0 received" are different incidents. A completion `CHECK`
   binds `completed_at` to any terminal status. It is deliberately **not**
   append-only: a run is opened `started` and closed with its counters.
+  **`requests_made` counts completed HTTP round-trips.** A 4xx/5xx response is a
+  completed request, so a run that fails on one records `requests_made = 1` and
+  still preserves the error body in `raw_responses`; a failure *before* any
+  response arrives (connect/DNS/timeout) records `requests_made = 0` and writes
+  no raw response for that run. (Phase B integrity repair — the earlier code
+  recorded `0` for an HTTP error because the counter was set only after a
+  successful fetch.)
 - `raw_responses` is **not** deduplicated on `content_hash`. Two fetches
   returning identical bytes are two observations, each owned by its run;
   `content_hash` is indexed for traceability, and idempotency is enforced on
@@ -601,7 +609,10 @@ CREATE TABLE sportsbook_price_snapshots (
     raw_response_hash TEXT NOT NULL,
     content_hash     TEXT NOT NULL,
     created_at       TEXT NOT NULL,
-    UNIQUE (sb_outcome_id, content_hash)
+    -- b005 shipped UNIQUE (sb_outcome_id, content_hash); migration b006 rebuilds
+    -- this to UNIQUE (sb_outcome_id, observed_at, content_hash) for
+    -- transition-aware deduplication (§3.6.1).
+    UNIQUE (sb_outcome_id, observed_at, content_hash)
 );
 
 CREATE INDEX idx_sb_price_asof ON sportsbook_price_snapshots (sb_outcome_id, observed_at);
@@ -613,8 +624,10 @@ its *price* changes constantly. Collapsing them would force re-storing the
 identity on every poll and make "price history for this line" a string-matching
 problem instead of an indexed scan.
 
-`UNIQUE (sb_outcome_id, content_hash)` gives idempotent re-ingestion: polling
-the same unchanged price twice writes one row, not two.
+`UNIQUE (sb_outcome_id, observed_at, content_hash)` (migration `b006`; see
+§3.6.1) gives idempotent re-ingestion while preserving a price that reverts to
+an earlier value: polling the same unchanged price collapses, a reversal
+appends, and an exact replay writes nothing.
 
 **Implemented in migration `b005_sportsbook`** — the migration is
 authoritative; deltas from the sketch above:
@@ -639,6 +652,51 @@ authoritative; deltas from the sketch above:
   `BEFORE UPDATE` triggers, so an upsert can refresh mutable current-state
   (commence time, `last_observed_at`, provider update times) without the
   identity drifting underneath its children.
+
+**Stale-metadata protection (Phase B integrity repair).** The event and market
+upserts refresh mutable current-state (commence time, team text, bookmaker
+title, provider update times, `last_observed_at`) **only when the incoming
+observation is strictly newer** than the stored `last_observed_at`. An older
+backfill is preserved through its raw response and price snapshots but never
+regresses newer current metadata; on an **equal** `observed_at` the
+earlier-recorded value is retained, a deterministic tie-break under ordered
+replay. Before the repair the upsert took `max(last_observed_at, observed_at)`
+and overwrote the metadata columns with the incoming (possibly older) values,
+so a backfill silently rewound the current commence time and team strings. The
+identity-immutability triggers are unaffected; only the *mutable* columns are
+governed by this rule.
+
+#### 3.6.1 Transition-aware price deduplication (migration `b006`)
+
+`b005` shipped `UNIQUE (sb_outcome_id, content_hash)`, where `content_hash`
+covers the price observation and excludes `observed_at`. That deduplicates
+*prices* globally rather than *transitions*: a line going `-110 → -120 → -110`
+produced a third observation that hashed identically to the first, so
+`INSERT OR IGNORE` silently discarded it — losing a real reversal, worst when
+the provider omits its own timestamps. This is the same defect `a003` fixed for
+`game_status_history`, and `b006` applies the same fix:
+
+```sql
+CONSTRAINT sb_price_snapshots_unique
+    UNIQUE (sb_outcome_id, observed_at, content_hash)
+```
+
+Including `observed_at` means the same price at a different observation time is
+storable, while an exact duplicate observation is still rejected. The
+"nothing changed" collapse moved into `SportsbookRepository.append_price_snapshot`,
+which compares an observation against its **immediate temporal predecessor**
+(the latest snapshot at or before `observed_at`) rather than against the whole
+history. The resulting semantics — the corpus's promise:
+
+> `sportsbook_price_snapshots` stores **price transitions per outcome**. An
+> observation is appended when it differs from its temporal predecessor;
+> unchanged re-polls collapse; a reversal to an earlier price appends; exact
+> replay and repeated backfill are idempotent; no historical row is ever
+> updated or deleted.
+
+SQLite cannot drop an inline `UNIQUE`, so `b006` rebuilds the table (create,
+copy every row verbatim, drop, rename, recreate the two indexes and the
+append-only triggers). Nothing references the table by foreign key.
 
 ### 3.7 Kalshi (public data only)
 

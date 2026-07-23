@@ -266,3 +266,163 @@ def test_malformed_american_price_is_rejected_by_the_schema(conn: sqlite3.Connec
             "VALUES ('sbp_bad', ?, 50, ?, ?, ?, ?, ?, 'ch', ?)",
             (outcome.sb_outcome_id, T0, T0, raw.raw_response_id, raw.content_hash, run_id, T0),
         )
+
+
+# --------------------------------------------------------------------------- #
+# Stale-metadata protection (issue 3)
+# --------------------------------------------------------------------------- #
+def _event(repo, raw, *, provider_event_id, commence_time, home, away, observed_at):
+    return repo.upsert_event(
+        provider="the_odds_api",
+        provider_event_id=provider_event_id,
+        sport_key="baseball_mlb",
+        commence_time=commence_time,
+        home_team_raw=home,
+        away_team_raw=away,
+        raw_response_id=raw.raw_response_id,
+        observed_at=observed_at,
+        league_id="lg_mlb",
+    )
+
+
+def test_newer_observation_becomes_current_event_metadata(conn: sqlite3.Connection) -> None:
+    repo = SqliteSportsbookRepository(conn)
+    raw, _ = _raw(conn)
+    _event(repo, raw, provider_event_id="e1", commence_time=T1,
+           home="New York Yankees", away="Boston Red Sox", observed_at=T0)
+    # A newer observation moves the game and re-labels the away team.
+    updated = _event(repo, raw, provider_event_id="e1", commence_time=T2,
+                     home="New York Yankees", away="Boston Red Sox (DH)", observed_at=T2)
+    assert updated.commence_time == T2
+    assert updated.away_team_raw == "Boston Red Sox (DH)"
+    assert updated.last_observed_at == T2
+
+
+def test_older_event_backfill_does_not_regress_current_metadata(conn: sqlite3.Connection) -> None:
+    repo = SqliteSportsbookRepository(conn)
+    raw, _ = _raw(conn)
+    # Newest known first.
+    _event(repo, raw, provider_event_id="e1", commence_time=T2,
+           home="New York Yankees", away="Boston Red Sox", observed_at=T2)
+    # An older backfill arrives with a stale commence time and team text.
+    after = _event(repo, raw, provider_event_id="e1", commence_time=T0,
+                   home="NY Yankees", away="Bosox", observed_at=T0)
+    # Current metadata is unchanged -- the backfill did not regress it.
+    assert after.commence_time == T2
+    assert after.home_team_raw == "New York Yankees"
+    assert after.away_team_raw == "Boston Red Sox"
+    assert after.last_observed_at == T2
+
+
+def test_older_market_backfill_does_not_regress_current_metadata(conn: sqlite3.Connection) -> None:
+    repo = SqliteSportsbookRepository(conn)
+    raw, _ = _raw(conn)
+    ev = _event(repo, raw, provider_event_id="e1", commence_time=T2,
+                home="A", away="B", observed_at=T0)
+    repo.upsert_market(
+        sb_event_id=ev.sb_event_id, bookmaker_key="dk", market_key="h2h",
+        raw_response_id=raw.raw_response_id, observed_at=T2,
+        bookmaker_title="DraftKings", bookmaker_last_update=T2, market_last_update=T2,
+    )
+    # Older backfill with stale provider update times.
+    after = repo.upsert_market(
+        sb_event_id=ev.sb_event_id, bookmaker_key="dk", market_key="h2h",
+        raw_response_id=raw.raw_response_id, observed_at=T0,
+        bookmaker_title="DK", bookmaker_last_update=T0, market_last_update=T0,
+    )
+    assert after.bookmaker_title == "DraftKings"
+    assert after.bookmaker_last_update == T2
+    assert after.market_last_update == T2
+    assert after.last_observed_at == T2
+
+
+def test_older_backfill_snapshots_are_still_preserved(conn: sqlite3.Connection) -> None:
+    """Metadata does not regress, but the backfilled price is still stored."""
+
+    repo, outcome, raw, run_id = _outcome(conn)
+    _append(repo, outcome, raw, run_id, price=-150, observed_at=T2)
+    _snap, inserted = _append(repo, outcome, raw, run_id, price=-140, observed_at=T0)
+    assert inserted is True
+    assert repo.count_snapshots() == 2
+    # As-of at T0 sees the backfilled price; current metadata unaffected.
+    at_t0 = repo.price_as_of(outcome.sb_outcome_id, T0)
+    assert at_t0 is not None and at_t0.price_american == -140
+
+
+def test_equal_observed_at_event_metadata_is_deterministic(conn: sqlite3.Connection) -> None:
+    """On an equal observed_at the first-recorded metadata is retained."""
+
+    repo = SqliteSportsbookRepository(conn)
+    raw, _ = _raw(conn)
+    _event(repo, raw, provider_event_id="e1", commence_time=T1,
+           home="New York Yankees", away="Boston Red Sox", observed_at=T1)
+    # A second observation at the SAME observed_at with different metadata.
+    after = _event(repo, raw, provider_event_id="e1", commence_time=T2,
+                   home="New York Yankees", away="Different Text", observed_at=T1)
+    # Deterministic tie-break: the earlier-recorded value wins, not the later.
+    assert after.commence_time == T1
+    assert after.away_team_raw == "Boston Red Sox"
+
+
+# --------------------------------------------------------------------------- #
+# Transition-aware price deduplication (issue 4)
+# --------------------------------------------------------------------------- #
+def test_unchanged_consecutive_repeat_collapses(conn: sqlite3.Connection) -> None:
+    repo, outcome, raw, run_id = _outcome(conn)
+    _snap, first = _append(repo, outcome, raw, run_id, price=-110, observed_at=T0)
+    _snap2, second = _append(repo, outcome, raw, run_id, price=-110, observed_at=T1)
+    assert first is True
+    assert second is False  # unchanged from its predecessor
+    assert repo.count_snapshots() == 1
+
+
+def test_price_reversal_keeps_all_three_transitions(conn: sqlite3.Connection) -> None:
+    """-110 -> -120 -> -110 with NO provider timestamps must keep all three."""
+
+    repo, outcome, raw, run_id = _outcome(conn)
+    assert _append(repo, outcome, raw, run_id, price=-110, observed_at=T0)[1] is True
+    assert _append(repo, outcome, raw, run_id, price=-120, observed_at=T1)[1] is True
+    assert _append(repo, outcome, raw, run_id, price=-110, observed_at=T2)[1] is True
+    assert repo.count_snapshots() == 3
+    prices = [s.price_american for s in repo.list_snapshots_for_outcome(outcome.sb_outcome_id)]
+    assert prices == [-110, -120, -110]
+
+
+def test_exact_replay_of_reversal_is_idempotent(conn: sqlite3.Connection) -> None:
+    repo, outcome, raw, run_id = _outcome(conn)
+    _append(repo, outcome, raw, run_id, price=-110, observed_at=T0)
+    _append(repo, outcome, raw, run_id, price=-120, observed_at=T1)
+    _append(repo, outcome, raw, run_id, price=-110, observed_at=T2)
+    # Replaying every observation writes nothing new.
+    assert _append(repo, outcome, raw, run_id, price=-110, observed_at=T0)[1] is False
+    assert _append(repo, outcome, raw, run_id, price=-120, observed_at=T1)[1] is False
+    assert _append(repo, outcome, raw, run_id, price=-110, observed_at=T2)[1] is False
+    assert repo.count_snapshots() == 3
+
+
+def test_repeated_backfill_is_idempotent(conn: sqlite3.Connection) -> None:
+    repo, outcome, raw, run_id = _outcome(conn)
+    _append(repo, outcome, raw, run_id, price=-150, observed_at=T2)
+    # First backfill of a genuinely different earlier price appends.
+    assert _append(repo, outcome, raw, run_id, price=-140, observed_at=T0)[1] is True
+    # Re-running the same backfill does not duplicate.
+    assert _append(repo, outcome, raw, run_id, price=-140, observed_at=T0)[1] is False
+    assert repo.count_snapshots() == 2
+
+
+def test_equal_observed_at_price_tie_break_is_idempotent(conn: sqlite3.Connection) -> None:
+    """Two observations at the same observed_at: same content collapses,
+    different content coexists, and re-applying either is idempotent."""
+
+    repo, outcome, raw, run_id = _outcome(conn)
+    assert _append(repo, outcome, raw, run_id, price=-110, observed_at=T1)[1] is True
+    # Different price at the SAME observed_at is a distinct content -> stored.
+    assert _append(repo, outcome, raw, run_id, price=-120, observed_at=T1)[1] is True
+    # Re-applying either exact observation is a no-op.
+    assert _append(repo, outcome, raw, run_id, price=-110, observed_at=T1)[1] is False
+    assert _append(repo, outcome, raw, run_id, price=-120, observed_at=T1)[1] is False
+    assert repo.count_snapshots() == 2
+    # The as-of answer at T1 is deterministic (ties break by snapshot_id).
+    a = repo.price_as_of(outcome.sb_outcome_id, T1)
+    b = repo.price_as_of(outcome.sb_outcome_id, T1)
+    assert a is not None and b is not None and a.snapshot_id == b.snapshot_id

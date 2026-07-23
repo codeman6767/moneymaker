@@ -21,6 +21,7 @@ EXPECTED_MIGRATIONS = (
     (3, "a003_integrity_guards"),
     (4, "b004_raw_responses"),
     (5, "b005_sportsbook"),
+    (6, "b006_price_transition_dedup"),
 )
 
 
@@ -265,7 +266,7 @@ def test_migration_003_rebuild_preserves_existing_history_rows(tmp_path: Path) -
 
     # Now apply the rest: 003 (and b004, which both rebuild game_status_history).
     result = database.migrate()
-    assert [m.version for m in result.applied] == [3, 4, 5]
+    assert [m.version for m in result.applied] == [3, 4, 5, 6]
 
     with database.connection() as conn:
         rows = conn.execute(

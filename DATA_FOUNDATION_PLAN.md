@@ -6,17 +6,19 @@ betting **recommendation** engine.
 ## Status
 
 **Phase A is complete**, including the a003 integrity patch. **Phase B is
-complete** (migrations 001–005, schema v5): raw-response storage, ingestion-run
-tracking, sportsbook events/markets/outcomes, point-in-time price snapshots, the
-Odds API ingestion service, and the `ingest-odds` CLI now exist. All 454 tests
-pass under Ruff and mypy.
+complete** (migrations 001–006, schema v6), including the `b006` integrity
+repair: raw-response storage, ingestion-run tracking, sportsbook
+events/markets/outcomes, point-in-time price snapshots, the Odds API ingestion
+service, and the `ingest-odds` CLI now exist, with team/sport validation,
+stale-metadata protection, transition-aware price deduplication, and correct
+failed-request counting. All 470 tests pass under Ruff and mypy.
 
 Phases C–E below remain planning; each begins only on explicit instruction.
 
 | Phase | Scope | Status |
 | --- | --- | --- |
 | A | Database engine, migrations, core entities, `db-init` | ✅ Complete (schema v3) |
-| B | Raw responses, ingestion runs, sportsbook odds | ✅ Complete (schema v5) |
+| B | Raw responses, ingestion runs, sportsbook odds | ✅ Complete (schema v6, incl. `b006` integrity repair) |
 | C | Kalshi public events, markets, books, trades | ◻ Not started |
 | D | Official providers, canonical matching | ◻ Not started |
 | E | Point-in-time builder, quality rules, leakage tests | ◻ Not started |
@@ -386,6 +388,20 @@ appears in any stored column or any output.
 | 5 | Added `RawExchange` + `fetch_odds_raw()` to the existing adapter | The ingestor needs the raw bytes *and* the exchange metadata before parsing, and must survive one malformed record. `get_odds()` normalizes eagerly and can raise mid-parse, so a raw fetch that normalizes per-event downstream is the required feature — added additively to the one client, never a second one. |
 | 6 | Outcome identity key is `(market, normalized_name, point_key)` with a NOT NULL `point_key` sentinel | The line is part of the identity ("Over 8.5" ≠ "Over 9.5"); a nullable point would let an h2h outcome insert twice, since SQLite treats two NULLs as distinct in a UNIQUE constraint. |
 | 7 | `implied_probability` is stored (raw, vig-inclusive) | An exact arithmetic transform of the preserved American price, stored for convenience. **No de-vigging** — fair value is a later phase. The original price is preserved exactly regardless. |
+
+#### Phase B integrity repair (migration `b006`)
+
+Four correctness defects were found after the initial Phase B landing and
+repaired before Phase C. Migrations `b004`/`b005` are immutable; the schema
+change is the additive migration `b006`, the rest are repository/ingestor fixes.
+
+| # | Root cause | Fix |
+| --- | --- | --- |
+| 1 | **Team names were defaulted to `''`.** `_ingest_event` stored `event.home_team or ""`, so a blank or missing team produced a well-formed-looking row no matcher could ever resolve. | `_validate_event` now rejects a missing/blank home team, a missing/blank away team, and two teams that normalize identically. The event is counted as rejected and the run continues; no empty string is ever stored. |
+| 2 | **Response sport was not checked against the request.** A `basketball_nba` payload returned to the `baseball_mlb` endpoint would have been stored under the MLB league. | `_validate_event` takes the requested endpoint's `expected_sport_key` and rejects any event whose `sport_key` differs, so a mismatched payload is counted, not persisted. |
+| 3 | **Stale backfill regressed current metadata.** The event/market upserts took `max(last_observed_at, observed_at)` but overwrote the metadata columns unconditionally, so an older backfill rewound the current commence time, team text, and provider update times. | The upserts now refresh mutable current-state **only when `observed_at` is strictly newer** than the stored `last_observed_at`; older-or-equal observations leave current metadata untouched. Equal timestamps retain the earlier-recorded value — deterministic under ordered replay. Backfilled *snapshots* are still preserved. |
+| 4 | **A price reversal was silently dropped.** `UNIQUE (sb_outcome_id, content_hash)` excluded `observed_at`, so `-110 → -120 → -110` with missing provider timestamps discarded the third observation (identical hash to the first) — a lost transition. | Migration `b006` rebuilds the table with `UNIQUE (sb_outcome_id, observed_at, content_hash)`, and `append_price_snapshot` collapses an observation only when it matches its **immediate temporal predecessor**. Exact replay and repeated backfill stay idempotent; a reversal appends. See `DATA_ARCHITECTURE.md` §3.6.1. |
+| 5 | **Failed HTTP requests counted as zero.** `requests_made` was set to 1 only after a *successful* fetch, so an `OddsApiHTTPError` run recorded `requests_made = 0`. | A completed 4xx/5xx round-trip now records `requests_made = 1` (and preserves the error body); a failure before any response arrives stays `0`. |
 
 ---
 
