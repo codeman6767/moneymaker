@@ -4,9 +4,10 @@ Concrete, staged implementation design for official MLB/NBA data, weather, and
 canonical matching.
 
 > **Status: Provider selection and implementation design complete; implementation
-> not started.** No Phase D provider client, migration, or repository has been
-> written. This document is the build contract; providers are chosen in
-> `PHASE_D_PROVIDER_DECISIONS.md`.
+> not started.** No Phase D provider client, migration, repository, ingestion
+> service, or CLI command has been written, and no live provider call was made.
+> This document is the build contract; providers are chosen in
+> `PHASE_D_PROVIDER_DECISIONS.md` (doc-review date 2026-07-23).
 
 Companion documents: `PHASE_D_PROVIDER_DECISIONS.md`, `DATA_ARCHITECTURE.md`,
 `POINT_IN_TIME_DATA.md`, `ENTITY_MATCHING.md`, `DATA_FOUNDATION_PLAN.md`.
@@ -18,399 +19,523 @@ Companion documents: `PHASE_D_PROVIDER_DECISIONS.md`, `DATA_ARCHITECTURE.md`,
 **Reuse unchanged** (no duplication permitted):
 
 - `sports_quant/http_policy.py` — GET-only, host+path allow-list. Phase D adds
-  `for_mlb_statsapi()`, `for_balldontlie()`, `for_nba_stats()`, `for_open_meteo()`,
-  `for_nws()` host rules. **The method rule (`GET` only) is never relaxed.**
+  `for_mlb_statsapi()`, `for_balldontlie()`, `for_nws()`, `for_open_meteo()` host
+  rules. **The method rule (`GET` only) is never relaxed.** `stats.nba.com` is
+  **not** added (not selected).
 - `sports_quant/redaction.py` — `sanitize_url/params/headers`, `STORABLE_RESPONSE_HEADERS`.
-- `sports_quant/providers/raw_exchange.py` — `RawExchange` + `build_exchange` (the
-  one sanitized capture used by every provider).
+- `sports_quant/providers/raw_exchange.py` — `RawExchange` + `build_exchange`
+  (the one sanitized capture used by every provider).
 - `sports_quant/db/repositories/{raw_responses,ingestion_runs}.py` — raw-response
   preservation and run tracking. **No second audit system.**
 - `sports_quant/db/schema.py` — `to_iso`, timestamp CHECK shape, provider
   constants, `APPEND_ONLY_TABLES` registry (extended, not replaced).
 - `sports_quant/db/normalize.py` — the single name normaliser (write + read).
-- `sports_quant/db/engine.py` — connections, transactions, migration runner,
-  `split_sql_statements`.
+- `sports_quant/db/engine.py` — connections, transactions, migration runner.
 - `streaming.event_envelope.canonical_json` — the one content hasher.
 - `sports_quant/db/ids.py` — ULID + deterministic id construction (add prefixes).
+- The Odds API (`providers/odds_api.py`) + Kalshi (`providers/kalshi.py`) clients
+  and their Phase B/C ingestion — **reused as-is, never duplicated.** They already
+  supply sportsbook prices and Kalshi markets/books/trades.
 - `probability/datasets.py::GameStateDataset` — the Phase E output contract; Phase D
-  supplies the real rows/labels it will consume. **Untouched by D.**
+  supplies the real rows/labels. **Untouched by D.**
 
 **Extend (additive, test-covered):**
 
-- `sports_quant/config.py` — add the Phase D settings (`NBA_DATA_API_KEY` etc.,
-  pinned base URLs). Read-only invariants unchanged.
-- `sports_quant/cli.py` — register the Phase D sub-commands.
+- `sports_quant/config.py` — add Phase D settings (`NBA_DATA_API_KEY`, optional
+  `WEATHER_API_KEY`/`SPORTRADAR_*`) and **pinned base URLs** (`MLB_STATS_API_BASE_URL`,
+  `NWS_BASE_URL`, `OPEN_METEO_BASE_URL`). Read-only invariants unchanged.
+- `sports_quant/cli.py` — register the Phase D sub-commands (incl. `provider-audit`).
 - `sports_quant/db/migrations/` — new immutable migrations `d009`…`d012`.
 - `sports_quant/db/repositories/` — new typed repositories.
 - `sports_quant/db/models.py`, `ids.py`, `schema.py` — new row models / prefixes / constants.
 - `intel/player_matching.py` — **extend, not replace**: back the in-memory
   directory with the new `provider_player_references` + `player_aliases`, keeping
   the `MATCHED / AMBIGUOUS / UNMATCHED` contract.
-- `intel/base.py` models (`PlayerStatus`, `SourceType`, `ChangeType`,
-  `SourceMeta`) — reuse the vocabulary when persisting injury/lineup snapshots.
+- `intel/base.py` vocabulary (`PlayerStatus`, `SourceType`, `ChangeType`,
+  `SourceMeta`) — reused when persisting injury/lineup snapshots.
 
-**Leave untouched:** `evaluation/`, `state/`, `streaming/` (beyond reusing
-`canonical_json`), `tracking/` (frame-level, optional per `CLAUDE.md`),
-`backtest/`, `probability/` internals, `sports_quant/providers/{odds_api,kalshi}.py`
-(reused as-is), all Phase A–C migrations (immutable).
+**Leave untouched:** `evaluation/`, `state/`, `streaming/` (beyond `canonical_json`),
+`tracking/` (frame-level, optional per `CLAUDE.md`), `backtest/`, `probability/`
+internals, the Odds/Kalshi provider clients, all Phase A–C migrations (immutable).
 
 **Quarantine (unchanged):** `gateway/` stays quarantined and is never imported by
-any Phase D code. An isolation test (mirroring `test_isolation.py`) will assert no
-Phase D module imports `gateway` and that the live lanes never import
-`sports_quant.db`.
+any Phase D code. An isolation test asserts no Phase D module imports `gateway`
+and the live lanes never import `sports_quant.db`.
+
+**Offline supplements are not runtime dependencies:** pybaseball/Statcast/FanGraphs
+(MLB) and **hoopR** (NBA) are offline-only, imported across a typed **Parquet**
+boundary. They are **not** in core `pyproject.toml`, **not** required at live
+startup, and **never** live-called by the recommendation app. **R is never
+required at runtime.** SportsDataIO Discovery Lab is an optional delayed
+**comparison** source, never the live feed.
 
 ---
 
-## 2. Schema plan (migrations after v8)
+## 2. Provider capability system (D1)
+
+D1 defines **typed provider capabilities** rather than inferring them from a
+provider's name or from mere key possession. This is the mechanism that keeps the
+plan honest about the BALLDONTLIE tiers.
+
+### 2.1 Capability catalogue
+
+`ProviderCapability` (enum), one per data kind: `teams`, `players`, `games`,
+`schedules`, `game_results`, `team_statistics`, `player_statistics`,
+`inning_lines`, `quarter_lines`, `injuries`, `probable_pitchers`, `lineups`,
+`confirmed_pregame_starters`, `plays`, `substitutions`, `correction_timestamps`,
+`venues`, `historical_depth`, `live_availability`.
+
+### 2.2 Capability states
+
+`CapabilityState` (enum): `supported`, `unsupported`, `paid_tier_required`,
+`best_effort`, `unavailable`, `unknown_until_audited`.
+
+### 2.3 Declared, not inferred
+
+Each provider ships a typed **capability declaration** (a table of
+`{capability: state}`) plus its **selected tier** (for BALLDONTLIE: `free |
+all_star | goat`). The declaration is the source of truth; an ingestor consults it
+before requesting a capability and records the state on every affected row/DQ
+entry. Examples (per `PHASE_D_PROVIDER_DECISIONS.md`, re-verified at D1):
+
+- **MLB StatsAPI:** schedules/games/results/inning_lines/team+player_statistics/
+  probable_pitchers/lineups(posted)/venues/rosters = `supported`;
+  `confirmed_pregame_starters` = `unavailable`; `correction_timestamps` =
+  `unsupported` (inferred via content hash → `best_effort`).
+- **BALLDONTLIE @ GOAT:** teams/players/games/schedules/game_results/
+  player_statistics/team_statistics/injuries/plays/quarter_lines(derivable) =
+  `supported`; `lineups` = `best_effort` (*when available*);
+  `confirmed_pregame_starters` = `unavailable`; `correction_timestamps` =
+  `unsupported`. At **ALL-STAR** the box/plays/lineups capabilities become
+  `paid_tier_required`; at **Free**, player_statistics/injuries/box/plays/lineups
+  are all `paid_tier_required`.
+- **NWS / Open-Meteo:** weather forecast/actual = `supported`; Open-Meteo adds the
+  leakage-free historical-forecast = `supported`; NWS non-US = `unavailable`.
+
+### 2.4 Tier-error semantics (mandatory)
+
+**Key possession never implies GOAT access.** A provider tier/authorization error
+(e.g. BALLDONTLIE `403`/quota-for-tier) is classified and reported as
+**"capability unavailable for current subscription tier"** and written as a
+`data_quality_issues` / capability record — **never** as an invalid key, a network
+bug, or an application defect. The ingestion run finishes with an honest status
+(the capability was unavailable, not "failed"), and other capabilities proceed.
+
+---
+
+## 3. Schema plan (migrations after v8)
 
 New immutable migrations, one global sequence continuing from `c008` (v8):
 
 | Version | Migration | Adds |
 | --- | --- | --- |
-| 009 | `d009_provider_infra` | `provider_team_references`, `provider_player_references`, `provider_game_references`, `venues`, `venue_aliases`, `entity_match_decisions`, `match_candidates`, `data_quality_issues` |
+| 009 | `d009_provider_infra` | `provider_team_references`, `provider_player_references`, `provider_game_references`, `venues`, `venue_aliases`, `entity_match_decisions`, `match_candidates`, `data_quality_issues`, `provider_capabilities` |
 | 010 | `d010_official_games_stats` | `game_schedule_snapshots`, `game_result_snapshots`, `team_game_statistics`, `player_game_statistics`, `mlb_inning_lines`, `roster_snapshots`, `probable_pitcher_snapshots`, `lineup_snapshots`, `lineup_players` |
-| 011 | `d011_nba_specifics` | `nba_quarter_lines`, `injury_snapshots` |
+| 011 | `d011_nba_specifics` | `nba_quarter_lines`, `injury_snapshots`, `play_snapshots` (GOAT plays / substitutions; sport-agnostic-ish) |
 | 012 | `d012_weather` | `weather_snapshots` |
 
-Grouping follows the D2–D5 stages (§9). `venues`/`match`/`references`/`quality`
-land first (D1) because every later stage references them.
+### 3.1 Universal columns (every time-sensitive table)
 
-### 2.1 Universal columns (every time-sensitive table)
+Following Phase B/C, **every** snapshot/observation row carries: `provider`,
+`provider_timestamp` (nullable), `published_at` (nullable), `observed_at`
+(NN — the PIT cutoff, `= raw_responses.received_at`), `ingested_at`, `run_id`
+(→ `ingestion_runs`), `raw_response_id` (→ `raw_responses`), `raw_response_hash`,
+`content_hash`, `created_at`. Mutable current-state tables (`venues`, the
+references, `entity_match_decisions` review columns) use the **c008 first/current
+provenance** (`first_raw_response_id` immutable + `current_raw_response_id` /
+`current_raw_response_hash`). Append-only observation tables go in
+`schema.APPEND_ONLY_TABLES` with `BEFORE UPDATE/DELETE` triggers.
 
-Following the established Phase B/C pattern, **every** snapshot/observation row
-carries:
+### 3.2 New / notable tables
 
-```
-provider              TEXT NOT NULL        -- e.g. 'mlb_statsapi','balldontlie','open_meteo'
-provider_timestamp    TEXT                 -- provider's own event/update time (nullable)
-published_at          TEXT                 -- when the SOURCE published it (nullable; e.g. injury PDF stamp)
-observed_at           TEXT NOT NULL        -- when WE received the bytes (= raw_responses.received_at) -- the PIT cutoff
-ingested_at           TEXT NOT NULL        -- when WE wrote the row
-run_id                TEXT NOT NULL REFERENCES ingestion_runs(run_id)
-raw_response_id       TEXT NOT NULL REFERENCES raw_responses(raw_response_id)   -- provenance (id)
-raw_response_hash     TEXT NOT NULL        -- provenance (hash) -- survives export/merge
-content_hash          TEXT NOT NULL        -- dedup identity of the observation content
-created_at            TEXT NOT NULL
-```
+- `provider_capabilities` — persisted capability declarations
+  `(provider, tier, capability) → state`, with `observed_at`/`run_id` provenance,
+  so a corpus records which capabilities were available (and at which tier) when
+  each row was ingested. Written by `provider-audit` and each ingestor.
+- `provider_{team,player,game}_references` — `(provider, provider_id)` UNIQUE →
+  canonical id (nullable until matched) + `match_decision_id`. Crosswalks; no
+  second canonical-game table (`games.official_provider/official_game_key` is the
+  anchor).
+- `venues` / `venue_aliases` — canonical venue (`latitude`, `longitude`,
+  `timezone`, `roof_type ∈ {open,retractable,dome,fixed,indoor}`, `is_outdoor`
+  derived) + provider alias strings.
+- `game_schedule_snapshots` / `game_result_snapshots` — append-only schedule +
+  result observations; results carry `is_correction`.
+- `team_game_statistics` / `player_game_statistics` — append-only box lines; typed
+  key columns + canonical-JSON `extra`.
+- `mlb_inning_lines` / `nba_quarter_lines` — append-only per-period lines.
+- `roster_snapshots` — append-only membership.
+- `probable_pitcher_snapshots` — append-only `status ∈ {probable,confirmed,scratched}`
+  with `superseded_by`; **one table** covers "probable" and "confirmed starting
+  pitcher" as states in one announcement timeline (documented deviation from the
+  separate-item listing).
+- `lineup_snapshots` + `lineup_players` — append-only lineup header + ordered
+  players; `is_confirmed`, `confirmed_at`. For NBA, `confirmed_pregame_starters`
+  rows exist **only** when a provider observation truly supplied confirmed
+  starters before the cutoff; otherwise the capability is recorded `unavailable`.
+- `injury_snapshots` — append-only `status` (reuse `intel.PlayerStatus`), `reason`,
+  `published_at`, `is_correction`, `source_type` (reuse `intel.SourceType`).
+  **Absence of an injury row is never "healthy"** — it is `unknown`, and a missing
+  provider capability is a `data_quality_issues` record.
+- `play_snapshots` — append-only GOAT plays / substitution events (NBA), or MLB
+  play events; supports lineup-stint reconstruction where available.
+- `weather_snapshots` — append-only `is_forecast` + `forecast_for`,
+  temp/wind/precip/humidity, `is_dome`; forecast-vs-actual kept distinct.
+- `entity_match_decisions` — decision log (`ENTITY_MATCHING.md` §7); append-only
+  except review columns.
+- `match_candidates` — **normalized child** of `entity_match_decisions` (one row
+  per candidate + per-candidate score/tier), mirroring `kalshi_orderbook_levels`.
+- `data_quality_issues` — `severity ∈ {blocking,issue,note}`, `rule_code`,
+  `entity_type`, `entity_id`, `description`, `detected_at`, `resolved_at`; also
+  records capability gaps (`DQ-CAP-*`) and UTC-fallback local-date notes
+  (`DQ-TZ-*`).
 
-Mutable current-state tables (`venues`, canonical references, `entity_match_decisions`
-review columns) additionally use the **c008 first/current provenance pattern**:
-`first_raw_response_id` (immutable) + `current_raw_response_id` /
-`current_raw_response_hash` (move only on a strictly-newer observation).
-
-Append-only observation tables go in `schema.APPEND_ONLY_TABLES` and get
-`BEFORE UPDATE/DELETE` triggers, exactly like `sportsbook_price_snapshots` and the
-Kalshi snapshot tables.
-
-### 2.2 Table sketches (authoritative DDL written at implementation time)
-
-- **`provider_game_references`** — `(provider, provider_game_id)` UNIQUE →
-  `game_id` (nullable until matched) + `match_decision_id`; the crosswalk from a
-  provider's game id to the canonical `games.game_id`. `games.official_provider` /
-  `games.official_game_key` still hold the single authoritative anchor.
-- **`provider_team_references`** / **`provider_player_references`** — analogous
-  crosswalks to `teams.team_id` / `players.player_id`, each with `match_decision_id`.
-- **`venues`** — canonical venue: `venue_id` (deterministic), `name`, `city`,
-  `latitude`, `longitude`, `timezone`, `roof_type` (`open|retractable|dome|fixed|indoor`),
-  `is_outdoor` derived. Mutable current-state (c008 provenance).
-- **`venue_aliases`** — provider venue strings → `venue_id` (mirrors `team_aliases`).
-- **`game_schedule_snapshots`** — append-only provider observation of a game's
-  schedule attributes (scheduled start, venue, doubleheader number/type, neutral
-  site, status detail). **Drives** `game_status_history` (the existing canonical
-  append-only status timeline) via `GameRepository.record_status`; the snapshot
-  row carries the richer provider payload and its own provenance.
-- **`game_result_snapshots`** — append-only home/away score, `status`, `is_final`,
-  `is_correction`; the result label source. Sport-agnostic.
-- **`team_game_statistics`** / **`player_game_statistics`** — append-only box
-  lines per (game, team|player, provider, observed_at); wide but typed key stat
-  columns + a canonical-JSON `extra` for the long tail. Sport-agnostic.
-- **`mlb_inning_lines`** — append-only per (game, inning, half) R/H/E.
-- **`nba_quarter_lines`** — append-only per (game, period, team) points.
-- **`roster_snapshots`** — append-only (team, season, provider, observed_at)
-  membership; feeds player matching / eligibility.
-- **`probable_pitcher_snapshots`** — append-only (game, team, provider, observed_at)
-  pitcher ref + `status` (`probable|confirmed|scratched`). **One table covers both
-  "probable" and "confirmed starting pitcher"** as states in the announcement
-  timeline (with an optional `superseded_by`), avoiding a second table for one
-  concept — documented deviation from the task's separate-item listing.
-- **`lineup_snapshots`** + **`lineup_players`** — append-only lineup header +
-  ordered player rows (`slot`, `position`), `is_confirmed`, `confirmed_at`.
-- **`injury_snapshots`** — append-only (player, provider, observed_at) `status`
-  (reuse `intel.PlayerStatus`), `reason`, `published_at`, `is_correction`,
-  `source_type` (reuse `intel.SourceType`).
-- **`weather_snapshots`** — append-only (game|venue, provider, observed_at)
-  `is_forecast` + `forecast_for` (NN when forecast), temp/wind/precip/humidity,
-  `is_dome`. Forecast-vs-actual kept distinct (leakage vector — see §5).
-- **`entity_match_decisions`** — the decision log from `ENTITY_MATCHING.md` §7:
-  `entity_type`, `source_provider`, `source_ref`, `outcome`
-  (`accepted|rejected|ambiguous|no_candidate|manual_override`), `method`, `score`,
-  `threshold`, `rejection_reason`, `needs_manual_review`, `matcher_version`,
-  `decided_at`. Append-only except the review columns (`reviewed_by/at`,
-  `needs_manual_review`).
-- **`match_candidates`** — **normalized child** of `entity_match_decisions`
-  (one row per candidate considered, with per-candidate score + tier). Deviation
-  from the earlier `candidates_json` blob sketch, mirroring the
-  `kalshi_orderbook_levels` precedent (normalized rows over an opaque JSON blob);
-  documented in `ENTITY_MATCHING.md`.
-- **`data_quality_issues`** — `severity` (`blocking|issue|note`), `rule_code`,
-  `entity_type`, `entity_id`, `description`, `detected_at`, `resolved_at`, plus
-  the Phase D `DQ-*` codes (§5, §6).
-
-**No second canonical-game table.** `games` remains the one canonical game;
-everything above references it or a provider crosswalk to it.
+**No second canonical-game table.** `games` remains the one canonical game.
 
 ---
 
-## 3. Historical correction behaviour (append-only)
+## 4. Historical correction behaviour (append-only)
 
-Every observation is append-only; **current state is derived, never overwritten.**
-The rule reuses the Phase B/C mechanism: dedup an observation only against its
-**immediate temporal predecessor** by content hash; recompute current state from
-the **newest observation by `(observed_at, id)`**; an older backfill is stored but
-never regresses current state (deterministic tie-break by monotonic ULID).
+Append-only; **current state is derived, never overwritten** — dedup an
+observation against its immediate temporal predecessor by content hash; recompute
+current state from the newest observation by `(observed_at, id)`; older backfills
+are stored but never regress current state (deterministic ULID tie-break).
 
 | Event | Representation | Current-state selection |
 | --- | --- | --- |
-| Postponed game | new `game_schedule_snapshots` + `game_status_history` row `status='postponed'`; `games.scheduled_start` updated, `original_start` immutable | newest status observation |
-| Rescheduled game | new snapshot with new `game_date_local`/start; `official_game_key` stable across the move | newest observation; provider key anchors identity |
-| Cancelled game | status `cancelled` snapshot | newest observation |
-| Suspended MLB game | status `suspended` then `in_progress`/`final` on resumption; one `game_id` | newest observation |
-| MLB doubleheader | two `games` rows (`game_number` 1/2); each its own snapshots | per-game newest |
-| Score correction | new `game_result_snapshots` with `is_correction=1`; prior row preserved | newest result observation |
-| Stat correction | new `team/player_game_statistics` row (changed content hash); prior preserved | newest observation |
-| Probable→confirmed→scratched pitcher | successive `probable_pitcher_snapshots` (`status` transitions, `superseded_by`) | newest observation |
+| Postponed / rescheduled / cancelled / suspended game | new `game_schedule_snapshots` + `game_status_history` status row; `games.scheduled_start` updated, `original_start` immutable; `official_game_key` stable across a move | newest status observation |
+| MLB doubleheader | two `games` rows (`game_number` 1/2), each its own snapshots | per-game newest |
+| Score / stat correction | new `game_result_snapshots` / `*_game_statistics` row (`is_correction`, changed hash); prior preserved | newest observation |
+| Probable→confirmed→scratched pitcher | successive `probable_pitcher_snapshots` (`status`, `superseded_by`) | newest observation |
 | Lineup change / NBA late scratch | new `lineup_snapshots`/`injury_snapshots` observation; prior preserved | newest by `observed_at` |
-| Injury status change | new `injury_snapshots` (reuse `intel.PlayerStatus`) | newest by `observed_at` |
+| Injury status change | new `injury_snapshots` (reuse `intel.PlayerStatus`); absence ≠ healthy | newest by `observed_at` |
 | Weather forecast change | new `weather_snapshots` (`is_forecast=1`, `forecast_for` fixed, `observed_at` advances) | as-of `observed_at ≤ cutoff` (never the actual) |
 
-**Older backfill never regresses current metadata** — proven the same way as the
-Phase C `c008` provenance/stale-backfill tests.
+**Older backfill never regresses current metadata** — proven the Phase C c008 way.
 
 ---
 
-## 4. Canonical game & market matching
+## 5. Canonical game & market matching
 
-Implements `ENTITY_MATCHING.md` §4–§6; deterministic first, ambiguity never
-silently accepted, **market price never used as evidence**.
+Implements `ENTITY_MATCHING.md` §4–§6; deterministic first; ambiguity never
+silently accepted; **market price never used as evidence**.
 
-**Schedule key:** `(league_id, game_date_local, home_team_id, away_team_id, game_number)`,
-each team resolved through team matching first (fail → stop, `no_candidate`).
-`game_date_local` uses the **home venue's timezone** (`venues.timezone`), not UTC.
+### 5.1 Venue-aware local date (`game_date_local`) — resolution hierarchy
 
-**Tiers (per `ENTITY_MATCHING.md` §4.2), score / condition:**
+`game_date_local` is resolved by this hierarchy, **not** home-venue-only:
 
-| Tier | Method | Score | Condition |
-| --- | --- | --- | --- |
-| 1 | `official_key` | 1.00 | provider exposes the official game id (StatsAPI `gamePk`, balldontlie game id) |
-| 2 | `schedule_key_exact` | 0.95 | both teams resolved, same local date, start within **±90 min** |
-| 3 | `schedule_key_window` | 0.88 | both teams resolved, start within **±12 h** (date-boundary/postponement drift) |
-| 4 | `title_rules` | 0.85 | Kalshi only — parsed title + `rules_primary` cross-check |
+1. **Actual event venue timezone** — the timezone of the venue the game is
+   actually played at (from `venues.timezone` for the resolved event venue,
+   including neutral/temporary/relocated sites). Highest confidence.
+2. **Official provider-supplied local game date / timezone**, when reliably
+   supplied (e.g. StatsAPI game local date) — use it directly.
+3. **Canonical home venue timezone** — fallback only when the actual event venue
+   is unknown.
+4. **UTC calendar date** — final fallback only. When used: **lower the match
+   confidence**, write a `data_quality_issues` note (`DQ-TZ-001`), and **never**
+   treat it as equivalent to an actual venue timezone.
 
-**Thresholds:** accept ≥ **0.85**; two or more candidates in the winning tier →
-**AMBIGUOUS** (`needs_manual_review=1`, never fall through to a weaker tier); zero
-candidates → **no_candidate** (`needs_manual_review=1`). Thresholds stored per
-decision. Deterministic tie-break by candidate id when scores tie. Hard cases
-(neutral site swap, postponement, reschedule, both doubleheader types, suspension)
-per `ENTITY_MATCHING.md` §4.3. Every attempt writes exactly one
-`entity_match_decisions` row plus its `match_candidates` children — including the
-losers. Point-in-time: a dataset as of T may use only decisions with
-`decided_at ≤ T` (DQ-PIT-010).
+### 5.2 Schedule key & tiers
 
-Chain: **official game → canonical `games`** (D5 populates `games` +
-`official_provider/key`), then **sportsbook_events → games** and **kalshi_events/
-markets → games** by the same schedule key, each recording a decision. Kalshi adds
-the title/rules cross-check and `rules_hash`-change detection (deferred from Phase C).
+Key: `(league_id, game_date_local, home_team_id, away_team_id, game_number)`,
+each team resolved through team matching first (fail → `no_candidate`). Tiers per
+`ENTITY_MATCHING.md` §4.2: `official_key` 1.00 → `schedule_key_exact` 0.95 (±90 min)
+→ `schedule_key_window` 0.88 (±12 h) → `title_rules` 0.85 (Kalshi). Accept ≥ 0.85;
+≥2 candidates in the winning tier → **AMBIGUOUS** (never fall through);
+0 candidates → **no_candidate**; both `needs_manual_review=1`. A UTC-fallback local
+date (§5.1 tier 4) caps the achievable tier below `schedule_key_exact`.
+Deterministic tie-break by candidate id. Every attempt writes one
+`entity_match_decisions` row + `match_candidates` children (incl. losers). PIT:
+joins use only decisions with `decided_at ≤ cutoff` (DQ-PIT-010).
+
+Chain: official game → canonical `games` (D5 populates `games` +
+`official_provider/key`); then sportsbook_events → games and kalshi_events/markets
+→ games (Kalshi adds title/rules cross-check + `rules_hash`-change detection).
+
+### 5.3 Planned matching tests (venue-aware local date)
+
+D5 tests must cover: (1) ordinary home game, (2) neutral-site NBA game,
+(3) international MLB game, (4) temporary venue, (5) relocated game, (6) missing
+event venue (falls to home venue, then UTC with lowered confidence + `DQ-TZ-001`),
+(7) game crossing a UTC calendar boundary (7pm PT = next-day UTC), (8) doubleheader
+at a temporary venue. Plus the existing determinism-under-shuffle, ambiguity-refusal,
+and decision-completeness suites.
 
 ---
 
-## 5. Player matching (extends `intel/player_matching.py`)
+## 6. Player matching (extends `intel/player_matching.py`)
 
 Keep the `MATCHED / AMBIGUOUS / UNMATCHED` contract and the deterministic
 normaliser; **do not replace it.** Back the directory with
-`provider_player_references` + `player_aliases`.
-
-Evidence, in order: **provider player id** (exact → MATCHED outright) →
-`(team, normalized_full_name)` → `(league, normalized_full_name)`, with **suffix**
-binding (a present suffix must match) and **active-season** filtering. Birth date
-used **only** when legitimately supplied and needed to break a genuine collision
-(e.g. two same-name players active the same season). Two players are **never**
-resolved on name alone → AMBIGUOUS. An unknown player is UNMATCHED (a curation
-task), **never** a silently-created duplicate canonical player. The Chadwick
-register bridges MLBAM↔other ids for MLB; balldontlie ids anchor NBA. Every
-resolution writes an `entity_match_decisions` row (`entity_type='player'`).
+`provider_player_references` + `player_aliases`. Evidence order: provider player id
+(exact → MATCHED) → `(team, normalized_full_name)` → `(league, normalized_full_name)`,
+with suffix binding and active-season filtering; birth date only when legitimately
+supplied and needed to break a genuine collision. Two players are **never** resolved
+on name alone → AMBIGUOUS; an unknown player is UNMATCHED (never a silently-created
+duplicate). Chadwick bridges MLBAM↔ids (MLB); BALLDONTLIE ids anchor NBA. Every
+resolution writes an `entity_match_decisions` row.
 
 ---
 
-## 6. Point-in-time & leakage rules (authoritative time per category)
+## 7. Point-in-time & leakage rules (authoritative time per category)
 
 `observed_at` (= `raw_responses.received_at`) is the **only** cutoff for every
 as-of query and training join; `provider_timestamp`/`published_at` are for lag
-measurement and within-provider ordering only, **never** cutoffs.
+measurement and within-provider ordering only.
 
 | Hazard | Authoritative time | Defence | Rule |
 | --- | --- | --- | --- |
 | Final scores in pregame data | result `observed_at` | results read only from `game_result_snapshots` as-of; `games.status` unreachable from `pit/` | DQ-PIT-001 |
-| Postgame stats in pregame rows | stat `observed_at` | box stats never precomputed; computed inside the as-of window | DQ-PIT-002 |
-| Confirmed lineups before publication | lineup `observed_at` | `lineup_snapshots` as-of; `is_confirmed` true only if a snapshot said so by the cutoff | DQ-PIT-003 |
-| Probable-pitcher change before observation | snapshot `observed_at` | `probable_pitcher_snapshots` as-of, never `published_at` | DQ-PIT-004 |
-| Injury status before publication | injury `observed_at` | `injury_snapshots` as-of; `published_at` for lag only | DQ-PIT-004 |
-| NBA late scratch before observation | injury/lineup `observed_at` | as-of on `observed_at` | DQ-PIT-004 |
+| Postgame stats in pregame rows | stat `observed_at` | computed inside the as-of window; never precomputed | DQ-PIT-002 |
+| Confirmed lineups / starters before publication | lineup `observed_at` | `lineup_snapshots` as-of; NBA `confirmed_pregame_starters` present **only** if truly observed before the cutoff, else `unavailable` | DQ-PIT-003 |
+| Probable-pitcher / injury / late scratch before observation | snapshot `observed_at` | `probable_pitcher_snapshots` / `injury_snapshots` as-of, never `published_at` | DQ-PIT-004 |
 | Future weather forecast | forecast `observed_at`, subject `forecast_for` | only forecasts with `observed_at ≤ cutoff`; the *actual* is never a pregame feature | DQ-PIT-005w |
 | Corrected stats before the correction was seen | correction `observed_at` | corrections are new appended rows; as-of hides later corrections | DQ-PIT-002 |
-| Closing prices before the cutoff | price `observed_at` | Phase B `sportsbook_price_snapshots` as-of; closing line evaluation-only module | DQ-PIT-005 |
-| Future match decisions | `entity_match_decisions.decided_at` | joins use only `decided_at ≤ cutoff` | DQ-PIT-010 |
+| Closing prices before the cutoff | price `observed_at` | Phase B snapshots as-of; closing line evaluation-only | DQ-PIT-005 |
+| Future match decisions | `decided_at` | joins use only `decided_at ≤ cutoff` | DQ-PIT-010 |
 | Cross-provider clock skew | `observed_at` (our single clock) | never order across providers by `provider_timestamp` | DQ-PIT-009 |
 
-Adversarial fixtures (one planted leak per rule) are a **Phase E** gate; Phase D
-supplies the schema, `observed_at` discipline, and as-of accessors they test.
+Adversarial fixtures (one planted leak per rule) are a **Phase E** gate.
 
 ---
 
-## 7. CLI commands
+## 8. Dry-run contract (consistent with Phases B/C)
 
-All GET-only, read-only, sanitized, idempotent; exit codes reuse the existing
-vocabulary (`0` success incl. clean skip/zero-results; `1` genuine active failure;
-`2` read-only startup violation; `3` db missing/unmigrated). `--dry-run` performs
-the external GET(s) + normalization and **persists nothing** (the Phase B/C
-contract). Every command reports sanitized counts and records an `ingestion_runs`
-row (with the c008 `records_updated` counter).
+**Resolves the earlier contradiction.** For every external-provider ingestion
+command, `--dry-run`:
 
-| Command | Provider | Required | Optional | Notes |
+- **may** perform the approved GET request(s);
+- **may** parse and normalize in memory;
+- **persists absolutely nothing** — **no** `ingestion_runs` row, **no**
+  `raw_responses` row, **no** normalized row, **no** `data_quality_issues` row,
+  **no** `provider_capabilities` row, **no** `entity_match_decisions` row;
+- reports the counts a real run *would* have produced (including would-be
+  rejections and capability gaps), then exits.
+
+A **normal (non-dry) run** records every audit and normalized record: the
+`ingestion_runs` row (with the c008 `records_updated` counter), raw responses,
+normalized rows, capability records, and any `data_quality_issues`. **No CLI
+description or test may claim that a command records an ingestion-run row while
+`--dry-run` is active.** Pure-compute commands (`match-games`, `match-markets`)
+also persist nothing under `--dry-run`.
+
+---
+
+## 9. CLI commands
+
+All GET-only, read-only, sanitized; exit codes reuse the vocabulary (`0` success
+incl. clean skip / zero-results / capability-unavailable; `1` genuine active
+failure; `2` read-only startup violation; `3` db missing/unmigrated). `--dry-run`
+obeys §8 (persists nothing). Rate-limit handling: conservative single-flight,
+exponential backoff on 429/503, **respect the selected BALLDONTLIE tier QPS**;
+a truncated sweep is reported explicitly, never silently capped. A provider
+tier/authorization error → "capability unavailable for current subscription tier"
+(§2.4), recorded, not treated as a bug.
+
+| Command | Provider (tier) | Required | Optional | Notes |
 | --- | --- | --- | --- | --- |
-| `ingest-mlb` | MLB StatsAPI | — | `--from --to` (date range), `--game-pk`, `--include {results,box,probables,lineups}`, `--db --dry-run` | date-range paging by day; idempotent on content hash; zero games ≠ failure |
-| `ingest-nba` | balldontlie (fallback stats.nba.com) | — | `--from --to`, `--game-id`, `--include {results,box,quarters}`, `--db --dry-run` | cursor pagination; free-tier rate-limit backoff |
-| `ingest-injuries --sport nba` | NBA injury PDF (or paid) | `--sport` | `--date`, `--db --dry-run` | parses the official report; `data_quality_issues` on parse failure; `--sport mlb` → StatsAPI transactions |
-| `ingest-lineups --sport mlb` | MLB StatsAPI | `--sport` | `--date`, `--game-pk`, `--db --dry-run` | posted lineups + probable/confirmed pitchers; NBA → limited/unavailable path |
-| `ingest-weather` | Open-Meteo (NWS fallback) | — | `--from --to`, `--game-pk`, `--forecast/--actual`, `--db --dry-run` | outdoor MLB only (gate by `venues.roof_type`); historical-forecast for leakage-free pregame |
+| `provider-audit --provider P` | the named provider | `--provider` | `--db --json` | small non-destructive audit (§10); **never** buys/changes a subscription |
+| `ingest-mlb` | MLB StatsAPI (no key) | — | `--from --to`, `--game-pk`, `--include {results,box,inning,probables,lineups}`, `--db --dry-run` | day-paged; idempotent on content hash; zero games ≠ failure |
+| `ingest-nba` | **BALLDONTLIE GOAT** (`NBA_DATA_API_KEY`) | — | `--from --to`, `--game-id`, `--include {results,box,player-stats,quarters,plays}`, `--db --dry-run` | cursor pagination; GOAT-tier QPS; tier error → capability-unavailable, not failure |
+| `ingest-injuries --sport nba` | BALLDONTLIE GOAT (optional PDF cross-check) | `--sport` | `--date`, `--cross-check-pdf`, `--db --dry-run` | absence ≠ healthy; PDF is an optional independent cross-check |
+| `ingest-lineups --sport mlb` | MLB StatsAPI | `--sport` | `--date`, `--game-pk`, `--db --dry-run` | posted lineups + probable/confirmed pitchers; NBA confirmed starters → unavailable path |
+| `ingest-weather` | **NWS** primary, **Open-Meteo** secondary/historical-forecast | — | `--from --to`, `--game-pk`, `--forecast/--actual`, `--db --dry-run` | outdoor MLB only (gate by `venues.roof_type`); non-US → Open-Meteo |
 | `ingest-venues` | MLB StatsAPI `/venues` | — | `--db --dry-run` | seeds `venues` + `venue_aliases` (coords/roof/tz) |
-| `match-games` | none (compute) | — | `--league`, `--since`, `--db --dry-run` | official→canonical, sportsbook→canonical; writes decisions+candidates |
+| `match-games` | none (compute) | — | `--league`, `--since`, `--db --dry-run` | official→canonical, sportsbook→canonical; venue-aware local date (§5.1) |
 | `match-markets` | none (compute) | — | `--since`, `--db --dry-run` | Kalshi→canonical (title/rules); `rules_hash`-change detection |
 | `matching-review` | none | — | `--entity-type`, `--reason`, `--json` | lists open `needs_manual_review` grouped by reason; read-only |
 
-**Rate-limit handling:** conservative single-flight, exponential backoff on 429/503,
-respect any documented per-tier QPS; a truncated sweep is **reported explicitly**
-(never silently capped), mirroring the Kalshi `--limit` behaviour. **Failure**
-preserves the raw response before parsing, records a sanitized `ingestion_runs`
-failure + `data_quality_issues`, and exits non-zero only when something active
-failed.
+Offline supplements (**not live CLI network commands**): a separate offline
+importer reads hoopR/pybaseball **Parquet** exports into the append-only tables
+with provenance; it makes no live provider call and is not part of app startup.
 
 ---
 
-## 8. Credentials & config
+## 10. Provider audit (before any large backfill)
 
-Add to `sports_quant/config.py` (all `SecretStr`, `.env`-only, sanitized
-everywhere): `nba_data_api_key`, optional `weather_api_key`,
-`sportradar_mlb_api_key`, `sportradar_nba_api_key`; and **pinned base URLs** for
-the undocumented league endpoints (like `PRODUCTION_KALSHI_REST_URL`) so an
-arbitrary host cannot be substituted. `.env.example` gains blank placeholders only
-(done in this planning pass). No-key providers need no variable. Read-only startup
-invariants are unchanged.
+Before D2 or D3 performs a large backfill, `provider-audit --provider P` runs a
+small, non-destructive check and records a `provider_capabilities` snapshot. It
+**must not** make a purchase or change the subscription. It tests:
+
+authentication · **subscription tier** · current games · historical games · stable
+ids · pagination · player statistics · injury access · lineup access · play access
+· timestamp quality · corrections · rate limits · missing fields · sanitized error
+behaviour.
+
+Each capability is recorded as one of the §2.2 states (e.g. GOAT-only endpoints on
+an ALL-STAR key → `paid_tier_required`). The audit is the authoritative source for
+the capability declarations the ingestors consult; a tier limitation it finds is a
+recorded capability state, never an error.
 
 ---
 
-## 9. Implementation stages (D1–D5)
+## 11. Credentials & config
 
-Each subphase is independently green under Ruff + mypy + pytest before the next
-begins. Model column = recommended driver for that stage.
+Add to `sports_quant/config.py` (all `SecretStr`, `.env`-only, sanitized):
+`nba_data_api_key`; optional `weather_api_key`, `sportradar_mlb_api_key`,
+`sportradar_nba_api_key`; and **pinned base URLs** `mlb_stats_api_base_url`,
+`nws_base_url`, `open_meteo_base_url` (defaults per `.env.example`; validated at
+startup like `PRODUCTION_KALSHI_REST_URL`). Clarify in-repo: `NBA_DATA_API_KEY` is
+a **BALLDONTLIE** key; **endpoint access depends on the account tier**; the Phase D
+path **expects GOAT**; a key alone does not grant GOAT. MLB StatsAPI, NWS, Kalshi
+public REST, and Open-Meteo (free) need **no** key. No real key ever enters docs,
+source, or CI. Read-only startup invariants unchanged.
 
-### D1 — Provider infrastructure  ·  model: **OpusPlan** (cross-cutting foundations)
+---
 
-- **Create:** `sports_quant/providers/{mlb_statsapi,balldontlie,nba_stats,open_meteo,nws}.py`
-  (policy-wrapped GET clients returning `RawExchange`), provider config in
-  `config.py`, `http_policy` host rules + `for_*` classmethods, migration
-  `d009_provider_infra`, repositories
-  `db/repositories/{references,venues,matching,data_quality}.py`, models/ids/schema
-  constants, test fixtures (small sanitized samples), an isolation test.
-- **Modify:** `http_policy.py`, `config.py`, `.env.example` (done), `cli.py`
-  (`ingest-venues`), `db/{models,ids,schema}.py`, `pyproject.toml` (packages/testpaths;
-  add a PDF parser dep **only** if the NBA-injury PDF path is built in D3).
+## 12. Implementation stages (D1–D5)
+
+Each subphase is independently green under Ruff + mypy + pytest before the next.
+Model column = recommended driver.
+
+### D1 — Provider infrastructure  ·  model: **OpusPlan**
+
+- **Provider(s):** infrastructure for all selected providers; **required tier:**
+  BALLDONTLIE **GOAT** declared (not yet exercised for backfill). **Optional:**
+  SportsDataIO Discovery Lab client stub (comparison, off by default).
+  **Offline:** none yet (hoopR/pybaseball importers are D2/D3).
+- **Capabilities:** build the typed capability catalogue + states + per-provider
+  declarations + selected-tier record; the tier-error → "capability unavailable
+  for current subscription tier" classifier.
+- **Unavailable-data behaviour:** a `provider_capabilities` record + optional
+  `data_quality_issues` note; never fabricate.
+- **Licensing risk:** confirm §7 verification obligations of the decisions doc
+  before writing clients; pin base URLs.
+- **Create:** `providers/{mlb_statsapi,balldontlie,nws,open_meteo}.py`
+  (policy-wrapped GET, `RawExchange`), `providers/capabilities.py` (types),
+  provider config, `http_policy` host rules + `for_*`, migration
+  `d009_provider_infra`, repositories `db/repositories/{references,venues,matching,
+  data_quality,capabilities}.py`, models/ids/schema constants, `provider-audit`
+  command, test fixtures, isolation test.
+- **Modify:** `http_policy.py`, `config.py`, `.env.example` (done), `cli.py`,
+  `db/{models,ids,schema}.py`, `pyproject.toml`.
 - **Migration:** `d009` (v9). **Tables:** references ×3, venues, venue_aliases,
-  entity_match_decisions, match_candidates, data_quality_issues.
-- **Completion:** migration applies once + idempotent; new hosts GET-only and
-  account/order paths still blocked; no key printed/stored; venues seedable from a
-  mocked StatsAPI fixture; gateway never imported.
-- **Expected blockers:** confirming exact host/path allow-list entries; stats.nba.com
-  header requirements; verifying terms (§7 of decisions doc).
+  entity_match_decisions, match_candidates, data_quality_issues, provider_capabilities.
+- **CLI:** `provider-audit`, `ingest-venues`.
+- **Tests:** migration applies once + idempotent; new hosts GET-only, account/order
+  paths still blocked; no key printed/stored; capability states typed & persisted;
+  tier error → capability-unavailable (not invalid-key); venues seedable from a
+  mocked StatsAPI fixture; gateway never imported; dry-run persists nothing.
+- **Completion:** all above green; **no historical backfill yet**.
+- **Expected blockers:** confirming allow-list host/path entries; re-verifying
+  BALLDONTLIE tier boundaries; terms confirmation.
 
-### D2 — MLB ingestion  ·  model: **Sonnet** (well-scoped, one provider)
+### D2 — MLB ingestion  ·  model: **Sonnet**
 
-- **Create:** `sports_quant/ingest/mlb_ingestor.py`; repositories for schedule/
-  result/stats/inning/roster/probable/lineup; tests (mocked StatsAPI fixtures).
+- **Provider:** MLB StatsAPI (no key). **Tier:** n/a. **Optional/offline:**
+  pybaseball/Statcast/FanGraphs **deferred** (offline Parquet importer only, not a
+  runtime dep). **Cross-check:** none.
+- **Capabilities:** consult the StatsAPI declaration; `confirmed_pregame_starters`
+  = `unavailable`; `correction_timestamps` = `best_effort`.
+- **Create:** `ingest/mlb_ingestor.py`; repositories for schedule/result/stats/
+  inning/roster/probable/lineup; mocked-StatsAPI fixtures + tests.
 - **Modify:** `cli.py` (`ingest-mlb`, `ingest-lineups --sport mlb`).
 - **Migration:** `d010` (v10). **Tables:** game_schedule/result snapshots,
   team/player_game_statistics, mlb_inning_lines, roster_snapshots,
-  probable_pitcher_snapshots, lineup_snapshots, lineup_players. **Provider:** MLB StatsAPI.
-- **Completion:** a mocked date-range sweep persists games (canonical `games` +
-  provenance), results, box, inning lines, probables, lineups; idempotent twice;
-  append-only enforced; every row traces to a raw response; live smoke-test safe.
-- **Expected blockers:** doubleheader/game-number resolution; mapping StatsAPI
-  status codes to canonical `game_status_history`; stat-field coverage.
+  probable_pitcher_snapshots, lineup_snapshots, lineup_players.
+- **Completion:** mocked date-range sweep persists canonical `games` + provenance,
+  results, box, inning lines, probables, posted lineups; idempotent twice;
+  append-only enforced; every row traces to a raw response; `--dry-run` persists
+  nothing; capability records written; live smoke-test safe.
+- **Expected blockers:** doubleheader/game-number; status-code mapping; stat coverage.
 
-### D3 — NBA ingestion  ·  model: **Sonnet** (mirrors D2)
+### D3 — NBA ingestion  ·  model: **Sonnet**
 
-- **Create:** `sports_quant/ingest/nba_ingestor.py`; nba-specific repositories;
-  optional `sports_quant/providers/nba_injury_report.py` (PDF parser) **only if**
-  the injury path is built; tests (mocked balldontlie/stats.nba fixtures + a small
-  fixture PDF).
+- **Provider:** **BALLDONTLIE GOAT** (`NBA_DATA_API_KEY`). **Required tier: GOAT.**
+  **Offline supplement:** **hoopR** via a typed Parquet import boundary (historical
+  PBP/possessions/substitutions/lineup-stints) — **not** a live dependency, **no**
+  R at runtime. **Optional comparison:** SportsDataIO Discovery Lab (delayed;
+  id/field/record comparison; off by default; never the live feed).
+- **Capabilities (per GOAT):** teams/players/games/schedules/game_results/
+  player_statistics/injuries/plays/quarter_lines = `supported`; `lineups` =
+  `best_effort`; `confirmed_pregame_starters` = `unavailable`;
+  `correction_timestamps` = `unsupported`.
+- **Required D3 outputs (must be produced):** provider teams, provider players,
+  schedules, games, game-level results, **available** player statistics,
+  **available** box scores, **available** injuries, provider ids, raw-response
+  provenance.
+- **Conditional D3 outputs (record state, never fabricate):** quarter lines,
+  plays, lineups, confirmed pregame starters, substitutions, correction
+  timestamps — each recorded as `available | unavailable | paid_tier_required |
+  best_effort | provider_history_limited` in `provider_capabilities` +, when
+  missing, a `data_quality_issues` (`DQ-CAP-*`) record. **NBA D3 must not require
+  any conditional field unconditionally.**
+- **Unavailable-data behaviour:** missing injury data is `unknown`, **never**
+  "healthy"; missing starters → `confirmed_pregame_starters = unavailable`;
+  GOAT-thin history → `provider_history_limited`.
+- **Create:** `ingest/nba_ingestor.py`; nba repositories; `ingest/hoopr_import.py`
+  (offline Parquet importer); optional `providers/sportsdataio.py` (comparison
+  stub); optional `providers/nba_injury_report.py` (PDF cross-check) **only if
+  built**; mocked GOAT fixtures (+ small Parquet + optional fixture PDF) + tests.
 - **Modify:** `cli.py` (`ingest-nba`, `ingest-injuries --sport nba`).
-- **Migration:** `d011` (v11). **Tables:** nba_quarter_lines, injury_snapshots
-  (box/result/roster reuse d010). **Provider:** balldontlie (fallback stats.nba.com);
-  injuries: official PDF or paid or **unavailable path**.
-- **Completion:** mocked sweep persists games/results/box/quarters; injuries either
-  ingested from the fixture PDF or the unavailable path records `data_quality_issues`;
-  NBA starters unavailable path exercised; idempotent; append-only.
-- **Expected blockers:** balldontlie free-tier rate limits; stats.nba.com 403/header
-  handling; PDF layout fragility; the honest "no free pregame starters" gap.
+- **Migration:** `d011` (v11). **Tables:** nba_quarter_lines, injury_snapshots,
+  play_snapshots (box/result/roster reuse d010).
+- **Completion:** mocked GOAT sweep persists the **required** outputs; each
+  **conditional** output is recorded with an explicit capability state; a tier
+  error is reported as capability-unavailable (not failure); hoopR Parquet import
+  path exercised offline; idempotent twice; append-only; `--dry-run` persists
+  nothing.
+- **Expected blockers:** GOAT tier verification + QPS; box/plays historical depth
+  (`provider_history_limited`); no free pregame starters; PDF fragility (if built);
+  hoopR export schema mapping.
 
-### D4 — Weather ingestion  ·  model: **Sonnet**
+### D4 — Weather  ·  model: **Sonnet**
 
-- **Create:** `sports_quant/ingest/weather_ingestor.py`; weather repository; tests
-  (mocked Open-Meteo/NWS fixtures).
+- **Provider:** **NWS** primary (US, no key); **Open-Meteo** secondary + the
+  leakage-free historical-forecast (no key). **No paid weather key at D1/D4.**
+- **Capabilities:** forecast/actual `supported`; NWS non-US `unavailable` →
+  Open-Meteo; commercial Open-Meteo `paid_tier_required` (documented, not used).
+- **Create:** `ingest/weather_ingestor.py`; weather repository; mocked NWS/Open-Meteo
+  fixtures + tests.
 - **Modify:** `cli.py` (`ingest-weather`).
 - **Migration:** `d012` (v12). **Tables:** weather_snapshots (venues from d009).
-  **Provider:** Open-Meteo (NWS fallback).
 - **Completion:** forecast + actual persisted distinctly; outdoor-only gating by
-  `venues.roof_type`; leakage-free historical-forecast path; dome venues skipped;
-  idempotent; append-only.
-- **Expected blockers:** venue coord/roof accuracy; Open-Meteo historical-forecast
-  API shape; NWS US-only coverage (Toronto).
+  `venues.roof_type`; leakage-free historical-forecast; dome/indoor skipped;
+  non-US → Open-Meteo; idempotent; append-only; `--dry-run` persists nothing.
+- **Expected blockers:** venue coord/roof accuracy; NWS US-only (Toronto → Open-Meteo);
+  Open-Meteo historical-forecast API shape.
 
-### D5 — Canonical matching  ·  model: **OpusPlan** (subtle correctness)
+### D5 — Canonical matching  ·  model: **OpusPlan**
 
-- **Create:** `sports_quant/matching/{__init__,normalize,teams,players,games,markets,decisions}.py`
-  (import `db/normalize.py` — one normaliser), matching repository glue; tests
-  (determinism under shuffles, ambiguity refusal, every §4.3 hard case,
-  decision-completeness, title/rules disagreement).
+- **Provider:** none (pure compute over ingested data).
+- **Create:** `matching/{__init__,normalize,teams,players,games,markets,decisions,
+  localdate}.py` (import `db/normalize.py` — one normaliser; `localdate.py`
+  implements the §5.1 hierarchy), matching repository glue; tests.
 - **Modify:** `cli.py` (`match-games`, `match-markets`, `matching-review`);
-  `intel/player_matching.py` (back with `player_aliases`/references, API unchanged).
-- **Migration:** none required if `entity_match_decisions`/`match_candidates`
-  landed in d009 (a small `d013` only if review columns need widening). **Populates**
+  `intel/player_matching.py` (back with references/aliases, API unchanged).
+- **Migration:** none if `entity_match_decisions`/`match_candidates` landed in
+  d009 (a small `d013` only if review columns need widening). **Populates**
   `games.official_*`, `provider_*_references`, sportsbook/Kalshi `game_id` +
   `match_decision_id`.
-- **Completion:** a fixture slate matches end-to-end with every decision + candidate
-  recorded; ambiguity/no-candidate never silently accepted; determinism under 100
-  shuffles; price never used as evidence; `matching-review` lists open items.
-- **Expected blockers:** venue-timezone-driven `game_date_local`; doubleheader
-  ambiguity; Kalshi ticker/title/rules parsing; neutral-site orientation.
+- **Tests:** the eight §5.3 venue-aware local-date scenarios; determinism under
+  100 shuffles; ambiguity/no-candidate never silently accepted; every §4.3 hard
+  case; price never used as evidence; decision-completeness; title/rules
+  disagreement; UTC-fallback lowers confidence + writes `DQ-TZ-001`.
+- **Completion:** a fixture slate matches end-to-end with every decision +
+  candidate recorded; `matching-review` lists open items; `--dry-run` persists
+  nothing.
+- **Expected blockers:** venue-timezone edge cases; doubleheader ambiguity; Kalshi
+  ticker/title/rules parsing; neutral-site orientation.
 
 ---
 
-## 10. Verification gates (every subphase)
+## 13. Verification gates (every subphase)
 
-`ruff check .` clean; `mypy . --no-incremental` zero project-source errors (no
-global ignores, no broad `type: ignore`); `pytest -q` zero failures; migrations
-apply once + idempotent (second `db-init` no-ops); **no live network call in the
-test suite** (mocked transports/fixtures only); **no credential** in any output/
-log/stored column (whole-DB sweep like Phase B); `providers-check` still passes;
-**GET-only**; execution remains quarantined; append-only history preserved.
+`ruff check .` clean; `mypy . --no-incremental` zero project-source errors;
+`pytest -q` zero failures; migrations apply once + idempotent (second `db-init`
+no-ops); **no live network call in the test suite** (mocked transports/fixtures);
+**no credential** in any output/log/stored column (whole-DB sweep); **`--dry-run`
+persists nothing** (asserted); `providers-check` still passes; **GET-only**;
+execution quarantined; append-only history preserved; capability states recorded,
+never inferred from key possession.
 
 ---
 
-## 11. Open decisions carried from provider selection
+## 14. Open decisions carried from provider selection
 
-See `PHASE_D_PROVIDER_DECISIONS.md` §7–§8: personal-vs-commercial intent (governs
-whether undocumented endpoints are acceptable at all), NBA-injury mechanism, weather
-licensing, and optional Retrosheet deep-history backfill. These are **user
-decisions**; the plan supports either the MVP (no-paid, risk-labelled) or the
-professional (paid, clean-licence) path without rework, because every provider sits
-behind an adapter.
+See `PHASE_D_PROVIDER_DECISIONS.md` §8: BALLDONTLIE GOAT subscription (the NBA MVP
+needs it), personal-vs-commercial intent, NBA injury cross-check, weather
+licensing, and offline deep-history supplements. These are **user decisions**; the
+plan supports the MVP (StatsAPI + GOAT + NWS/Open-Meteo) or the professional
+(Sportradar/SportsDataIO/Stats Perform) path without rework, because every provider
+sits behind an adapter with a typed capability declaration.

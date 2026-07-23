@@ -230,7 +230,13 @@ retroactively reinterpret old decisions.
 > matches sportsbook events (Phase B, already ingested with `game_id` NULL) and
 > Kalshi events/markets (Phase C, already ingested with `game_id` NULL) to the
 > canonical `games` row by the schedule key below. `game_date_local` is resolved
-> in the **home venue's timezone** from the new `venues` table.
+> by a **venue-aware timezone hierarchy** (`PHASE_D_IMPLEMENTATION_PLAN.md` §5.1):
+> (1) the **actual event venue** timezone (neutral/temporary/relocated sites
+> included), (2) an official provider-supplied local date/timezone when reliable,
+> (3) the **canonical home venue** timezone as a fallback, and (4) the **UTC
+> calendar date** only as a last resort — which **lowers the match confidence** and
+> writes a `DQ-TZ-001` data-quality note rather than being treated as equivalent to
+> a real venue timezone. It is *not* home-venue-only.
 >
 > **`match_candidates` is a normalized table, not a JSON blob.** Where §7 below
 > describes `candidates_json`, Phase D instead stores one `match_candidates` row
@@ -341,10 +347,13 @@ Procedure:
    `basketball_nba` → `lg_nba`).
 2. `home_team` / `away_team` → `team_id` via §3, scoped
    `provider = 'the_odds_api'`. Unresolved team ⇒ stop, `no_candidate`.
-3. `commence_time` → `game_date_local` in the **home venue's** timezone (venue
-   timezone, not UTC and not the runner's local zone — a 7pm PT game is
-   03:00 UTC the following day, and using UTC would place it on the wrong
-   slate).
+3. `commence_time` → `game_date_local` via the **venue-aware timezone hierarchy**
+   (`PHASE_D_IMPLEMENTATION_PLAN.md` §5.1): actual event venue tz → official
+   provider-supplied local date/tz → canonical home venue tz → UTC date (last
+   resort, which lowers confidence and writes `DQ-TZ-001`). Never the runner's
+   local zone — a 7pm PT game is 03:00 UTC the following day, so a UTC date would
+   place it on the wrong slate; that is exactly why UTC is only the last-resort
+   fallback and is flagged when used.
 4. Apply game tiers §4.2.
 5. Persist the decision; on acceptance set `sportsbook_events.game_id` and
    `match_decision_id`.

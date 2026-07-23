@@ -28,12 +28,19 @@ account/balance/position/fill/order column in the schema. All 559 tests pass
 under Ruff and mypy.
 
 **Phase D provider selection and implementation design are complete;
-implementation is not started.** The providers are chosen (MLB StatsAPI, balldontlie,
-Open-Meteo/NWS, official NBA injury report, Chadwick crosswalk; Sportradar/Stats
-Perform as the professional path) and the full schema/migration/CLI/staging plan is
-written — see `PHASE_D_PROVIDER_DECISIONS.md` and `PHASE_D_IMPLEMENTATION_PLAN.md`.
-No Phase D provider client, migration, or repository has been written, and no live
-provider call was made. Phase E remains planning.
+implementation is not started.** The providers are chosen (MLB StatsAPI;
+**BALLDONTLIE at the GOAT tier** for NBA — the free tier does *not* supply box
+scores, player stats, injuries, plays, or lineups; NWS primary + Open-Meteo
+secondary/historical-forecast for weather; hoopR as an offline-only NBA history
+supplement; Chadwick crosswalk; the official NBA injury report as an optional
+cross-check; SportsDataIO Discovery Lab as an optional delayed comparison;
+Sportradar/SportsDataIO commercial/Stats Perform as the professional path). The
+full schema/migration/CLI/staging plan, a typed provider-capability system, a
+`provider-audit` command, a corrected dry-run contract (dry-run persists
+absolutely nothing), and the venue-aware local-date hierarchy are written — see
+`PHASE_D_PROVIDER_DECISIONS.md` and `PHASE_D_IMPLEMENTATION_PLAN.md`. No Phase D
+provider client, migration, or repository has been written, and no live provider
+call was made. Phase E remains planning.
 
 | Phase | Scope | Status |
 | --- | --- | --- |
@@ -560,26 +567,40 @@ is never miscounted as a new insert.
 
 **Depends on:** C. The largest phase; the only one adding network hosts.
 
-**Selected providers (MVP, no-paid, risk-labelled):** MLB StatsAPI (no key) for
-all MLB official data + venues; balldontlie (free `NBA_DATA_API_KEY`) for NBA
-games/results/box, with stats.nba.com as a header-gated fallback; Open-Meteo
-(no key) for weather with NWS (no key) as a US-only fallback; the official NBA
-injury-report PDF as the injury source of record (or an explicit unavailable
-path); Chadwick register for the MLB player-id crosswalk. **Professional path:**
-Sportradar / Stats Perform (paid, betting-licensed) for both sports. The Odds API
-key supplies sportsbook pricing only; the Kalshi public API supplies
-prediction-market data only — neither supplies official statistics.
+**Selected providers:** MLB StatsAPI (no key, risk-labelled) for all MLB official
+data + venues; **BALLDONTLIE at the GOAT tier** (`NBA_DATA_API_KEY`, paid) for NBA
+teams/players/games/results/player-statistics/box-scores/advanced/injuries/plays/
+lineups-when-available — the free tier supplies **none** of the statistics/box/
+injuries/plays/lineups and is insufficient; **hoopR** as an **offline-only**
+historical NBA supplement (PBP/possessions/substitutions/lineup-stints via a typed
+Parquet import boundary, no R at runtime); **NWS** (no key, US) primary weather +
+**Open-Meteo** (no key) secondary and leakage-free historical-forecast; the
+official NBA injury-report PDF as an **optional cross-check** (not the primary
+feed); SportsDataIO Discovery Lab as an **optional delayed comparison** source;
+Chadwick register for the MLB player-id crosswalk. **Professional path:**
+Sportradar / SportsDataIO commercial / Stats Perform (paid, betting-licensed).
+`stats.nba.com` is **not** selected. The Odds API key supplies sportsbook pricing
+only; the Kalshi public API supplies prediction-market data only — neither
+supplies official statistics.
 
-**New credential:** `NBA_DATA_API_KEY` (balldontlie) is the only key the MVP
-needs; every other selected provider is key-less. Optional paid keys
-(`WEATHER_API_KEY`, `SPORTRADAR_*`) stay blank for the MVP. Placeholders are in
-`.env.example`.
+**New credential:** `NBA_DATA_API_KEY` is a **BALLDONTLIE** key; endpoint access
+depends on the **account tier**, and the Phase D NBA path expects **GOAT** (a key
+alone does not grant GOAT). Every other selected provider is key-less
+(MLB StatsAPI, NWS, Open-Meteo). Optional paid keys (`WEATHER_API_KEY`,
+`SPORTRADAR_*`) and pinned base URLs (`MLB_STATS_API_BASE_URL`, `NWS_BASE_URL`,
+`OPEN_METEO_BASE_URL`) are in `.env.example` as blank/default placeholders.
+
+**Provider capabilities are typed and declared, not inferred** from a provider
+name or key possession; a tier limitation is reported as "capability unavailable
+for current subscription tier", never an invalid key or bug. A `provider-audit`
+command verifies auth/tier/capabilities before any large backfill.
 
 **Migrations (planned):** `d009_provider_infra` (v9 — references, venues, match
-decisions/candidates, data-quality), `d010_official_games_stats` (v10),
-`d011_nba_specifics` (v11), `d012_weather` (v12). No second canonical-game table:
-official ids attach to the existing `games.official_provider`/`official_game_key`
-and a `provider_game_references` crosswalk.
+decisions/candidates, data-quality, provider_capabilities), `d010_official_games_stats`
+(v10), `d011_nba_specifics` (v11 — quarter lines, injuries, plays), `d012_weather`
+(v12). No second canonical-game table: official ids attach to the existing
+`games.official_provider`/`official_game_key` and a `provider_game_references`
+crosswalk.
 
 **Staging:** D1 provider infrastructure → D2 MLB → D3 NBA → D4 weather → D5
 matching. Per-stage files, tables, repositories, CLI, tests, completion criteria,
