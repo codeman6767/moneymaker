@@ -11,21 +11,34 @@ Design (mirrors the D2 MLB ingestor and honours the permanent CLAUDE.md rules):
 
 * Official game identity is anchored on ``provider_game_references`` (one row per
   BALLDONTLIE game id); canonical resolution is a Phase D5 concern, so snapshots
-  carry provider ids with NULLABLE canonical ids. **No second canonical game
-  system is created.**
-* NBA schedule/result/box/roster/lineup data reuses the d011 tables. NBA scores
-  map onto ``game_result_snapshots`` (home score -> ``home_runs``, away score ->
-  ``away_runs``, current period -> ``innings_played``), so the corrected D2
-  correction semantics apply unchanged (a previously-final score/winner changing,
-  or a cumulative score decreasing, is a correction; a normal
-  scheduled->in_progress->final progression, a rising score, and a period
-  advancing are not). NBA box team lines reuse ``team_game_statistics`` and NBA
-  player lines reuse ``player_game_statistics`` (the two CHECK-permitted ``role``
-  values are repurposed: ``'batting'`` = the traditional per-player box line,
-  ``'pitching'`` = the advanced-stats line -- keeping their transition anchors
-  distinct so re-polls are idempotent; the sport-neutral stat line lives in
-  ``extra``).
-* Only NBA-specific observations (quarter lines, plays) use the new d012 tables.
+  carry provider ids with NULLABLE canonical ids. **No second canonical game,
+  team, or player system is created.**
+* NBA observations use SPORT-CORRECT typed tables from the d013 repair -- NBA data
+  is never stored as (or exposed through) baseball runs/innings/batting/pitching:
+    - game results -> ``nba_game_results`` (home/away **points**, current
+      **period**), so the corrected D2 correction semantics apply unchanged on
+      points/winner (a previously-final score/winner changing, or a cumulative
+      score decreasing, is a correction; a normal scheduled->in_progress->final
+      progression, a rising score, and a period advancing are not);
+    - team box lines -> ``nba_team_statistics`` (team **points** + a sport-neutral
+      JSON ``stats`` line);
+    - player box + advanced lines -> ``nba_player_statistics`` with an
+      NBA-appropriate ``stat_group`` discriminator (``'traditional'`` = the box
+      line, ``'advanced'`` = the advanced-stats line -- kept as distinct
+      transition anchors so re-polls are idempotent).
+  The baseball-named d011 result/stat tables (``game_result_snapshots`` /
+  ``team_game_statistics`` / ``player_game_statistics``) remain MLB-only.
+* NBA-specific append-only observations use the d012 tables directly:
+  ``nba_quarter_lines`` (derived from the detailed box-score response, since
+  ``/v1/games`` carries no per-quarter field), ``play_snapshots``, and
+  ``injury_snapshots`` (with an exact ``return_estimate`` text preserved and a
+  parsed ``return_date`` only for an unambiguous full ISO date -- no fabricated
+  year). Cross-sport schedule (``game_schedule_snapshots``) and lineup
+  (``lineup_snapshots`` / ``lineup_players``) infrastructure is still shared.
+* Box scores are associated with a schedule game by a genuine provider game id
+  when supplied, else the deterministic ``(official date, provider home-team id,
+  provider visitor-team id)`` key; a no-match or ambiguous match is rejected
+  honestly (a ``DQ-NBA-BOX-001`` note), never guessed or cross-attached.
 * Missing values stay missing (never coerced to zero); a missing conditional
   group is recorded as a capability state, never fabricated and never an active
   failure. Confirmed pregame starters stay unavailable; lineups are best-effort

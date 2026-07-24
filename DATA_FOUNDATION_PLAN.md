@@ -24,8 +24,10 @@ first-vs-current metadata provenance, strict event/market/trade validation,
 accurate insert/update/dedup counters (including a new `ingestion_runs.records_updated`),
 and a single validation path shared by persisted and dry-run ingestion. No
 Kalshi credential, private key, or signing is used anywhere; there is no
-account/balance/position/fill/order column in the schema. All 894 tests pass
-(1 skipped) under Ruff and mypy.
+account/balance/position/fill/order column in the schema. The suite passes under
+Ruff and mypy: 948 passed / 1 skipped locally (optional PyArrow present), and 941
+passed / 4 skipped under the standard `.[dev]` CI with PyArrow absent (only the
+optional hoopR/PyArrow modules skip).
 
 **Phase D provider selection and implementation design are complete; D1 provider
 infrastructure and D2 MLB ingestion code are complete (schema v11, migration
@@ -65,9 +67,13 @@ evidence (never a broad word alone); and the BALLDONTLIE allow-list is tightened
 to explicit documented endpoints.
 
 **D1 is complete; D2 MLB ingestion code is complete and its controlled live gate
-passed on July 24, 2026; D3–D5 have not started. The live MLB provider audit and
-bounded dry-run smoke test succeeded, but no persisted MLB ingestion or
-historical backfill has been performed.** D2 ingests the MLB StatsAPI schedule, box scores, line
+passed on July 24, 2026. D3 NBA ingestion code and its mocked/offline correctness
+repair are complete at schema v13 (migrations `d012_nba_specifics` +
+`d013_nba_typed_repairs`); the live BALLDONTLIE GOAT capability audit and bounded
+dry-run smoke test have not yet been performed, and no persisted NBA ingestion or
+historical NBA backfill has been performed. D4–D5 have not started. The live MLB
+provider audit and bounded dry-run smoke test succeeded, but no persisted MLB
+ingestion or historical backfill has been performed.** D2 ingests the MLB StatsAPI schedule, box scores, line
 scores, probable pitchers, posted lineups, and **date-aware rosters** into
 append-only, transition-aware official-observation tables (migration `d011`,
 schema v11), anchored on `provider_game_references` with provider player/team
@@ -102,7 +108,11 @@ requests (one per distinct team/official-date pair), 0 corrections, 0
 data-quality issues, 0 rejections, and 0 active failures. The dry run persisted
 nothing — its isolated target database was never created and the corpus changed
 only from the persisted audit run. No persisted MLB ingestion or historical
-backfill has been performed. D3–D5 have not started.
+backfill has been performed. D3 NBA ingestion code + mocked/offline correctness
+repair are complete at schema v13 (`d012_nba_specifics` + `d013_nba_typed_repairs`);
+the live BALLDONTLIE GOAT audit and bounded dry-run smoke test have not yet been
+performed and no persisted NBA ingestion/backfill has occurred. D4–D5 have not
+started.
 
 | Phase | Scope | Status |
 | --- | --- | --- |
@@ -622,9 +632,13 @@ is never miscounted as a new insert.
 
 > **Provider selection + implementation design complete; D1 provider
 > infrastructure and D2 MLB ingestion code complete (schema v11), and the D2
-> controlled live gate passed on July 24, 2026; D3–D5 not started. The controlled
-> live MLB StatsAPI provider audit and bounded dry-run smoke test succeeded, but
-> no persisted MLB ingestion or historical backfill has been performed.** The authoritative, up-to-date
+> controlled live gate passed on July 24, 2026. D3 NBA ingestion code + its
+> mocked/offline correctness repair are complete at schema v13 (`d012_nba_specifics`
+> + `d013_nba_typed_repairs`); the live BALLDONTLIE GOAT audit and bounded dry-run
+> smoke test have not yet been performed, no persisted NBA ingestion/backfill has
+> occurred, and D4–D5 have not started. The controlled live MLB StatsAPI provider
+> audit and bounded dry-run smoke test succeeded, but no persisted MLB ingestion
+> or historical backfill has been performed.** The authoritative, up-to-date
 > Phase D plan lives in two dedicated documents —
 > `PHASE_D_PROVIDER_DECISIONS.md` (provider evaluation, selection, credentials,
 > cost/coverage, licensing risk) and `PHASE_D_IMPLEMENTATION_PLAN.md` (schema,

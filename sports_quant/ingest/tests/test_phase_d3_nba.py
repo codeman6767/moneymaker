@@ -26,6 +26,7 @@ from sports_quant.db.init import initialize_database
 from sports_quant.db.repositories.base import RepositoryError
 from sports_quant.db.repositories.nba import (
     SqliteNbaPlayerStatRepository,
+    SqliteNbaResultRepository,
     SqlitePlaySnapshotRepository,
     SqliteQuarterLineRepository,
 )
@@ -566,6 +567,45 @@ def test_play_out_of_order_does_not_regress(db: Database) -> None:
             "SELECT description FROM play_snapshots ORDER BY observed_at DESC LIMIT 1"
         ).fetchone()[0]
         assert newest == "corrected text"
+
+
+def test_nba_result_first_obs_and_out_of_order_no_regress(db: Database) -> None:
+    with db.connection() as conn, transaction(conn):
+        gref = _seed_ref(conn)
+        repo = SqliteNbaResultRepository(conn)
+        base: dict[str, Any] = dict(
+            game_ref_id=gref, provider="balldontlie", provider_game_id="1", ingested_at=_t(1),
+            run_id="run_t", raw_response_id="raw_t", raw_response_hash="c")
+        # First (final) observation is never a correction.
+        _i1, o1, c1 = repo.append(observed_at=_t(5), mapped_status="final", home_points=120,
+                                  away_points=110, period=4, winning_side="home", **base)
+        assert o1 is ObservationOutcome.INSERTED and c1 is False
+        # An out-of-order EARLIER observation is kept as history, is not a correction
+        # (its own temporal predecessor is none), and does not regress current state.
+        _i2, o2, c2 = repo.append(observed_at=_t(2), mapped_status="in_progress", home_points=50,
+                                  away_points=48, period=2, winning_side="home", **base)
+        assert o2 is ObservationOutcome.INSERTED and c2 is False
+        assert repo.count() == 2
+        newest = conn.execute(
+            "SELECT home_points, mapped_status FROM nba_game_results "
+            "ORDER BY observed_at DESC LIMIT 1").fetchone()
+        assert (newest[0], newest[1]) == (120, "final")  # newest state unchanged
+
+
+def test_nba_in_progress_score_decrease_is_a_correction(db: Database) -> None:
+    with db.connection() as conn, transaction(conn):
+        gref = _seed_ref(conn)
+        repo = SqliteNbaResultRepository(conn)
+        base: dict[str, Any] = dict(
+            game_ref_id=gref, provider="balldontlie", provider_game_id="1", ingested_at=_t(1),
+            run_id="run_t", raw_response_id="raw_t", raw_response_hash="c")
+        repo.append(observed_at=_t(1), mapped_status="in_progress", home_points=50,
+                    away_points=48, period=2, winning_side="home", **base)
+        # A cumulative points total going backwards (even while in-progress) is a revision.
+        _i, out, corr = repo.append(observed_at=_t(2), mapped_status="in_progress",
+                                    home_points=48, away_points=48, period=2,
+                                    winning_side="tie", **base)
+        assert out is ObservationOutcome.INSERTED and corr is True
 
 
 # --------------------------------------------------------------------------- #

@@ -24,9 +24,11 @@ canonical matching.
 > resolution is deferred to D5, so snapshots carry provider ids with NULLABLE
 > canonical ids. Missing values stay NULL (never zero); contradictions become
 > `data_quality_issues`. All tested against mocked, realistic StatsAPI fixtures
-> (no live provider call was made). D3–D5 (NBA/weather ingestion + canonical
-> matching) remain unbuilt. This document is the build contract; providers are
-> chosen in `PHASE_D_PROVIDER_DECISIONS.md` (doc-review date 2026-07-23).
+> (no live provider call was made). D3 (NBA ingestion) code + its mocked/offline
+> correctness repair are now complete at schema v13 (see the D3 build note below);
+> D4–D5 (weather ingestion + canonical matching) remain unbuilt. This document is
+> the build contract; providers are chosen in `PHASE_D_PROVIDER_DECISIONS.md`
+> (doc-review date 2026-07-23).
 
 > **Live D2 gate (2026-07-24).** The controlled live MLB StatsAPI provider audit
 > and bounded dry-run smoke test completed successfully on July 24, 2026. The
