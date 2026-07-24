@@ -211,15 +211,22 @@ class MlbStatsApiClient(BaseProviderClient):
         pk = _validate_positive_id(game_pk, label="game_pk")
         return await self._get(f"/game/{pk}/linescore", params={})
 
-    async def fetch_roster(self, team_id: object) -> ProviderResponse:
+    async def fetch_roster(
+        self, team_id: object, *, date: Optional[object] = None, roster_type: str = "active"
+    ) -> ProviderResponse:
         """GET /teams/{id}/roster -- a team's roster (players group).
 
-        ``team_id`` is validated to a positive integer before the request; the
-        audit obtains it from the teams response rather than hardcoding one.
+        ``team_id`` is validated to a positive integer before the request. An
+        optional ``date`` (strictly validated ``YYYY-MM-DD``) requests the roster
+        **as of that date** -- so an ingest anchored on a date records the roster
+        that held then, not merely today's roster.
         """
 
         tid = _validate_positive_id(team_id, label="team_id")
-        return await self._get(f"/teams/{tid}/roster", params={})
+        params: dict[str, Any] = {"rosterType": roster_type}
+        if date is not None:
+            params["date"] = validate_iso_date(date)
+        return await self._get(f"/teams/{tid}/roster", params=params)
 
     async def fetch_person(self, person_id: object) -> ProviderResponse:
         """GET /people/{id} -- a single person (optional player verification)."""

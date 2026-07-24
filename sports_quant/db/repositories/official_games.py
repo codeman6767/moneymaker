@@ -129,10 +129,22 @@ class SqliteResultRepository(Repository):
         innings_played: Optional[int] = None,
         winning_side: Optional[str] = None,
         result_detail: Optional[str] = None,
-        is_correction: bool = False,
         provider_timestamp: Optional[str] = None,
         published_at: Optional[str] = None,
-    ) -> tuple[Optional[str], ObservationOutcome]:
+    ) -> tuple[Optional[str], ObservationOutcome, bool]:
+        """Append a result observation; auto-detect corrections. Returns
+        ``(id, outcome, is_correction)``.
+
+        ``is_correction`` is 1 when a *prior* result observation for this game
+        (at or before ``observed_at``) exists AND the new content differs from it
+        -- i.e. a previously observed result changed. The first observation is
+        never a correction; an identical replay writes no row and is not a
+        correction; an out-of-order backfill that is the new earliest observation
+        (no predecessor) is not a correction and does not regress current state.
+        ``is_correction`` is deliberately excluded from the content hash so it
+        cannot split two otherwise-identical observations.
+        """
+
         content = {
             "home_runs": home_runs, "away_runs": away_runs, "home_hits": home_hits,
             "away_hits": away_hits, "home_errors": home_errors, "away_errors": away_errors,
@@ -140,29 +152,37 @@ class SqliteResultRepository(Repository):
             "mapped_status": mapped_status, "result_detail": result_detail,
         }
         content_hash = observation_content_hash(content)
+        predecessor = self._fetch_one(
+            "SELECT content_hash FROM game_result_snapshots "
+            "WHERE game_ref_id = ? AND observed_at <= ? "
+            "ORDER BY observed_at DESC, result_id DESC LIMIT 1",
+            (game_ref_id, observed_at),
+        )
+        if predecessor is not None and str(predecessor["content_hash"]) == content_hash:
+            return None, ObservationOutcome.UNCHANGED, False  # identical to predecessor
+        # A differing content with an existing prior observation is a correction.
+        is_correction = predecessor is not None
         new_id = new_result_snapshot_id()
         now = utc_now_iso()
-        columns = (
-            "result_id", "game_ref_id", "provider", "provider_game_id", "home_runs",
-            "away_runs", "home_hits", "away_hits", "home_errors", "away_errors",
-            "innings_played", "winning_side", "mapped_status", "result_detail",
-            "is_correction", "provider_timestamp", "published_at", "observed_at",
-            "ingested_at", "run_id", "raw_response_id", "raw_response_hash", "content_hash",
-            "created_at",
+        cursor = self._conn.execute(
+            "INSERT OR IGNORE INTO game_result_snapshots "
+            "(result_id, game_ref_id, provider, provider_game_id, home_runs, away_runs, "
+            " home_hits, away_hits, home_errors, away_errors, innings_played, winning_side, "
+            " mapped_status, result_detail, is_correction, provider_timestamp, published_at, "
+            " observed_at, ingested_at, run_id, raw_response_id, raw_response_hash, content_hash, "
+            " created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                new_id, game_ref_id, provider, provider_game_id, home_runs, away_runs,
+                home_hits, away_hits, home_errors, away_errors, innings_played, winning_side,
+                mapped_status, result_detail, 1 if is_correction else 0, provider_timestamp,
+                published_at, observed_at, ingested_at, run_id, raw_response_id,
+                raw_response_hash, content_hash, now,
+            ),
         )
-        values: tuple[Any, ...] = (
-            new_id, game_ref_id, provider, provider_game_id, home_runs, away_runs,
-            home_hits, away_hits, home_errors, away_errors, innings_played, winning_side,
-            mapped_status, result_detail, 1 if is_correction else 0, provider_timestamp,
-            published_at, observed_at, ingested_at, run_id, raw_response_id,
-            raw_response_hash, content_hash, now,
-        )
-        outcome = append_transition(
-            self._conn, table="game_result_snapshots", id_column="result_id",
-            anchor_where="game_ref_id = ?", anchor_params=(game_ref_id,),
-            observed_at=observed_at, content_hash=content_hash, columns=columns, values=values,
-        )
-        return (new_id if outcome is ObservationOutcome.INSERTED else None), outcome
+        if cursor.rowcount == 0:  # exact replay backstopped by the UNIQUE constraint
+            return None, ObservationOutcome.UNCHANGED, False
+        return new_id, ObservationOutcome.INSERTED, is_correction
 
     def count(self) -> int:
         return self._count("SELECT COUNT(*) FROM game_result_snapshots")

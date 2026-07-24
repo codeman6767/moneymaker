@@ -112,6 +112,33 @@ def test_ingest_mlb_zero_games_exits_zero(tmp_path: Path) -> None:
     assert code == 0
 
 
+def test_ingest_mlb_active_subfetch_failure_exits_one(tmp_path: Path) -> None:
+    # Schedule OK, but the requested box sub-fetch 500s -> partially_failed -> exit 1.
+    db = tmp_path / "corpus.db"
+    initialize_database(db)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/boxscore"):
+            return httpx.Response(500, json={"e": 1}, headers={"content-type": "application/json"})
+        return httpx.Response(200, json=SCHEDULE, headers={"content-type": "application/json"})
+
+    http = build_readonly_client(
+        base_url="https://statsapi.mlb.com/api/v1",
+        policy=ReadOnlyHTTPPolicy.for_mlb_statsapi(),
+        inner_transport=httpx.MockTransport(handler),
+    )
+    client = MlbStatsApiClient(client=http, max_retries=0)
+    lines: list[str] = []
+    code = run_ingest_mlb(
+        _settings(), from_date="2024-04-09", includes=("box",), database_path=db, as_json=True,
+        out=lines.append, client=client,
+    )
+    assert code == 1
+    payload = json.loads(lines[0])
+    assert payload["status"] == "partially_failed"
+    assert payload["active_failure"] is True
+
+
 def test_ingest_mlb_incompatible_args_exit_one(tmp_path: Path) -> None:
     db = tmp_path / "corpus.db"
     initialize_database(db)

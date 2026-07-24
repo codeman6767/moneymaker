@@ -554,6 +554,28 @@ Model column = recommended driver.
 > `lineups`) share a transition-aware append helper. `ingest-mlb` /
 > `ingest-lineups --sport mlb` CLI commands added. All mocked; no live call; no
 > historical backfill; `--dry-run` persists absolutely nothing.
+>
+> **Integrity repair (code-only, no schema change).** Added real **roster
+> ingestion** (`--include rosters`): each unique provider team's roster is fetched
+> once per run (deduplicated across a doubleheader), preserved as its own raw
+> response, and persisted as append-only roster observations with roster
+> date/status/jersey/position. Every valid provider player id from **rosters, box
+> scores, probables, and lineups** now creates/reuses a `provider_player_references`
+> row with that exact response's provenance (never a canonical player, never a
+> name match). A requested sub-fetch that genuinely fails (network/5xx/oversized/
+> parser) is now a tracked **active failure** → status `partially_failed` and CLI
+> **exit 1** (distinct from an honest data-quality rejection, which stays exit 0);
+> `succeeded`/`partially_failed`/`failed` are the truthful statuses. **Corrections**
+> are auto-detected: a changed result over a prior observation appends with
+> `is_correction = 1` and increments `corrections_appended` (first observation and
+> identical replays are not corrections). **Dry-run** now runs the full parse +
+> validation in memory and reports truthful would-be counts (results/innings/team+
+> player stats/rosters/references/DQ) while persisting absolutely nothing.
+> **Inning reconciliation** compares each team's trustworthy inning-run sum to its
+> total (`DQ-MLB-RECON-001` contradiction / `DQ-MLB-RECON-002` incomplete), kept
+> separate from malformed-inning and negative-run checks. A **missing inning half**
+> (e.g. the home team not batting in the bottom of the ninth) is never a fabricated
+> all-NULL/zero row; an explicit zero half is stored as zero.
 
 - **Provider:** MLB StatsAPI (no key, no SLA, no explicit correction timestamps).
   **Tier:** n/a. **Offline:** pybaseball/Statcast **deferred** (not integrated).
@@ -565,7 +587,8 @@ Model column = recommended driver.
   `provider_game_references`; canonical `games` creation/linkage is D5.
 - **Migration:** `d011` (v11). Tables: game_schedule/result snapshots,
   mlb_inning_lines, team/player_game_statistics, roster_snapshots,
-  probable_pitcher_snapshots, lineup_snapshots, lineup_players.
+  probable_pitcher_snapshots, lineup_snapshots, lineup_players. The integrity
+  repair required **no schema change** (no `d012`); it populated existing tables.
 - **Completion (met):** mocked date-range/game sweep persists schedule + results +
   box + inning lines + probables + posted lineups; idempotent twice; append-only
   enforced; every row traces to its raw response; missing≠zero; unknown status +

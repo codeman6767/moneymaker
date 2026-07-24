@@ -420,8 +420,9 @@ async def test_extra_innings_preserved(db: Database) -> None:
         assert conn.execute("SELECT MAX(inning) FROM mlb_inning_lines").fetchone()[0] == 11
 
 
-async def test_final_vs_inning_contradiction_flagged(db: Database) -> None:
-    # Negative runs in the result must create a data-quality issue.
+async def test_negative_runs_flagged(db: Database) -> None:
+    # Negative runs in the result must create a data-quality issue (distinct from
+    # a score-vs-inning reconciliation contradiction).
     line = linescore(home_runs=-1, away_runs=3)
     c = routing_client(
         schedule_body=schedule(game(game_pk=1, status="Final", coded="F", abstract="Final")),
@@ -430,6 +431,21 @@ async def test_final_vs_inning_contradiction_flagged(db: Database) -> None:
     r = await _ingest(db, c, from_date="2024-04-09", includes=("results",))
     assert r.data_quality_issues >= 1
     assert _count(db, "data_quality_issues", "WHERE rule_code='DQ-MLB-RESULT-001'") >= 1
+
+
+async def test_final_score_vs_inning_sum_contradiction_flagged(db: Database) -> None:
+    # A REAL contradiction: the away team total disagrees with its inning-run sum.
+    innings = [{"num": 1, "home": {"runs": 2}, "away": {"runs": 1}},
+               {"num": 2, "home": {"runs": 3}, "away": {"runs": 1}}]  # away sum = 2
+    line = linescore(innings=innings, home_runs=5, away_runs=3, current_inning=2)  # away total 3
+    c = routing_client(
+        schedule_body=schedule(game(game_pk=1, status="Final", coded="F", abstract="Final")),
+        line_by_pk={"1": line},
+    )
+    await _ingest(db, c, from_date="2024-04-09", includes=("results", "inning"))
+    assert _count(db, "data_quality_issues", "WHERE rule_code='DQ-MLB-RECON-001'") >= 1
+    # No false negative-run issue was raised (runs are all non-negative).
+    assert _count(db, "data_quality_issues", "WHERE rule_code='DQ-MLB-RESULT-001'") == 0
 
 
 async def test_malformed_inning_number_flagged(db: Database) -> None:

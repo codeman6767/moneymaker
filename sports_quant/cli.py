@@ -848,12 +848,19 @@ def _mlb_json(result: MlbIngestResult) -> dict[str, Any]:
         "team_statistics_inserted": result.team_statistics_inserted,
         "player_statistics_inserted": result.player_statistics_inserted,
         "inning_lines_inserted": result.inning_lines_inserted,
+        "roster_requests": result.roster_requests,
+        "roster_players_received": result.roster_players_received,
         "roster_observations_inserted": result.roster_observations_inserted,
+        "roster_observations_unchanged": result.roster_observations_unchanged,
+        "roster_records_rejected": result.roster_records_rejected,
         "probable_pitchers_inserted": result.probable_pitchers_inserted,
         "lineups_inserted": result.lineups_inserted,
         "lineup_players_inserted": result.lineup_players_inserted,
+        "provider_references_created": result.provider_references_created,
         "corrections_appended": result.corrections_appended,
         "records_rejected": result.records_rejected,
+        "active_failures": result.active_failures,
+        "active_failure": result.has_active_failure,
         "data_quality_issues": result.data_quality_issues,
         "capabilities_unavailable": result.capabilities_unavailable,
         "error_type": result.error_type,
@@ -887,13 +894,23 @@ def _report_mlb(result: MlbIngestResult, out: Printer, *, as_json: bool) -> None
         f"lineups {result.lineups_inserted} ({result.lineup_players_inserted} players)"
     )
     out(
-        f"  rejected {result.records_rejected}, data-quality {result.data_quality_issues}, "
+        f"  rosters: {result.roster_requests} requests, "
+        f"{result.roster_observations_inserted} observations "
+        f"({result.roster_players_received} players); "
+        f"refs {result.provider_references_created}; corrections {result.corrections_appended}"
+    )
+    out(
+        f"  rejected {result.records_rejected}, active-failures {result.active_failures}, "
+        f"data-quality {result.data_quality_issues}, "
         f"capabilities-unavailable {result.capabilities_unavailable}"
     )
-    label2 = {"succeeded": "OK     ", "partially_succeeded": "PARTIAL"}.get(
-        result.status, result.status.upper()
-    )
-    out(f"[{label2}] {result.status}")
+    if result.status == "partially_failed":
+        out(
+            f"[PARTIAL] partially_failed -- an active provider failure occurred "
+            f"({result.error_type}: {result.error_message})"
+        )
+    else:
+        out("[OK     ] succeeded")
 
 
 def run_ingest_mlb(
@@ -948,7 +965,7 @@ def run_ingest_mlb(
 
     result = asyncio.run(_run())
     _report_mlb(result, out, as_json=as_json)
-    return EXIT_ACTIVE_FAILURE if result.failed else 0
+    return EXIT_ACTIVE_FAILURE if result.needs_failure_exit else 0
 
 
 def run_ingest_lineups(
@@ -1000,7 +1017,7 @@ def run_ingest_lineups(
 
     result = asyncio.run(_run())
     _report_mlb(result, out, as_json=as_json)
-    return EXIT_ACTIVE_FAILURE if result.failed else 0
+    return EXIT_ACTIVE_FAILURE if result.needs_failure_exit else 0
 
 
 def main(argv: Optional[list[str]] = None) -> int:
