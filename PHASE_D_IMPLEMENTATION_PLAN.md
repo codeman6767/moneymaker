@@ -3,22 +3,26 @@
 Concrete, staged implementation design for official MLB/NBA data, weather, and
 canonical matching.
 
-> **Status: Phase D1 provider infrastructure code complete; D2–D5 not started.
-> Live provider access still requires an approved provider audit before any large
-> backfill.** D1 built the typed provider-capability system, the four provider
-> clients (MLB StatsAPI, BALLDONTLIE, NWS, Open-Meteo) over a shared GET-only base
-> (streamed size guard, exact base-URL pinning), the tightened `http_policy`
-> allow-lists, migrations `d009_provider_infra` and `d010_provider_audit_integrity`
-> (schema v10), the references/venues/matching/data-quality/capabilities
-> repositories, and the evidence-backed, dependency-aware `provider-audit` +
-> `ingest-venues` CLI commands with truthful `succeeded`/`partially_failed`/`failed`
-> statuses, evidence-based authentication reporting, and exact BALLDONTLIE request
-> contracts (`game_ids[]`/`seasons[]` arrays, required validated box-score `date`) —
-> all tested against mocked, contract-enforcing transports (no live provider call
-> was made). The audit separates declared from externally observed capabilities
-> (§10). D2–D5 (MLB/NBA/weather ingestion + canonical matching) remain unbuilt.
-> This document is the build contract; providers are chosen in
-> `PHASE_D_PROVIDER_DECISIONS.md` (doc-review date 2026-07-23).
+> **Status: Phase D2 MLB ingestion code complete; D3–D5 not started. No large
+> historical backfill has been performed. Live MLB access still requires a
+> successful approved provider audit and smoke test.** D1 (schema v10) built the
+> typed provider-capability system, the four provider clients over a shared
+> GET-only base, the tightened `http_policy` allow-lists, and the evidence-backed
+> dependency-aware `provider-audit` + `ingest-venues` CLI. **D2 (migration
+> `d011_official_games_stats`, schema v11)** adds the append-only, transition-aware
+> official-MLB observation tables (schedule / result / inning lines / team +
+> player statistics / roster / probable-pitcher / lineup + lineup players), the
+> extended MLB StatsAPI client (date-ranged schedule with `probablePitcher`/
+> `lineups` hydration, box score, line score — GET-only, id/date validated), a
+> typed MLB status mapper, five typed repositories, and the `ingest-mlb` +
+> `ingest-lineups` CLI commands. Official game identity is anchored on
+> `provider_game_references` (one row per `gamePk`); canonical `games`/team/player
+> resolution is deferred to D5, so snapshots carry provider ids with NULLABLE
+> canonical ids. Missing values stay NULL (never zero); contradictions become
+> `data_quality_issues`. All tested against mocked, realistic StatsAPI fixtures
+> (no live provider call was made). D3–D5 (NBA/weather ingestion + canonical
+> matching) remain unbuilt. This document is the build contract; providers are
+> chosen in `PHASE_D_PROVIDER_DECISIONS.md` (doc-review date 2026-07-23).
 
 Companion documents: `PHASE_D_PROVIDER_DECISIONS.md`, `DATA_ARCHITECTURE.md`,
 `POINT_IN_TIME_DATA.md`, `ENTITY_MATCHING.md`, `DATA_FOUNDATION_PLAN.md`.
@@ -143,7 +147,7 @@ New immutable migrations, one global sequence continuing from `c008` (v8):
 | --- | --- | --- |
 | 009 | `d009_provider_infra` *(built)* | `provider_team_references`, `provider_player_references`, `provider_game_references`, `venues`, `venue_aliases`, `entity_match_decisions`, `match_candidates`, `data_quality_issues`, `provider_capabilities` |
 | 010 | `d010_provider_audit_integrity` *(built)* | `provider_capabilities` evidence columns (`declared_state`/`observed_state`/`is_observed`/`probe_name`/`endpoint`/`http_status`/`error_kind`/`verified_at`) separating declared from observed; partial unique index on `venue_aliases (provider, provider_venue_id)`; `data_quality_issues` resolution-only-update + no-delete triggers |
-| 011 | `d011_official_games_stats` *(planned)* | `game_schedule_snapshots`, `game_result_snapshots`, `team_game_statistics`, `player_game_statistics`, `mlb_inning_lines`, `roster_snapshots`, `probable_pitcher_snapshots`, `lineup_snapshots`, `lineup_players` |
+| 011 | `d011_official_games_stats` *(built, D2)* | `game_schedule_snapshots`, `game_result_snapshots`, `mlb_inning_lines`, `team_game_statistics`, `player_game_statistics`, `roster_snapshots`, `probable_pitcher_snapshots`, `lineup_snapshots`, `lineup_players` — all append-only, transition-aware, anchored on `provider_game_references`/`provider_team_references` (no second canonical game/team/player table) |
 | 012 | `d012_nba_specifics` *(planned)* | `nba_quarter_lines`, `injury_snapshots`, `play_snapshots` (GOAT plays / substitutions; sport-agnostic-ish) |
 | 013 | `d013_weather` *(planned)* | `weather_snapshots` |
 
@@ -534,24 +538,38 @@ Model column = recommended driver.
 - **Expected blockers:** confirming allow-list host/path entries; re-verifying
   BALLDONTLIE tier boundaries; terms confirmation.
 
-### D2 — MLB ingestion  ·  model: **Sonnet**
+### D2 — MLB ingestion  ·  model: **Sonnet**  ·  ✅ CODE COMPLETE
 
-- **Provider:** MLB StatsAPI (no key). **Tier:** n/a. **Optional/offline:**
-  pybaseball/Statcast/FanGraphs **deferred** (offline Parquet importer only, not a
-  runtime dep). **Cross-check:** none.
-- **Capabilities:** consult the StatsAPI declaration; `confirmed_pregame_starters`
-  = `unavailable`; `correction_timestamps` = `best_effort`.
-- **Create:** `ingest/mlb_ingestor.py`; repositories for schedule/result/stats/
-  inning/roster/probable/lineup; mocked-StatsAPI fixtures + tests.
-- **Modify:** `cli.py` (`ingest-mlb`, `ingest-lineups --sport mlb`).
-- **Migration:** `d011` (v11). **Tables:** game_schedule/result snapshots,
-  team/player_game_statistics, mlb_inning_lines, roster_snapshots,
+> **Built.** Migration `d011_official_games_stats` (schema v11) adds the nine
+> append-only, transition-aware official-observation tables. `ingest/mlb_ingestor.py`
+> reads the StatsAPI schedule (with `probablePitcher`/`lineups` hydration) and,
+> per game, the box score and line score; it preserves each raw response once,
+> writes schedule/result/inning/team-stat/player-stat/probable/lineup observations
+> that each trace to the *exact* raw response that supplied them, and records
+> capability gaps + contradictions as `data_quality_issues`. Official identity is
+> the `provider_game_references` row (one per `gamePk`); canonical resolution is
+> D5, so canonical ids stay NULLABLE. A typed `providers/mlb_status.py` maps
+> provider status to a canonical status (unknown → explicit `unknown` + DQ). Five
+> typed repositories (`official_games`, `game_statistics`, `rosters`, `probables`,
+> `lineups`) share a transition-aware append helper. `ingest-mlb` /
+> `ingest-lineups --sport mlb` CLI commands added. All mocked; no live call; no
+> historical backfill; `--dry-run` persists absolutely nothing.
+
+- **Provider:** MLB StatsAPI (no key, no SLA, no explicit correction timestamps).
+  **Tier:** n/a. **Offline:** pybaseball/Statcast **deferred** (not integrated).
+- **Capabilities:** consulted before optional groups; `confirmed_pregame_starters`
+  = `unavailable` (never inferred from posted lineups); `correction_timestamps`
+  = `best_effort` (changed-content detection; corrections are new observations).
+- **Design deviation (documented):** D2 does **not** create a second canonical
+  `games` row (which would need resolved teams + season). Snapshots anchor on
+  `provider_game_references`; canonical `games` creation/linkage is D5.
+- **Migration:** `d011` (v11). Tables: game_schedule/result snapshots,
+  mlb_inning_lines, team/player_game_statistics, roster_snapshots,
   probable_pitcher_snapshots, lineup_snapshots, lineup_players.
-- **Completion:** mocked date-range sweep persists canonical `games` + provenance,
-  results, box, inning lines, probables, posted lineups; idempotent twice;
-  append-only enforced; every row traces to a raw response; `--dry-run` persists
-  nothing; capability records written; live smoke-test safe.
-- **Expected blockers:** doubleheader/game-number; status-code mapping; stat coverage.
+- **Completion (met):** mocked date-range/game sweep persists schedule + results +
+  box + inning lines + probables + posted lineups; idempotent twice; append-only
+  enforced; every row traces to its raw response; missing≠zero; unknown status +
+  contradictions flagged; `--dry-run` persists nothing; live smoke-test safe.
 
 ### D3 — NBA ingestion  ·  model: **Sonnet**
 

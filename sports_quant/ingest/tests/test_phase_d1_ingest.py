@@ -714,6 +714,73 @@ async def test_audit_mlb_players_unknown_when_no_team_id(db: Database) -> None:
         assert unknown is not None and unknown["state"] == "unknown_until_audited"
 
 
+async def test_audit_mlb_person_probe_does_not_duplicate_players(db: Database) -> None:
+    """teams + roster + person all succeed -> exactly ONE players outcome, and the
+    person response is still preserved as raw evidence."""
+
+    client = _mlb_routing_client(
+        teams_body={"teams": [{"id": 133, "name": "Tigers"}]},
+        roster_body={"roster": [{"person": {"id": 592450, "fullName": "X"}}]},
+    )
+    result = await audit_provider(
+        database=db, provider=PROVIDER_MLB_STATSAPI,
+        probes=build_mlb_statsapi_probes(client), declaration=_mlb_decl(),
+    )
+    await client.aclose()
+    assert result.status == "succeeded"
+    # Exactly one players outcome in the whole run (from the roster probe).
+    players = [o for o in result.observations if o.capability == "players"]
+    assert len(players) == 1
+    assert players[0].is_observed is True
+    assert players[0].endpoint == "/teams/{id}/roster"
+    with db.connection() as conn:
+        rows = conn.execute(
+            "SELECT COUNT(*) FROM provider_capabilities "
+            "WHERE provider='mlb_statsapi' AND capability='players'"
+        ).fetchone()[0]
+        assert rows == 1
+        # The optional person lookup's raw response is still stored as evidence.
+        person_raw = conn.execute(
+            "SELECT COUNT(*) FROM raw_responses WHERE endpoint = '/people/592450'"
+        ).fetchone()[0]
+        assert person_raw == 1
+
+
+async def test_audit_mlb_person_failure_keeps_roster_players_observation(db: Database) -> None:
+    """roster succeeds but the optional person lookup fails -> players stays
+    observed via the roster, the run still succeeds, no duplicate outcome."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/v1/teams":
+            return httpx.Response(200, json={"teams": [{"id": 133}]},
+                                  headers={"content-type": "application/json"})
+        if path.endswith("/roster"):
+            return httpx.Response(200, json={"roster": [{"person": {"id": 592450}}]},
+                                  headers={"content-type": "application/json"})
+        if "/people/" in path:
+            return httpx.Response(404, json={"error": "not found"},
+                                  headers={"content-type": "application/json"})
+        return httpx.Response(200, json={"venues": [], "dates": []},
+                              headers={"content-type": "application/json"})
+
+    http = build_readonly_client(
+        base_url="https://statsapi.mlb.com/api/v1",
+        policy=ReadOnlyHTTPPolicy.for_mlb_statsapi(),
+        inner_transport=httpx.MockTransport(handler),
+    )
+    client = MlbStatsApiClient(client=http)
+    result = await audit_provider(
+        database=db, provider=PROVIDER_MLB_STATSAPI,
+        probes=build_mlb_statsapi_probes(client), declaration=_mlb_decl(),
+    )
+    await client.aclose()
+    # A 404 on the optional person probe is not an active failure.
+    assert result.status == "succeeded"
+    players = [o for o in result.observations if o.capability == "players"]
+    assert len(players) == 1 and players[0].is_observed is True
+
+
 async def test_audit_oversized_response_never_stored(db: Database) -> None:
     """An oversized provider response is refused and never lands in raw_responses."""
 

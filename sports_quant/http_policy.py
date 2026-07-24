@@ -159,6 +159,10 @@ def mlb_statsapi_host_rule(host: str = "statsapi.mlb.com") -> HostRule:
             re.compile(r"/api/v1/teams/[0-9]+/roster/?"),
             re.compile(r"/api/v1/schedule/?"),
             re.compile(r"/api/v1/people/[0-9]+/?"),
+            # D2 per-game reads (box score = stats/batting order; line score =
+            # inning-by-inning + final R/H/E). Explicit exact patterns only.
+            re.compile(r"/api/v1/game/[0-9]+/boxscore/?"),
+            re.compile(r"/api/v1/game/[0-9]+/linescore/?"),
         ),
     )
 

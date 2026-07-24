@@ -20,6 +20,10 @@ from .data_quality import (
     DataQualityRepositoryProtocol,
     SqliteDataQualityRepository,
 )
+from .game_statistics import (
+    SqlitePlayerGameStatRepository,
+    SqliteTeamGameStatRepository,
+)
 from .games import (
     GameRepositoryProtocol,
     SqliteGameRepository,
@@ -42,10 +46,21 @@ from .leagues import (
     SqliteLeagueRepository,
     SqliteSeasonRepository,
 )
+from .lineups import LineupPlayerInput, SqliteLineupRepository
 from .matching import (
     CandidateInput,
     MatchingRepositoryProtocol,
     SqliteMatchingRepository,
+)
+from .observations import (
+    ObservationOutcome,
+    append_transition,
+    observation_content_hash,
+)
+from .official_games import (
+    SqliteInningLineRepository,
+    SqliteResultRepository,
+    SqliteScheduleRepository,
 )
 from .players import (
     PlayerAliasRepositoryProtocol,
@@ -53,6 +68,7 @@ from .players import (
     SqlitePlayerAliasRepository,
     SqlitePlayerRepository,
 )
+from .probables import SqliteProbablePitcherRepository
 from .raw_responses import (
     RawResponseRepositoryProtocol,
     SqliteRawResponseRepository,
@@ -63,6 +79,7 @@ from .references import (
     ProviderReferenceRepositoryProtocol,
     SqliteProviderReferenceRepository,
 )
+from .rosters import SqliteRosterRepository
 from .sportsbook import (
     SportsbookRepositoryProtocol,
     SqliteSportsbookRepository,
@@ -85,6 +102,18 @@ from .venues import (
 __all__ = [
     "AliasOutcome",
     "CandidateInput",
+    "LineupPlayerInput",
+    "ObservationOutcome",
+    "SqliteInningLineRepository",
+    "SqliteLineupRepository",
+    "SqlitePlayerGameStatRepository",
+    "SqliteProbablePitcherRepository",
+    "SqliteResultRepository",
+    "SqliteRosterRepository",
+    "SqliteScheduleRepository",
+    "SqliteTeamGameStatRepository",
+    "append_transition",
+    "observation_content_hash",
     "CapabilityRepositoryProtocol",
     "DataQualityRepositoryProtocol",
     "GameRepositoryProtocol",

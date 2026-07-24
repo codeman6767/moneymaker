@@ -10,6 +10,7 @@ order surface is imported here.
 from __future__ import annotations
 
 from .kalshi_ingestor import KalshiIngestResult, ingest_kalshi
+from .mlb_ingestor import MlbIngestResult, ingest_lineups, ingest_mlb
 from .odds_ingestor import OddsIngestResult, ingest_odds
 from .provider_audit import ProviderAuditResult, audit_provider
 from .runner import RunCounters, sanitize_error
@@ -17,12 +18,15 @@ from .venues_ingestor import VenueIngestResult, ingest_venues
 
 __all__ = [
     "KalshiIngestResult",
+    "MlbIngestResult",
     "OddsIngestResult",
     "ProviderAuditResult",
     "RunCounters",
     "VenueIngestResult",
     "audit_provider",
     "ingest_kalshi",
+    "ingest_lineups",
+    "ingest_mlb",
     "ingest_odds",
     "ingest_venues",
     "sanitize_error",

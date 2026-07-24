@@ -27,9 +27,17 @@ Kalshi credential, private key, or signing is used anywhere; there is no
 account/balance/position/fill/order column in the schema. All 559 tests pass
 under Ruff and mypy.
 
-**Phase D provider selection and implementation design are complete, and D1
-provider infrastructure code is complete (schema v10); live provider access still
-requires an approved provider audit before any large backfill.** The providers are chosen
+**Phase D provider selection and implementation design are complete; D1 provider
+infrastructure and D2 MLB ingestion code are complete (schema v11, migration
+`d011_official_games_stats`). No large historical backfill has been performed;
+live MLB access still requires an approved provider audit and smoke test.** D2
+added append-only, transition-aware official-MLB observation tables
+(schedule/result/inning/team+player stats/roster/probable/lineup), the extended
+MLB StatsAPI client (date-ranged schedule with probable/lineup hydration, box
+score, line score), a typed status mapper, five typed repositories, and the
+`ingest-mlb`/`ingest-lineups` CLI — all anchored on `provider_game_references`
+(canonical resolution deferred to D5), tested against mocked StatsAPI fixtures.
+The providers are chosen
 (MLB StatsAPI; **BALLDONTLIE at the GOAT tier** for NBA — the free tier does
 *not* supply box scores, player stats, injuries, plays, or lineups; NWS primary
 + Open-Meteo secondary/historical-forecast for weather; hoopR as an offline-only
@@ -62,7 +70,7 @@ provider call was made for this work. Phase E remains planning.
 | A | Database engine, migrations, core entities, `db-init` | ✅ Complete (schema v3) |
 | B | Raw responses, ingestion runs, sportsbook odds | ✅ Complete (schema v6, incl. `b006` integrity repair) |
 | C | Kalshi public events, markets, books, trades | ✅ Complete (schema v8, incl. `c008` integrity repair) |
-| D | Official providers, weather, canonical matching | ◧ **D1 provider infrastructure code complete (schema v10, incl. `d010` audit-integrity repair); D2–D5 not started** |
+| D | Official providers, weather, canonical matching | ◧ **D1 infra + D2 MLB ingestion code complete (schema v11, incl. `d010` audit-integrity repair and `d011` official MLB snapshots); D3–D5 not started** |
 | E | Point-in-time builder, quality rules, leakage tests | ◻ Not started |
 
 Companion documents:
@@ -573,9 +581,11 @@ is never miscounted as a new insert.
 
 ### Phase D — Official providers, weather, and canonical matching
 
-> **Provider selection and implementation design complete; D1 provider
-> infrastructure code complete (schema v10), D2–D5 not started.** The
-> authoritative, up-to-date Phase D plan lives in two dedicated documents —
+> **Provider selection + implementation design complete; D1 provider
+> infrastructure and D2 MLB ingestion code complete (schema v11), D3–D5 not
+> started. No large historical backfill performed; live MLB access still requires
+> an approved provider audit and smoke test.** The authoritative, up-to-date
+> Phase D plan lives in two dedicated documents —
 > `PHASE_D_PROVIDER_DECISIONS.md` (provider evaluation, selection, credentials,
 > cost/coverage, licensing risk) and `PHASE_D_IMPLEMENTATION_PLAN.md` (schema,
 > migrations `d009`–`d013`, correction behaviour, matching, PIT rules, CLI, and

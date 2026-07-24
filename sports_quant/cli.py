@@ -28,6 +28,12 @@ from .config import ReadOnlyStartupError, Settings, load_settings
 from .db.engine import Database, DatabaseError, table_exists
 from .db.init import initialize_database
 from .ingest.kalshi_ingestor import DEFAULT_LIMIT, KalshiIngestResult, ingest_kalshi
+from .ingest.mlb_ingestor import (
+    VALID_INCLUDES,
+    MlbIngestResult,
+    ingest_lineups,
+    ingest_mlb,
+)
 from .ingest.odds_ingestor import OddsIngestResult, ingest_odds
 from .ingest.provider_audit import (
     SUPPORTED_AUDIT_PROVIDERS,
@@ -822,6 +828,181 @@ def run_ingest_venues(
     return EXIT_ACTIVE_FAILURE if result.failed else 0
 
 
+# --------------------------------------------------------------------------- #
+# Phase D2: ingest-mlb / ingest-lineups
+# --------------------------------------------------------------------------- #
+def _mlb_json(result: MlbIngestResult) -> dict[str, Any]:
+    return {
+        "command": result.command,
+        "dry_run": result.dry_run,
+        "status": result.status,
+        "run_id": result.run_id,
+        "requests_made": result.requests_made,
+        "raw_responses_received": result.raw_responses_received,
+        "games_received": result.games_received,
+        "games_inserted": result.games_inserted,
+        "games_unchanged": result.games_unchanged,
+        "schedule_snapshots_inserted": result.schedule_snapshots_inserted,
+        "schedule_snapshots_unchanged": result.schedule_snapshots_unchanged,
+        "result_snapshots_inserted": result.result_snapshots_inserted,
+        "team_statistics_inserted": result.team_statistics_inserted,
+        "player_statistics_inserted": result.player_statistics_inserted,
+        "inning_lines_inserted": result.inning_lines_inserted,
+        "roster_observations_inserted": result.roster_observations_inserted,
+        "probable_pitchers_inserted": result.probable_pitchers_inserted,
+        "lineups_inserted": result.lineups_inserted,
+        "lineup_players_inserted": result.lineup_players_inserted,
+        "corrections_appended": result.corrections_appended,
+        "records_rejected": result.records_rejected,
+        "data_quality_issues": result.data_quality_issues,
+        "capabilities_unavailable": result.capabilities_unavailable,
+        "error_type": result.error_type,
+        "error_message": result.error_message,
+    }
+
+
+def _report_mlb(result: MlbIngestResult, out: Printer, *, as_json: bool) -> None:
+    if as_json:
+        out(json.dumps(_mlb_json(result), sort_keys=True))
+        return
+    prefix = "[DRY-RUN] " if result.dry_run else ""
+    label = "" if result.dry_run else f" (run {result.run_id})"
+    out(f"{prefix}{result.command}{label}")
+    if result.status == "failed":
+        out(f"[FAILED ] {result.error_type}: {result.error_message}")
+        return
+    out(f"  requests: {result.requests_made} (MLB StatsAPI, GET-only, no key)")
+    out(
+        f"  games: {result.games_received} received "
+        f"(refs new {result.games_inserted}, unchanged {result.games_unchanged})"
+    )
+    out(
+        f"  schedule: {result.schedule_snapshots_inserted} new / "
+        f"{result.schedule_snapshots_unchanged} unchanged; "
+        f"results {result.result_snapshots_inserted}, innings {result.inning_lines_inserted}"
+    )
+    out(
+        f"  stats: team {result.team_statistics_inserted}, player {result.player_statistics_inserted}; "
+        f"probables {result.probable_pitchers_inserted}; "
+        f"lineups {result.lineups_inserted} ({result.lineup_players_inserted} players)"
+    )
+    out(
+        f"  rejected {result.records_rejected}, data-quality {result.data_quality_issues}, "
+        f"capabilities-unavailable {result.capabilities_unavailable}"
+    )
+    label2 = {"succeeded": "OK     ", "partially_succeeded": "PARTIAL"}.get(
+        result.status, result.status.upper()
+    )
+    out(f"[{label2}] {result.status}")
+
+
+def run_ingest_mlb(
+    settings: Optional[Settings] = None,
+    *,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    game_pk: Optional[int] = None,
+    includes: tuple[str, ...] = (),
+    database_path: Optional[Path] = None,
+    dry_run: bool = False,
+    as_json: bool = False,
+    out: Printer = print,
+    client: Optional[MlbStatsApiClient] = None,
+) -> int:
+    """Ingest MLB official data. GET-only, no key; ``--dry-run`` persists nothing."""
+
+    if settings is None:
+        settings = load_settings()
+    else:
+        settings.enforce_read_only()
+
+    # A game-pk cannot be combined with a date window; validate before any work.
+    if game_pk is not None and (from_date is not None or to_date is not None):
+        out("[FAILED ] --game-pk cannot be combined with --from/--to")
+        return EXIT_ACTIVE_FAILURE
+    if (to_date is not None) and (from_date is None):
+        out("[FAILED ] --to requires --from")
+        return EXIT_ACTIVE_FAILURE
+
+    path = database_path if database_path is not None else settings.resolved_database_path()
+    if not dry_run:
+        code = _db_ready_or_exit(path, "game_schedule_snapshots", out)
+        if code is not None:
+            return code
+    database = Database(path)
+
+    owns_client = client is None
+
+    async def _run() -> MlbIngestResult:
+        mlb = client if client is not None else MlbStatsApiClient(
+            base_url=settings.mlb_stats_api_base_url
+        )
+        try:
+            return await ingest_mlb(
+                database=database, client=mlb, from_date=from_date, to_date=to_date,
+                game_pk=game_pk, includes=includes, dry_run=dry_run,
+            )
+        finally:
+            if owns_client:
+                await mlb.aclose()
+
+    result = asyncio.run(_run())
+    _report_mlb(result, out, as_json=as_json)
+    return EXIT_ACTIVE_FAILURE if result.failed else 0
+
+
+def run_ingest_lineups(
+    settings: Optional[Settings] = None,
+    *,
+    sport: str = "mlb",
+    date: Optional[str] = None,
+    game_pk: Optional[int] = None,
+    database_path: Optional[Path] = None,
+    dry_run: bool = False,
+    as_json: bool = False,
+    out: Printer = print,
+    client: Optional[MlbStatsApiClient] = None,
+) -> int:
+    """Ingest posted lineups. Only ``--sport mlb`` is supported in D2."""
+
+    if settings is None:
+        settings = load_settings()
+    else:
+        settings.enforce_read_only()
+
+    if sport != "mlb":
+        out(f"[FAILED ] ingest-lineups supports --sport mlb only (got {sport!r})")
+        return EXIT_ACTIVE_FAILURE
+    if game_pk is not None and date is not None:
+        out("[FAILED ] --game-pk cannot be combined with --date")
+        return EXIT_ACTIVE_FAILURE
+
+    path = database_path if database_path is not None else settings.resolved_database_path()
+    if not dry_run:
+        code = _db_ready_or_exit(path, "lineup_snapshots", out)
+        if code is not None:
+            return code
+    database = Database(path)
+
+    owns_client = client is None
+
+    async def _run() -> MlbIngestResult:
+        mlb = client if client is not None else MlbStatsApiClient(
+            base_url=settings.mlb_stats_api_base_url
+        )
+        try:
+            return await ingest_lineups(
+                database=database, client=mlb, date=date, game_pk=game_pk, dry_run=dry_run,
+            )
+        finally:
+            if owns_client:
+                await mlb.aclose()
+
+    result = asyncio.run(_run())
+    _report_mlb(result, out, as_json=as_json)
+    return EXIT_ACTIVE_FAILURE if result.failed else 0
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     """CLI dispatch.
 
@@ -960,6 +1141,31 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--json", dest="as_json", action="store_true", help="Machine-readable output"
     )
 
+    mlb = sub.add_parser(
+        "ingest-mlb", help="Ingest MLB official schedule + optional per-game data (GET-only)"
+    )
+    mlb.add_argument("--from", dest="from_date", default=None, metavar="YYYY-MM-DD")
+    mlb.add_argument("--to", dest="to_date", default=None, metavar="YYYY-MM-DD")
+    mlb.add_argument("--game-pk", dest="game_pk", type=int, default=None, metavar="PK")
+    mlb.add_argument(
+        "--include", dest="includes", action="append", choices=list(VALID_INCLUDES),
+        default=[], help="Optional per-game group (repeatable): "
+        + ", ".join(VALID_INCLUDES),
+    )
+    mlb.add_argument("--db", dest="database_path", type=Path, default=None, metavar="PATH")
+    mlb.add_argument("--dry-run", action="store_true", help="Fetch + normalize but persist nothing")
+    mlb.add_argument("--json", dest="as_json", action="store_true", help="Machine-readable output")
+
+    lineups = sub.add_parser(
+        "ingest-lineups", help="Ingest posted lineups for a date or game (GET-only)"
+    )
+    lineups.add_argument("--sport", default="mlb", choices=["mlb"], help="Sport (mlb only in D2)")
+    lineups.add_argument("--date", dest="date", default=None, metavar="YYYY-MM-DD")
+    lineups.add_argument("--game-pk", dest="game_pk", type=int, default=None, metavar="PK")
+    lineups.add_argument("--db", dest="database_path", type=Path, default=None, metavar="PATH")
+    lineups.add_argument("--dry-run", action="store_true", help="Fetch + normalize but persist nothing")
+    lineups.add_argument("--json", dest="as_json", action="store_true", help="Machine-readable output")
+
     args = parser.parse_args(argv)
 
     if args.command == "provider-audit":
@@ -977,6 +1183,35 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.command == "ingest-venues":
         try:
             return run_ingest_venues(
+                database_path=args.database_path,
+                dry_run=args.dry_run,
+                as_json=args.as_json,
+            )
+        except ReadOnlyStartupError as exc:
+            print(str(exc))
+            return 2
+
+    if args.command == "ingest-mlb":
+        try:
+            return run_ingest_mlb(
+                from_date=args.from_date,
+                to_date=args.to_date,
+                game_pk=args.game_pk,
+                includes=tuple(dict.fromkeys(args.includes)),
+                database_path=args.database_path,
+                dry_run=args.dry_run,
+                as_json=args.as_json,
+            )
+        except ReadOnlyStartupError as exc:
+            print(str(exc))
+            return 2
+
+    if args.command == "ingest-lineups":
+        try:
+            return run_ingest_lineups(
+                sport=args.sport,
+                date=args.date,
+                game_pk=args.game_pk,
                 database_path=args.database_path,
                 dry_run=args.dry_run,
                 as_json=args.as_json,

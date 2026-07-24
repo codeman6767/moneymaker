@@ -224,6 +224,39 @@ PHASE_D1_TABLES: Final[tuple[str, ...]] = (
     "provider_capabilities",
 )
 
+#: Tables created by the D2 migration d011_official_games_stats, in dependency
+#: order. All are append-only official observations anchored on provider
+#: references (no second canonical game/team/player table).
+PHASE_D2_TABLES: Final[tuple[str, ...]] = (
+    "game_schedule_snapshots",
+    "game_result_snapshots",
+    "mlb_inning_lines",
+    "team_game_statistics",
+    "player_game_statistics",
+    "roster_snapshots",
+    "probable_pitcher_snapshots",
+    "lineup_snapshots",
+    "lineup_players",
+)
+
+#: Canonical game statuses an official schedule/result observation maps to. A
+#: superset of GAME_STATUSES with 'warmup' and an explicit 'unknown' -- an
+#: unmapped provider status is recorded as 'unknown' (never guessed final/
+#: scheduled) plus a data-quality issue. Mirrors the CHECK in d011.
+MAPPED_GAME_STATUSES: Final[tuple[str, ...]] = (
+    "scheduled",
+    "pregame",
+    "warmup",
+    "in_progress",
+    "delayed",
+    "postponed",
+    "suspended",
+    "final",
+    "cancelled",
+    "rescheduled",
+    "unknown",
+)
+
 #: Approved venue roof-type vocabulary (mirrors the CHECK in d009).
 VENUE_ROOF_TYPES: Final[tuple[str, ...]] = ("open", "retractable", "dome", "fixed", "indoor")
 
@@ -282,6 +315,17 @@ APPEND_ONLY_TABLES: Final[tuple[str, ...]] = (
     # `data_quality_issues` is mutable (a `resolved_at`/resolution can be set).
     "match_candidates",
     "provider_capabilities",
+    # Phase D2: every official MLB observation is append-only (BEFORE
+    # UPDATE/DELETE triggers in d011). Current state is derived, never rewritten.
+    "game_schedule_snapshots",
+    "game_result_snapshots",
+    "mlb_inning_lines",
+    "team_game_statistics",
+    "player_game_statistics",
+    "roster_snapshots",
+    "probable_pitcher_snapshots",
+    "lineup_snapshots",
+    "lineup_players",
 )
 
 

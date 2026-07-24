@@ -71,6 +71,17 @@ MATCH_CANDIDATE_PREFIX: Final = "mcn_"
 DATA_QUALITY_PREFIX: Final = "dqi_"
 PROVIDER_CAPABILITY_PREFIX: Final = "cap_"
 
+# Phase D2: official MLB game/stat snapshots.
+SCHEDULE_SNAPSHOT_PREFIX: Final = "gss_"
+RESULT_SNAPSHOT_PREFIX: Final = "grs_"
+INNING_LINE_PREFIX: Final = "mil_"
+TEAM_GAME_STAT_PREFIX: Final = "tgs_"
+PLAYER_GAME_STAT_PREFIX: Final = "pgs_"
+ROSTER_SNAPSHOT_PREFIX: Final = "ros_"
+PROBABLE_PITCHER_PREFIX: Final = "pps_"
+LINEUP_SNAPSHOT_PREFIX: Final = "lns_"
+LINEUP_PLAYER_PREFIX: Final = "lnp_"
+
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
 
 
@@ -273,3 +284,40 @@ def new_data_quality_id() -> str:
 
 def new_provider_capability_id() -> str:
     return prefixed_id(PROVIDER_CAPABILITY_PREFIX)
+
+
+# Phase D2 factories.
+def new_schedule_snapshot_id() -> str:
+    return prefixed_id(SCHEDULE_SNAPSHOT_PREFIX)
+
+
+def new_result_snapshot_id() -> str:
+    return prefixed_id(RESULT_SNAPSHOT_PREFIX)
+
+
+def new_inning_line_id() -> str:
+    return prefixed_id(INNING_LINE_PREFIX)
+
+
+def new_team_game_stat_id() -> str:
+    return prefixed_id(TEAM_GAME_STAT_PREFIX)
+
+
+def new_player_game_stat_id() -> str:
+    return prefixed_id(PLAYER_GAME_STAT_PREFIX)
+
+
+def new_roster_snapshot_id() -> str:
+    return prefixed_id(ROSTER_SNAPSHOT_PREFIX)
+
+
+def new_probable_pitcher_id() -> str:
+    return prefixed_id(PROBABLE_PITCHER_PREFIX)
+
+
+def new_lineup_snapshot_id() -> str:
+    return prefixed_id(LINEUP_SNAPSHOT_PREFIX)
+
+
+def new_lineup_player_id() -> str:
+    return prefixed_id(LINEUP_PLAYER_PREFIX)

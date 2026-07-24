@@ -214,12 +214,12 @@ version 1 and collide. Applied so far:
 | 008 | `c008_kalshi_metadata_integrity` | `kalshi_events`/`kalshi_markets` split `raw_response_id` into `first_raw_response_id` (immutable) + `current_raw_response_id`/`current_raw_response_hash`; `ingestion_runs.records_updated` added (§3.7.1) |
 | 009 | `d009_provider_infra` *(Phase D1 — built)* | provider_team/player/game_references, venues, venue_aliases, entity_match_decisions, match_candidates, data_quality_issues, provider_capabilities |
 | 010 | `d010_provider_audit_integrity` *(Phase D1 — built)* | `provider_capabilities` evidence columns (`declared_state`/`observed_state`/`is_observed` + probe/endpoint/status/error/verified_at) separating declared from observed capabilities; partial unique index on `venue_aliases (provider, provider_venue_id)` pinning a provider venue id to one canonical venue; `data_quality_issues` resolution-only-update + no-delete triggers |
-| 011 | `d011_official_games_stats` *(planned)* | game_schedule/result snapshots, team/player_game_statistics, mlb_inning_lines, roster_snapshots, probable_pitcher_snapshots, lineup_snapshots, lineup_players |
+| 011 | `d011_official_games_stats` *(Phase D2 — built)* | game_schedule/result snapshots, mlb_inning_lines, team/player_game_statistics, roster_snapshots, probable_pitcher_snapshots, lineup_snapshots, lineup_players — append-only, transition-aware, anchored on provider references (no second canonical game/team/player table) |
 | 012 | `d012_nba_specifics` *(planned)* | nba_quarter_lines, injury_snapshots, play_snapshots |
 | 013 | `d013_weather` *(planned)* | weather_snapshots |
 
-Migrations 011–013 are **planned Phase D work, not yet built** (`d009` and `d010`
-are built); the authoritative
+Migrations 012–013 are **planned Phase D work, not yet built** (`d009`, `d010`,
+and `d011` are built); the authoritative
 Phase D schema design is `PHASE_D_IMPLEMENTATION_PLAN.md` §2, and the earlier
 §3.7–§3.9 sketches below (injuries, lineups, probable pitchers, weather, match
 decisions, data quality) are the design targets those migrations will implement,
@@ -1197,7 +1197,8 @@ sports_quant/
 ✅    c007_kalshi.sql
 ✅    c008_kalshi_metadata_integrity.sql
 ✅    d009_provider_infra.sql  d010_provider_audit_integrity.sql   (Phase D1, built)
-◻     d011_official_games_stats.sql  d012_nba_specifics.sql  d013_weather.sql  (Phase D, planned)
+✅    d011_official_games_stats.sql                                 (Phase D2, built)
+◻     d012_nba_specifics.sql  d013_weather.sql                      (Phase D, planned)
     repositories/
 ✅    __init__.py  base.py
 ✅    leagues.py           # LeagueRepository + SeasonRepository

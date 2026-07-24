@@ -142,6 +142,11 @@ class CapabilityProbe:
     resolve: Optional[ResolveFn] = None
     skip_reason: str = "no suitable dependency was available to probe this capability"
     extra_capabilities: Optional[ExtraCapsFn] = None
+    #: An **optional validation probe** carries no capabilities of its own: it runs
+    #: to preserve extra raw-response evidence (e.g. a person lookup validating a
+    #: roster's player id) but never produces a capability outcome and its failure
+    #: is not an active operational failure. Keeps capability outcomes unique.
+    optional: bool = False
 
 
 @dataclass
@@ -239,7 +244,6 @@ async def _run_probe(
       a failure, never a false observation).
     """
 
-    fetch = probe.fetch
     if probe.resolve is not None:
         fetch = probe.resolve(prior)
         if fetch is None:
@@ -247,8 +251,9 @@ async def _run_probe(
             return _ProbeResult(
                 probe, None, None, None, None, probe.skip_reason, skipped=True
             )
-    if fetch is None:  # pragma: no cover - a misconfigured probe
-        raise ValueError(f"probe {probe.name!r} has neither fetch nor a resolver")
+    else:
+        fetch = probe.fetch
+    assert fetch is not None  # every probe carries a fetch callable or a resolver
 
     try:
         response = await fetch()
@@ -330,9 +335,16 @@ async def audit_provider(
             result.tier_restricted = True
         if pr.observed_state in (CapabilityState.SUPPORTED, CapabilityState.PAID_TIER_REQUIRED):
             auth_evidence = True  # the provider recognized the key
-        if pr.observed_state is not None:
-            result.probes_succeeded += 1  # a useful, completed probe
-        if pr.error_kind in _ACTIVE_FAILURE_KINDS and pr.observed_state is None:
+        if pr.observed_state is not None and not probe.optional:
+            result.probes_succeeded += 1  # a useful, completed capability probe
+        # An optional validation probe (e.g. the MLB person lookup) never drives
+        # overall status: it has no capability of its own, so its failure is not an
+        # active operational failure -- only a lost bit of extra evidence.
+        if (
+            not probe.optional
+            and pr.error_kind in _ACTIVE_FAILURE_KINDS
+            and pr.observed_state is None
+        ):
             result.active_failures += 1
             if result.error_message is None:
                 result.error_type = pr.error_kind.value if pr.error_kind else None
@@ -743,12 +755,6 @@ def build_mlb_statsapi_probes(client) -> list[CapabilityProbe]:
         pid = None if resp is None else first_person_id_from_roster(resp.data)
         return None if pid is None else (lambda: client.fetch_person(pid))
 
-    def person_extra(_response: ProviderResponse) -> tuple[ProviderCapability, ...]:
-        # A reachable person endpoint adds confirming players evidence; carried as
-        # an extra (not a base capability) so a skipped person probe emits no
-        # redundant players row -- the roster probe already covers players.
-        return (_C.PLAYERS,)
-
     _no_team = "no suitable team id was available from the teams probe"
     _no_person = "no suitable person id was available from the roster probe"
 
@@ -759,13 +765,18 @@ def build_mlb_statsapi_probes(client) -> list[CapabilityProbe]:
             lambda: client.fetch_schedule(),
         ),
         CapabilityProbe("venues", "/venues", (_C.VENUES,), lambda: client.fetch_venues()),
+        # `roster` is the primary players endpoint-access evidence.
         CapabilityProbe(
             "roster", "/teams/{id}/roster", (_C.PLAYERS,),
             resolve=resolve_roster, skip_reason=_no_team,
         ),
+        # `person` is an OPTIONAL validation probe: it re-checks a player id/payload
+        # extracted from the roster and preserves its raw response as evidence, but
+        # carries NO capability -- so it can never create a second `players`
+        # outcome, and its failure never fails the audit.
         CapabilityProbe(
             "person", "/people/{id}", (),
-            resolve=resolve_person, skip_reason=_no_person, extra_capabilities=person_extra,
+            resolve=resolve_person, skip_reason=_no_person, optional=True,
         ),
     ]
 
