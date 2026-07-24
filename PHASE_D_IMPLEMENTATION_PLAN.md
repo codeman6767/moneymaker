@@ -24,6 +24,22 @@ canonical matching.
 > matching) remain unbuilt. This document is the build contract; providers are
 > chosen in `PHASE_D_PROVIDER_DECISIONS.md` (doc-review date 2026-07-23).
 
+> **Live D2 gate (2026-07-24).** The controlled live MLB StatsAPI provider audit
+> and bounded dry-run smoke test completed successfully on July 24, 2026. The
+> audit exited 0 (`succeeded`) with 5 GET-only keyless requests, 5 observed
+> capabilities (teams / schedules / games / venues / players, each with
+> probe/endpoint/HTTP-200/raw-response evidence), 14 declared-only capabilities,
+> 0 active failures, and one honest `DQ-CAP-001` note; authentication was
+> correctly not applicable for this keyless provider. The smoke test covered the
+> five completed MLB games from July 23, 2026 and exercised results, box scores,
+> inning lines, probable pitchers, posted lineups, and date-aware rosters:
+> `--dry-run` exited 0 with `run_id=null`, 5 games received, 21 sequential
+> GET-only requests, 10 roster requests (one per distinct team/official-date
+> pair), and 0 corrections / DQ issues / rejections / active failures. The dry
+> run persisted nothing — its isolated target database was never created and the
+> corpus changed only from the persisted audit. No persisted MLB ingestion or
+> historical backfill has been performed. D3–D5 have not started.
+
 Companion documents: `PHASE_D_PROVIDER_DECISIONS.md`, `DATA_ARCHITECTURE.md`,
 `POINT_IN_TIME_DATA.md`, `ENTITY_MATCHING.md`, `DATA_FOUNDATION_PLAN.md`.
 

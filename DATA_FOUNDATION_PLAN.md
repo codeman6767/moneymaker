@@ -78,6 +78,25 @@ note instead of substituting today's roster. Every D1/D2 test uses mocked
 transports; no live provider call was made for this work. Phase E remains
 planning.
 
+**Controlled live MLB StatsAPI check (2026-07-24).** The controlled live MLB
+StatsAPI provider audit and bounded dry-run smoke test completed successfully on
+July 24, 2026. The audit (`provider-audit --provider mlb_statsapi`) exited 0 with
+status `succeeded`, made 5 GET-only keyless requests, and recorded 5 externally
+observed capabilities (teams, schedules, games, venues, players — each with
+probe/endpoint/HTTP-200/raw-response evidence) alongside 14 declared-only
+capabilities (19 recorded), 0 active failures, and a single honest capability
+note (`DQ-CAP-001`: `confirmed_pregame_starters` unavailable). Authentication was
+correctly reported as not applicable for this keyless provider. The smoke test
+covered the five completed MLB games from July 23, 2026 and exercised results,
+box scores, inning lines, probable pitchers, posted lineups, and date-aware
+rosters (`ingest-mlb --dry-run`, exit 0, `dry_run=true`, `run_id=null`, status
+`succeeded`): 5 games received, 21 sequential GET-only requests, 10 roster
+requests (one per distinct team/official-date pair), 0 corrections, 0
+data-quality issues, 0 rejections, and 0 active failures. The dry run persisted
+nothing — its isolated target database was never created and the corpus changed
+only from the persisted audit run. No persisted MLB ingestion or historical
+backfill has been performed. D3–D5 have not started.
+
 | Phase | Scope | Status |
 | --- | --- | --- |
 | A | Database engine, migrations, core entities, `db-init` | ✅ Complete (schema v3) |
