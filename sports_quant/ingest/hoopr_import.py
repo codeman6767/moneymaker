@@ -199,7 +199,17 @@ def _read_parquet(path: Path, *, schema: str, schema_version: int) -> tuple[list
     file_bytes = path.read_bytes()
     file_sha256 = hashlib.sha256(file_bytes).hexdigest()
 
-    import pyarrow.parquet as pq  # local import: no R, and pyarrow only when used
+    # Local import: no R runtime, and the large Arrow wheel is an OPTIONAL
+    # dependency (pyproject `tracking` extra), pulled in only when Parquet import
+    # is actually invoked. A missing package is an actionable error, not a crash.
+    try:
+        import pyarrow.parquet as pq
+    except ImportError as exc:  # pragma: no cover - exercised only without pyarrow
+        raise HooprImportError(
+            "hoopR Parquet import requires the optional 'pyarrow' package, which is "
+            "not installed. Install it with: pip install \"sports-quant[tracking]\" "
+            "(or pip install pyarrow)."
+        ) from exc
 
     table = pq.read_table(path)
     columns = set(table.column_names)

@@ -4,11 +4,12 @@ Concrete, staged implementation design for official MLB/NBA data, weather, and
 canonical matching.
 
 > **Status: Phase D2 MLB ingestion code complete and its controlled live gate
-> passed on July 24, 2026. D3 NBA ingestion code is now complete against mocked
-> BALLDONTLIE GOAT contracts and offline hoopR fixtures; the live BALLDONTLIE GOAT
-> capability audit and bounded dry-run smoke test have NOT yet been performed, and
-> no persisted NBA ingestion or historical backfill has been performed. D4–D5 not
-> started.** D1 (schema v10) built the
+> passed on July 24, 2026. D3 NBA ingestion code is complete and correctness-
+> repaired against mocked BALLDONTLIE GOAT contracts and offline hoopR fixtures
+> (schema v13, migrations `d012_nba_specifics` + `d013_nba_typed_repairs`); the
+> live BALLDONTLIE GOAT capability audit and bounded dry-run smoke test have NOT
+> yet been performed, and no persisted NBA ingestion or historical backfill has
+> been performed. D4–D5 not started.** D1 (schema v10) built the
 > typed provider-capability system, the four provider clients over a shared
 > GET-only base, the tightened `http_policy` allow-lists, and the evidence-backed
 > dependency-aware `provider-audit` + `ingest-venues` CLI. **D2 (migration
@@ -43,27 +44,38 @@ canonical matching.
 > corpus changed only from the persisted audit. No persisted MLB ingestion or
 > historical backfill has been performed.
 
-> **D3 NBA build (mocked/offline only).** Migration `d012_nba_specifics` (schema
-> v12) adds three NBA-specific append-only, transition-aware observation tables —
-> `nba_quarter_lines`, `injury_snapshots`, `play_snapshots` — while NBA schedule /
-> result / box / roster / lineup data reuses the d011 tables (no second canonical
-> game system). NBA game results map onto `game_result_snapshots` (home/away score
-> → `home_runs`/`away_runs`, current period → `innings_played`) so the corrected
-> D2 correction semantics apply unchanged; NBA box team lines reuse
-> `team_game_statistics`, and NBA player lines reuse `player_game_statistics` with
-> the two CHECK-permitted `role` values repurposed (`batting` = traditional box
-> line, `pitching` = advanced-stats line) so their transition anchors stay
-> distinct. The BALLDONTLIE client gained documented date-range / game-id / cursor
-> request shapes; a typed `nba_ingestor` (`ingest-nba` + `ingest-injuries`) with
-> safe cursor pagination (repeated-cursor + page/record bounds, honest truncation
-> reporting), raw-first persistence, capability recording, and a bounded
-> zero-persistence dry-run; and a typed offline `hoopr_import` Parquet boundary
-> (no R, no network, explicit supported schema, file-level SHA-256 provenance,
-> idempotent re-import, `import-hoopr` CLI). All verified against mocked GOAT
-> contracts and a synthetic Parquet fixture. **The live BALLDONTLIE GOAT capability
-> audit and bounded dry-run smoke test have not yet been performed; no persisted
-> NBA ingestion or historical backfill has been performed. D4–D5 have not
-> started.**
+> **D3 NBA build + correctness repair (mocked/offline only).** Migration
+> `d012_nba_specifics` (schema v12) adds three NBA-specific append-only,
+> transition-aware observation tables — `nba_quarter_lines`, `injury_snapshots`,
+> `play_snapshots`. The forward-only repair migration `d013_nba_typed_repairs`
+> (schema v13) then makes NBA storage sport-correct: NBA game results, team
+> statistics, and player statistics live in dedicated `nba_game_results`
+> (home/away **points** + **period**), `nba_team_statistics`, and
+> `nba_player_statistics` (`stat_group IN ('traditional','advanced')`) tables —
+> **no NBA row is ever stored as baseball `home_runs`/`innings_played` or
+> role `batting`/`pitching`**, and the baseball-named d011 tables are MLB-only
+> again. d013 also adds `injury_snapshots.return_estimate`, preserving the
+> provider's exact return-estimate text (e.g. `"Nov 17"`) with a parsed ISO
+> `return_date` only for an unambiguous full date (no fabricated year). Identity
+> still anchors on `provider_game_references` (no second canonical game system);
+> the corrected D2 correction semantics apply to NBA points/winner unchanged.
+> Box scores are associated with a schedule game by the deterministic
+> `(official date, provider home-team id, provider visitor-team id)` key (a
+> genuine provider game id is honoured when present); a no-match/ambiguous match
+> is rejected with a `DQ-NBA-BOX-001` note rather than guessed. Quarter lines are
+> derived from the detailed box-score response (not the bare `/v1/games` listing,
+> which has no per-quarter field). The BALLDONTLIE client gained documented
+> date-range / game-id / cursor request shapes; a typed `nba_ingestor`
+> (`ingest-nba` + `ingest-injuries`) with safe cursor pagination, raw-first
+> persistence, capability recording, and a bounded zero-persistence dry-run; and a
+> typed offline `hoopr_import` Parquet boundary (no R, no network, explicit
+> supported schema, file-level SHA-256 provenance, idempotent re-import,
+> `import-hoopr` CLI). `pyarrow` is an OPTIONAL (`tracking` extra) dependency: the
+> hoopR tests skip cleanly when it is absent, so the standard `.[dev]` CI job
+> collects and runs the full non-hoopR D3 suite. **The live BALLDONTLIE GOAT
+> capability audit and bounded dry-run smoke test have not yet been performed; no
+> persisted NBA ingestion or historical backfill has been performed. D4–D5 have
+> not started.**
 
 Companion documents: `PHASE_D_PROVIDER_DECISIONS.md`, `DATA_ARCHITECTURE.md`,
 `POINT_IN_TIME_DATA.md`, `ENTITY_MATCHING.md`, `DATA_FOUNDATION_PLAN.md`.
@@ -189,8 +201,9 @@ New immutable migrations, one global sequence continuing from `c008` (v8):
 | 009 | `d009_provider_infra` *(built)* | `provider_team_references`, `provider_player_references`, `provider_game_references`, `venues`, `venue_aliases`, `entity_match_decisions`, `match_candidates`, `data_quality_issues`, `provider_capabilities` |
 | 010 | `d010_provider_audit_integrity` *(built)* | `provider_capabilities` evidence columns (`declared_state`/`observed_state`/`is_observed`/`probe_name`/`endpoint`/`http_status`/`error_kind`/`verified_at`) separating declared from observed; partial unique index on `venue_aliases (provider, provider_venue_id)`; `data_quality_issues` resolution-only-update + no-delete triggers |
 | 011 | `d011_official_games_stats` *(built, D2)* | `game_schedule_snapshots`, `game_result_snapshots`, `mlb_inning_lines`, `team_game_statistics`, `player_game_statistics`, `roster_snapshots`, `probable_pitcher_snapshots`, `lineup_snapshots`, `lineup_players` — all append-only, transition-aware, anchored on `provider_game_references`/`provider_team_references` (no second canonical game/team/player table) |
-| 012 | `d012_nba_specifics` *(built, D3)* | `nba_quarter_lines`, `injury_snapshots`, `play_snapshots` — append-only, transition-aware; NBA schedule/result/box/roster/lineup reuse d011 (no second canonical game system). GOAT plays / substitutions best-effort; also the offline hoopR play boundary |
-| 013 | `d013_weather` *(planned)* | `weather_snapshots` |
+| 012 | `d012_nba_specifics` *(built, D3)* | `nba_quarter_lines`, `injury_snapshots`, `play_snapshots` — append-only, transition-aware; anchored on `provider_game_references` (no second canonical game system). GOAT plays / substitutions best-effort; also the offline hoopR play boundary |
+| 013 | `d013_nba_typed_repairs` *(built, D3 repair)* | `nba_game_results` (home/away **points** + **period**), `nba_team_statistics`, `nba_player_statistics` (`stat_group IN ('traditional','advanced')`) — sport-correct NBA storage replacing the earlier baseball-named d011 reuse; plus `injury_snapshots.return_estimate` (exact provider text). MLB tables untouched |
+| 014 | `d014_weather` *(planned)* | `weather_snapshots` |
 
 ### 3.1 Universal columns (every time-sensitive table)
 
@@ -637,12 +650,18 @@ Model column = recommended driver.
 
 ### D3 — NBA ingestion  ·  model: **Sonnet**
 
-> **Status: code complete against mocked BALLDONTLIE GOAT contracts and offline
-> hoopR fixtures (schema v12, migration `d012_nba_specifics`).** Created
+> **Status: code complete and correctness-repaired against mocked BALLDONTLIE
+> GOAT contracts and offline hoopR fixtures (schema v13, migrations
+> `d012_nba_specifics` + `d013_nba_typed_repairs`).** Created
 > `ingest/nba_ingestor.py` (`ingest-nba`, `ingest-injuries`), `db/repositories/nba.py`
-> (quarter / injury / play repositories), `ingest/hoopr_import.py` (`import-hoopr`),
-> and `tests/test_phase_d3_nba.py`; extended the BALLDONTLIE client and `cli.py`.
-> The optional PDF injury cross-check and the SportsDataIO comparison stub were
+> (quarter / injury / play + NBA-typed result / team-stat / player-stat
+> repositories), `ingest/hoopr_import.py` (`import-hoopr`), and
+> `tests/test_phase_d3_nba.py` + `tests/test_phase_d3_hoopr.py`; extended the
+> BALLDONTLIE client and `cli.py`. The correctness repair de-baseballed NBA
+> storage (points/period + NBA stat groups), added deterministic box-score
+> matching, preserved exact injury return estimates, and made `pyarrow` a clean
+> optional dependency so the standard CI suite collects and runs without it. The
+> optional PDF injury cross-check and the SportsDataIO comparison stub were
 > deliberately **not** built (out of scope for this pass). **The live BALLDONTLIE
 > GOAT capability audit and bounded dry-run smoke test have not yet been performed;
 > no persisted NBA ingestion or historical backfill has been performed.**
@@ -677,8 +696,10 @@ Model column = recommended driver.
   stub); optional `providers/nba_injury_report.py` (PDF cross-check) **only if
   built**; mocked GOAT fixtures (+ small Parquet + optional fixture PDF) + tests.
 - **Modify:** `cli.py` (`ingest-nba`, `ingest-injuries --sport nba`).
-- **Migration:** `d012` (v12). **Tables:** nba_quarter_lines, injury_snapshots,
-  play_snapshots (box/result/roster reuse d011).
+- **Migration:** `d012` (v12): nba_quarter_lines, injury_snapshots, play_snapshots.
+  **Repair migration `d013` (v13):** nba_game_results, nba_team_statistics,
+  nba_player_statistics (sport-correct NBA storage) + `injury_snapshots.return_estimate`.
+  Schedule + lineups reuse d011; the baseball-named d011 result/box tables are MLB-only.
 - **Completion:** mocked GOAT sweep persists the **required** outputs; each
   **conditional** output is recorded with an explicit capability state; a tier
   error is reported as capability-unavailable (not failure); hoopR Parquet import
@@ -697,7 +718,7 @@ Model column = recommended driver.
 - **Create:** `ingest/weather_ingestor.py`; weather repository; mocked NWS/Open-Meteo
   fixtures + tests.
 - **Modify:** `cli.py` (`ingest-weather`).
-- **Migration:** `d013` (v13). **Tables:** weather_snapshots (venues from d009).
+- **Migration:** `d014` (v14). **Tables:** weather_snapshots (venues from d009).
 - **Completion:** forecast + actual persisted distinctly; outdoor-only gating by
   `venues.roof_type`; leakage-free historical-forecast; dome/indoor skipped;
   non-US → Open-Meteo; idempotent; append-only; `--dry-run` persists nothing.

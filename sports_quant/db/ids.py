@@ -87,6 +87,11 @@ QUARTER_LINE_PREFIX: Final = "nql_"
 INJURY_SNAPSHOT_PREFIX: Final = "inj_"
 PLAY_SNAPSHOT_PREFIX: Final = "ply_"
 
+# Phase D3 repair (d013): NBA-typed results + team/player statistics.
+NBA_RESULT_PREFIX: Final = "nbr_"
+NBA_TEAM_STAT_PREFIX: Final = "nts_"
+NBA_PLAYER_STAT_PREFIX: Final = "nps_"
+
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
 
 
@@ -339,3 +344,16 @@ def new_injury_snapshot_id() -> str:
 
 def new_play_snapshot_id() -> str:
     return prefixed_id(PLAY_SNAPSHOT_PREFIX)
+
+
+# Phase D3 repair (d013) factories.
+def new_nba_result_id() -> str:
+    return prefixed_id(NBA_RESULT_PREFIX)
+
+
+def new_nba_team_stat_id() -> str:
+    return prefixed_id(NBA_TEAM_STAT_PREFIX)
+
+
+def new_nba_player_stat_id() -> str:
+    return prefixed_id(NBA_PLAYER_STAT_PREFIX)

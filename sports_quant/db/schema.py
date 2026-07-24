@@ -248,6 +248,16 @@ PHASE_D3_TABLES: Final[tuple[str, ...]] = (
     "play_snapshots",
 )
 
+#: Tables created by the D3 repair migration d013_nba_typed_repairs. NBA-typed
+#: results + team/player statistics that replace the baseball-named d011 reuse;
+#: identity still anchors on `provider_game_references` (no second canonical game
+#: system). d013 also adds `injury_snapshots.return_estimate` (a column, no table).
+PHASE_D3_REPAIR_TABLES: Final[tuple[str, ...]] = (
+    "nba_game_results",
+    "nba_team_statistics",
+    "nba_player_statistics",
+)
+
 #: Canonical game statuses an official schedule/result observation maps to. A
 #: superset of GAME_STATUSES with 'warmup' and an explicit 'unknown' -- an
 #: unmapped provider status is recorded as 'unknown' (never guessed final/
@@ -340,6 +350,10 @@ APPEND_ONLY_TABLES: Final[tuple[str, ...]] = (
     "nba_quarter_lines",
     "injury_snapshots",
     "play_snapshots",
+    # Phase D3 repair (d013): NBA-typed results + team/player statistics.
+    "nba_game_results",
+    "nba_team_statistics",
+    "nba_player_statistics",
 )
 
 

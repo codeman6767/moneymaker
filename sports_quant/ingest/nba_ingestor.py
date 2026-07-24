@@ -47,19 +47,18 @@ from streaming.event_envelope import canonical_json
 from ..db.engine import Database, transaction
 from ..db.repositories.capabilities import SqliteCapabilityRepository
 from ..db.repositories.data_quality import SqliteDataQualityRepository
-from ..db.repositories.game_statistics import (
-    SqlitePlayerGameStatRepository,
-    SqliteTeamGameStatRepository,
-)
 from ..db.repositories.ingestion_runs import SqliteIngestionRunRepository
 from ..db.repositories.lineups import LineupPlayerInput, SqliteLineupRepository
 from ..db.repositories.nba import (
     SqliteInjurySnapshotRepository,
+    SqliteNbaPlayerStatRepository,
+    SqliteNbaResultRepository,
+    SqliteNbaTeamStatRepository,
     SqlitePlaySnapshotRepository,
     SqliteQuarterLineRepository,
 )
 from ..db.repositories.observations import ObservationOutcome
-from ..db.repositories.official_games import SqliteResultRepository, SqliteScheduleRepository
+from ..db.repositories.official_games import SqliteScheduleRepository
 from ..db.repositories.raw_responses import SqliteRawResponseRepository, response_content_hash
 from ..db.repositories.references import SqliteProviderReferenceRepository
 from ..db.schema import to_iso
@@ -274,12 +273,17 @@ class _NormGame:
     home_score: Optional[int]
     away_score: Optional[int]
     winning_side: Optional[str]
-    quarters: tuple[_QuarterRow, ...]
     raw_game: dict[str, Any]
 
 
 def _normalize_game(game: dict[str, Any]) -> tuple[Optional[_NormGame], Optional[str]]:
-    """Normalize one BALLDONTLIE game dict, or return a rejection reason."""
+    """Normalize one BALLDONTLIE game dict, or return a rejection reason.
+
+    Uses only documented ``/v1/games`` fields (id, date, season, status, period,
+    home/visitor team + score). Per-quarter scores are NOT a documented games
+    field, so they are never read here -- quarter lines are derived from the
+    detailed box-score response instead (see ``_parse_box_quarters``).
+    """
 
     game_id = _provider_id(game, "id")
     if game_id is None:
@@ -312,23 +316,25 @@ def _normalize_game(game: dict[str, Any]) -> tuple[Optional[_NormGame], Optional
             home_score=home_score,
             away_score=away_score,
             winning_side=winning,
-            quarters=tuple(_parse_quarters(game)),
             raw_game=game,
         ),
         None,
     )
 
 
-def _parse_quarters(game: dict[str, Any]) -> list[_QuarterRow]:
-    """Parse per-period lines from a game's ``periods`` array.
+def _parse_box_quarters(box_game: dict[str, Any]) -> list[_QuarterRow]:
+    """Derive per-period lines from a matched box-score game (best-effort).
 
-    ONLY periods the provider actually supplied become rows; an absent period is
-    never a row, and a missing per-side score stays ``None`` (distinct from an
-    explicit 0). Regulation quarters and overtime periods are both supported.
+    Quarter/period scores are not exposed by the ``/v1/games`` listing, so they
+    are derived from the richer box-score object when it supplies a ``periods``
+    array (the exact GOAT field is pending live verification). ONLY periods the
+    provider actually supplied become rows; an absent period is never a row, and a
+    missing per-side score stays ``None`` (distinct from an explicit 0). Regulation
+    quarters and overtime periods are both supported.
     """
 
     rows: list[_QuarterRow] = []
-    periods = game.get("periods")
+    periods = box_game.get("periods")
     seen: set[tuple[int, str]] = set()
     for entry in periods if isinstance(periods, list) else []:
         if not isinstance(entry, dict):
@@ -350,9 +356,10 @@ def _parse_quarters(game: dict[str, Any]) -> list[_QuarterRow]:
 class _PlayerStatRow:
     provider_player_id: str
     provider_team_id: Optional[str]
-    role: str  # 'batting' = traditional line, 'pitching' = advanced line
+    stat_group: str  # 'traditional' (box line) | 'advanced' (advanced-stats line)
     position: Optional[str]
     is_starter: Optional[bool]
+    points: Optional[int]
     stats_json: str
 
 
@@ -360,15 +367,21 @@ class _PlayerStatRow:
 class _TeamStatRow:
     provider_team_id: str
     home_away: str
-    extra_json: str
+    points: Optional[int]
+    stats_json: str
 
 
 def _stat_player(row: dict[str, Any]) -> Optional[str]:
     return _provider_id(_as_dict(row.get("player"))) or _provider_id(row, "player_id")
 
 
-def _normalize_stat_row(row: dict[str, Any], *, role: str) -> Optional[_PlayerStatRow]:
-    """Normalize one ``/v1/stats`` or advanced-stats row into a player line."""
+def _normalize_stat_row(row: dict[str, Any], *, stat_group: str) -> Optional[_PlayerStatRow]:
+    """Normalize one ``/v1/stats`` or advanced-stats row into a player line.
+
+    ``stat_group`` is an NBA-appropriate discriminator ('traditional' | 'advanced'),
+    never a baseball role. ``points`` (``pts``) is surfaced as a typed column; the
+    full sport-neutral stat line is preserved as canonical JSON.
+    """
 
     if not isinstance(row, dict):
         return None
@@ -381,29 +394,28 @@ def _normalize_stat_row(row: dict[str, Any], *, role: str) -> Optional[_PlayerSt
     return _PlayerStatRow(
         provider_player_id=pid,
         provider_team_id=_provider_id(_as_dict(row.get("team"))) or _provider_id(row, "team_id"),
-        role=role,
+        stat_group=stat_group,
         position=_opt_str(row.get("position")),
         is_starter=is_starter,
+        points=_opt_int(row.get("pts")),
         stats_json=canonical_json(stats),
     )
 
 
-def _game_id_of_stat(row: dict[str, Any]) -> Optional[str]:
-    return _provider_id(_as_dict(row.get("game"))) or _provider_id(row, "game_id")
+def _normalize_box_team_lines(box_game: dict[str, Any]) -> list[_TeamStatRow]:
+    """Normalize a single box-score game into per-team lines (team-level only).
 
-
-def _normalize_box(
-    box_game: dict[str, Any],
-) -> tuple[list[_TeamStatRow], list[_PlayerStatRow]]:
-    """Normalize a single box-score game into team lines + player lines.
-
-    Team lines carry the team block (without its ``players`` array) as ``extra``;
-    player lines carry each per-player box stat (role ``'batting'``). Missing
-    values stay missing.
+    Player statistics come from ``/v1/stats`` (a distinct include), so the box
+    path deliberately produces only team lines here: the team ``points`` (from the
+    game's home/visitor score) plus the team block (without its ``players`` array)
+    as the sport-neutral JSON stat line. Missing values stay missing.
     """
 
+    team_points = {
+        "home": _opt_int(box_game.get("home_team_score")),
+        "away": _opt_int(box_game.get("visitor_team_score")),
+    }
     team_rows: list[_TeamStatRow] = []
-    player_rows: list[_PlayerStatRow] = []
     for side, key in (("home", "home_team"), ("away", "visitor_team")):
         block = _as_dict(box_game.get(key))
         provider_team_id = _provider_id(block)
@@ -412,26 +424,9 @@ def _normalize_box(
         team_meta = {k: v for k, v in block.items() if k != "players"}
         team_rows.append(
             _TeamStatRow(provider_team_id=provider_team_id, home_away=side,
-                         extra_json=canonical_json(team_meta))
+                         points=team_points[side], stats_json=canonical_json(team_meta))
         )
-        players = block.get("players")
-        for person in players if isinstance(players, list) else []:
-            if not isinstance(person, dict):
-                continue
-            pid = _stat_player(person)
-            if pid is None:
-                continue
-            stats = {k: v for k, v in person.items() if k != "player"}
-            starter = person.get("starter")
-            player_rows.append(
-                _PlayerStatRow(
-                    provider_player_id=pid, provider_team_id=provider_team_id, role="batting",
-                    position=_opt_str(person.get("position")),
-                    is_starter=starter if isinstance(starter, bool) else None,
-                    stats_json=canonical_json(stats),
-                )
-            )
-    return team_rows, player_rows
+    return team_rows
 
 
 @dataclass(frozen=True)
@@ -505,7 +500,30 @@ class _InjuryRow:
     status: str
     description: Optional[str]
     reason: Optional[str]
+    #: A parsed ISO date, ONLY when the provider supplied an unambiguous full
+    #: ``YYYY-MM-DD`` value; ``None`` for an ambiguous estimate like ``"Nov 17"``.
     return_date: Optional[str]
+    #: The provider's EXACT return-estimate text, preserved verbatim (never
+    #: discarded, never given a fabricated year).
+    return_estimate: Optional[str]
+
+
+def _parse_full_iso_date(text: Optional[str]) -> Optional[str]:
+    """Return ``text`` as ``YYYY-MM-DD`` only when it is an unambiguous full ISO
+    calendar date; otherwise ``None`` (no year is ever fabricated)."""
+
+    if text is None:
+        return None
+    from datetime import date as _date
+
+    candidate = text.split("T", 1)[0].strip()
+    if len(candidate) != 10 or candidate[4] != "-" or candidate[7] != "-":
+        return None
+    try:
+        _date.fromisoformat(candidate)
+    except ValueError:
+        return None
+    return candidate
 
 
 def _normalize_injury(row: dict[str, Any]) -> Optional[_InjuryRow]:
@@ -514,6 +532,9 @@ def _normalize_injury(row: dict[str, Any]) -> Optional[_InjuryRow]:
     A supplied-but-missing status is recorded as the literal ``'unknown'`` -- never
     interpreted as active/available/probable/questionable/doubtful/out/healthy.
     Absence of a record entirely is handled by the caller (it is never "healthy").
+    The provider's return estimate is preserved EXACTLY as ``return_estimate``; a
+    parsed ISO ``return_date`` is populated only when the value is an unambiguous
+    full calendar date (so ``"Nov 17"`` is kept verbatim with no fabricated year).
     """
 
     if not isinstance(row, dict):
@@ -522,18 +543,15 @@ def _normalize_injury(row: dict[str, Any]) -> Optional[_InjuryRow]:
     pid = _provider_id(player) or _provider_id(row, "player_id")
     if pid is None:
         return None
-    return_date = _opt_str(row.get("return_date"))
-    if return_date is not None:
-        return_date = return_date.split("T", 1)[0]
-        if not (len(return_date) == 10 and return_date[:4].isdigit()):
-            return_date = None  # never fabricate a malformed date into a stored one
+    return_estimate = _opt_str(row.get("return_date"))
     return _InjuryRow(
         provider_player_id=pid,
         provider_team_id=_provider_id(player, "team_id") or _provider_id(_as_dict(row.get("team"))),
         status=_opt_str(row.get("status")) or "unknown",
         description=_opt_str(row.get("description")),
         reason=_opt_str(row.get("reason")),
-        return_date=return_date,
+        return_date=_parse_full_iso_date(return_estimate),
+        return_estimate=return_estimate,
     )
 
 
@@ -567,12 +585,52 @@ def _rows(response: ProviderResponse) -> list[dict[str, Any]]:
     return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
 
 
-def _find_box_game(data: Any, game_id: str) -> Optional[dict[str, Any]]:
-    rows = data.get("data") if isinstance(data, dict) else None
-    for g in rows if isinstance(rows, list) else []:
-        if isinstance(g, dict) and _provider_id(g, "id") == game_id:
-            return g
+def _box_key(box_game: dict[str, Any]) -> Optional[tuple[str, str, str]]:
+    """The deterministic ``(date, home_team_id, visitor_team_id)`` key of a box
+    object, or ``None`` when any component is missing."""
+
+    date = _opt_str(box_game.get("date"))
+    if date is not None:
+        date = date.split("T", 1)[0]
+    home = _provider_id(_as_dict(box_game.get("home_team")))
+    away = _provider_id(_as_dict(box_game.get("visitor_team")))
+    if date and home and away:
+        return (date, home, away)
     return None
+
+
+def _match_box_game(data: Any, norm: "_NormGame") -> tuple[Optional[dict[str, Any]], str]:
+    """Associate a box-score object with a normalized schedule game.
+
+    The documented ``/v1/box_scores`` response may not carry a top-level game id,
+    so matching is by the deterministic ``(official date, provider home-team id,
+    provider visitor-team id)`` key. A genuine provider game id is still honoured
+    when present. Returns ``(box_game, reason)`` where reason is ``'matched'``
+    (exactly one match -> process it), ``'no_match'`` (reject honestly), or
+    ``'ambiguous'`` (several possible matches -> reject rather than guess). One
+    game's box score is never attached to another game.
+    """
+
+    rows = data.get("data") if isinstance(data, dict) else None
+    games = [g for g in (rows if isinstance(rows, list) else []) if isinstance(g, dict)]
+
+    # 1. A genuine provider game id, if the provider actually supplies one.
+    id_matches = [g for g in games if _provider_id(g, "id") == norm.game_id]
+    if len(id_matches) == 1:
+        return id_matches[0], "matched"
+    if len(id_matches) > 1:
+        return None, "ambiguous"
+
+    # 2. Deterministic (date, home-team, visitor-team) key.
+    if not (norm.date_local and norm.home_provider_team_id and norm.away_provider_team_id):
+        return None, "no_match"
+    key = (norm.date_local, norm.home_provider_team_id, norm.away_provider_team_id)
+    keyed = [g for g in games if _box_key(g) == key]
+    if len(keyed) == 1:
+        return keyed[0], "matched"
+    if len(keyed) > 1:
+        return None, "ambiguous"
+    return None, "no_match"
 
 
 def _parse_lineups(data: Any, game_id: str) -> list[tuple[str, list[LineupPlayerInput]]]:
@@ -818,7 +876,9 @@ async def _fetch_all(
     plays_by_game: dict[str, list[ProviderResponse]] = {}
     lineup_by_game: dict[str, ProviderResponse] = {}
 
-    if "box" in include_set:
+    # Box scores back both team statistics (box) and derived quarter lines
+    # (quarters), so fetch them when either group is requested.
+    if include_set & {"box", "quarters"}:
         dates = sorted({n.date_local for n, _ in norm_games if n is not None and n.date_local})
         for d in dates:
             resp = await _try(client.fetch_box_scores(date=d), label=f"box {d}", result=result)
@@ -1005,19 +1065,23 @@ def _count_plan(fetched: _Fetched, include_set: set[str], result: NbaIngestResul
             result.data_quality_issues += 1
         if "results" in include_set:
             observe("result_observations")
-        if "quarters" in include_set:
-            for _q in norm.quarters:
-                observe("quarter_observations")
-        if "box" in include_set and norm.date_local in fetched.box_by_date:
-            box_game = _find_box_game(fetched.box_by_date[norm.date_local].data, norm.game_id)
-            if box_game is not None:
-                team_rows, _players = _normalize_box(box_game)
-                for _tr in team_rows:
+        box_game: Optional[dict[str, Any]] = None
+        if (include_set & {"box", "quarters"}) and norm.date_local in fetched.box_by_date:
+            box_game, reason = _match_box_game(fetched.box_by_date[norm.date_local].data, norm)
+            if box_game is None and reason in ("no_match", "ambiguous"):
+                result.data_quality_issues += 1
+                result.records_rejected += 1
+        if box_game is not None:
+            if "box" in include_set:
+                for _tr in _normalize_box_team_lines(box_game):
                     observe("team_stat_observations")
+            if "quarters" in include_set:
+                for _q in _parse_box_quarters(box_game):
+                    observe("quarter_observations")
         if "player-stats" in include_set:
             for page in fetched.stats_by_game.get(norm.game_id, []):
                 for row in _rows(page):
-                    ps = _normalize_stat_row(row, role="batting")
+                    ps = _normalize_stat_row(row, stat_group="traditional")
                     if ps is None:
                         result.records_rejected += 1
                         continue
@@ -1026,7 +1090,7 @@ def _count_plan(fetched: _Fetched, include_set: set[str], result: NbaIngestResul
         if "advanced" in include_set:
             for page in fetched.adv_by_game.get(norm.game_id, []):
                 for row in _rows(page):
-                    ps = _normalize_stat_row(row, role="pitching")
+                    ps = _normalize_stat_row(row, stat_group="advanced")
                     if ps is None:
                         result.records_rejected += 1
                         continue
@@ -1245,12 +1309,12 @@ def _persist_one_game(
     _bucket(ctx, "game_schedule_snapshots", "game_ref_id = ?", (game_ref_id,), sched_outcome)
 
     if "results" in include_set:
-        result_repo = SqliteResultRepository(conn)
+        result_repo = SqliteNbaResultRepository(conn)
         _rid, r_outcome, is_correction = result_repo.append(
             game_ref_id=game_ref_id, provider=PROVIDER_BALLDONTLIE, provider_game_id=norm.game_id,
             observed_at=observed, ingested_at=ingested, run_id=ctx.run_id, raw_response_id=raw_id,
             raw_response_hash=raw_hash, mapped_status=norm.mapped_status,
-            home_runs=norm.home_score, away_runs=norm.away_score, innings_played=norm.period,
+            home_points=norm.home_score, away_points=norm.away_score, period=norm.period,
             winning_side=norm.winning_side, result_detail=norm.status_raw,
         )
         if r_outcome is ObservationOutcome.INSERTED:
@@ -1258,70 +1322,115 @@ def _persist_one_game(
             res.observations_normalized += 1
             if is_correction:
                 res.corrections_appended += 1
-        _bucket(ctx, "game_result_snapshots", "game_ref_id = ?", (game_ref_id,), r_outcome)
+        _bucket(ctx, "nba_game_results", "game_ref_id = ?", (game_ref_id,), r_outcome)
 
-    if "quarters" in include_set:
-        quarter_repo = SqliteQuarterLineRepository(conn)
-        for q in norm.quarters:
-            _qid, q_outcome = quarter_repo.append(
-                game_ref_id=game_ref_id, provider=PROVIDER_BALLDONTLIE,
-                provider_game_id=norm.game_id, period=q.period, side=q.side, points=q.points,
-                observed_at=observed, ingested_at=ingested, run_id=ctx.run_id,
-                raw_response_id=raw_id, raw_response_hash=raw_hash,
-            )
-            if q_outcome is ObservationOutcome.INSERTED:
-                res.quarter_observations += 1
-                res.observations_normalized += 1
-            _bucket(ctx, "nba_quarter_lines", "game_ref_id = ? AND period = ? AND side = ?",
-                    (game_ref_id, q.period, q.side), q_outcome)
+    # Box team statistics and derived quarter lines both come from the matched
+    # box-score object (quarter/period scores are NOT a documented /v1/games field).
+    box_game = _matched_box(ctx, norm, fetched, include_set)
+    if box_game is not None:
+        box_resp = fetched.box_by_date[norm.date_local]  # type: ignore[index]
+        if "box" in include_set:
+            _persist_box_team(ctx, norm, game_ref_id, box_resp, box_game, ingested)
+        if "quarters" in include_set:
+            _persist_box_quarters(ctx, norm, game_ref_id, box_resp, box_game, ingested)
 
-    if "box" in include_set and norm.date_local in fetched.box_by_date:
-        _persist_box(ctx, norm, game_ref_id, fetched.box_by_date[norm.date_local], ingested)
     if "player-stats" in include_set:
         _persist_player_stats(ctx, norm, game_ref_id,
-                              fetched.stats_by_game.get(norm.game_id, []), "batting", ingested)
+                              fetched.stats_by_game.get(norm.game_id, []), "traditional", ingested)
     if "advanced" in include_set:
         _persist_player_stats(ctx, norm, game_ref_id,
-                              fetched.adv_by_game.get(norm.game_id, []), "pitching", ingested)
+                              fetched.adv_by_game.get(norm.game_id, []), "advanced", ingested)
     if "plays" in include_set:
         _persist_plays(ctx, norm, game_ref_id, fetched.plays_by_game.get(norm.game_id, []), ingested)
     if "lineups" in include_set and norm.game_id in fetched.lineup_by_game:
         _persist_lineups(ctx, norm, game_ref_id, fetched.lineup_by_game[norm.game_id], ingested)
 
 
-def _persist_box(
-    ctx: _Ctx, norm: _NormGame, game_ref_id: str, box_resp: ProviderResponse, ingested: str
+def _matched_box(
+    ctx: _Ctx, norm: _NormGame, fetched: "_Fetched", include_set: set[str]
+) -> Optional[dict[str, Any]]:
+    """Return the box-score object matched to this game, or ``None``.
+
+    Only attempted when box or quarters are requested and a box response exists
+    for the game's date. A no-match or ambiguous match records a data-quality note
+    (and is never guessed); one game's box is never attached to another game.
+    """
+
+    if not (include_set & {"box", "quarters"}):
+        return None
+    if norm.date_local is None or norm.date_local not in fetched.box_by_date:
+        return None
+    box_resp = fetched.box_by_date[norm.date_local]
+    box_game, reason = _match_box_game(box_resp.data, norm)
+    if box_game is not None:
+        return box_game
+    if reason in ("no_match", "ambiguous"):
+        raw_id = ctx.raws[id(box_resp)][0]
+        ctx.dq.record(
+            severity="note", rule_code="DQ-NBA-BOX-001", entity_type="game",
+            description=(
+                f"box score {reason} for game {norm.game_id} "
+                f"(date={norm.date_local}, home={norm.home_provider_team_id}, "
+                f"away={norm.away_provider_team_id}); no box rows attached"
+            ),
+            provider=PROVIDER_BALLDONTLIE, run_id=ctx.run_id, raw_response_id=raw_id,
+            entity_id=norm.game_id,
+        )
+        ctx.result.data_quality_issues += 1
+        ctx.result.records_rejected += 1
+    return None
+
+
+def _persist_box_team(
+    ctx: _Ctx, norm: _NormGame, game_ref_id: str, box_resp: ProviderResponse,
+    box_game: dict[str, Any], ingested: str,
 ) -> None:
-    box_game = _find_box_game(box_resp.data, norm.game_id)
-    if box_game is None:
-        return
     raw_id, raw_hash, observed = ctx.raws[id(box_resp)]
-    team_rows, _players = _normalize_box(box_game)
-    team_repo = SqliteTeamGameStatRepository(ctx.conn)
-    for tr in team_rows:
+    team_repo = SqliteNbaTeamStatRepository(ctx.conn)
+    for tr in _normalize_box_team_lines(box_game):
         _ref(ctx, "team", tr.provider_team_id, box_resp)
         _tid, outcome = team_repo.append(
             game_ref_id=game_ref_id, provider=PROVIDER_BALLDONTLIE, provider_game_id=norm.game_id,
-            provider_team_id=tr.provider_team_id, home_away=tr.home_away, observed_at=observed,
-            ingested_at=ingested, run_id=ctx.run_id, raw_response_id=raw_id,
-            raw_response_hash=raw_hash, extra=tr.extra_json,
+            provider_team_id=tr.provider_team_id, home_away=tr.home_away, points=tr.points,
+            observed_at=observed, ingested_at=ingested, run_id=ctx.run_id, raw_response_id=raw_id,
+            raw_response_hash=raw_hash, stats=tr.stats_json,
         )
         if outcome is ObservationOutcome.INSERTED:
             ctx.result.team_stat_observations += 1
             ctx.result.observations_normalized += 1
-        _bucket(ctx, "team_game_statistics", "game_ref_id = ? AND provider_team_id = ?",
+        _bucket(ctx, "nba_team_statistics", "game_ref_id = ? AND provider_team_id = ?",
                 (game_ref_id, tr.provider_team_id), outcome)
+
+
+def _persist_box_quarters(
+    ctx: _Ctx, norm: _NormGame, game_ref_id: str, box_resp: ProviderResponse,
+    box_game: dict[str, Any], ingested: str,
+) -> None:
+    raw_id, raw_hash, observed = ctx.raws[id(box_resp)]
+    quarter_repo = SqliteQuarterLineRepository(ctx.conn)
+    for q in _parse_box_quarters(box_game):
+        _qid, outcome = quarter_repo.append(
+            game_ref_id=game_ref_id, provider=PROVIDER_BALLDONTLIE, provider_game_id=norm.game_id,
+            period=q.period, side=q.side, points=q.points, observed_at=observed,
+            ingested_at=ingested, run_id=ctx.run_id, raw_response_id=raw_id,
+            raw_response_hash=raw_hash,
+        )
+        if outcome is ObservationOutcome.INSERTED:
+            ctx.result.quarter_observations += 1
+            ctx.result.observations_normalized += 1
+        _bucket(ctx, "nba_quarter_lines", "game_ref_id = ? AND period = ? AND side = ?",
+                (game_ref_id, q.period, q.side), outcome)
 
 
 def _persist_player_stats(
     ctx: _Ctx, norm: _NormGame, game_ref_id: str, pages: list[ProviderResponse],
-    role: str, ingested: str,
+    stat_group: str, ingested: str,
 ) -> None:
-    player_repo = SqlitePlayerGameStatRepository(ctx.conn)
+    player_repo = SqliteNbaPlayerStatRepository(ctx.conn)
     for page in pages:
         raw_id, raw_hash, observed = ctx.raws[id(page)]
         for row in _rows(page):
-            ps = _normalize_stat_row(row, role=role)
+            ps = _normalize_stat_row(row, stat_group=stat_group)
             if ps is None:
                 ctx.result.records_rejected += 1
                 continue
@@ -1329,21 +1438,21 @@ def _persist_player_stats(
             _pid, outcome = player_repo.append(
                 game_ref_id=game_ref_id, provider=PROVIDER_BALLDONTLIE,
                 provider_game_id=norm.game_id, provider_player_id=ps.provider_player_id,
-                role=role, observed_at=observed, ingested_at=ingested, run_id=ctx.run_id,
-                raw_response_id=raw_id, raw_response_hash=raw_hash,
+                stat_group=stat_group, observed_at=observed, ingested_at=ingested,
+                run_id=ctx.run_id, raw_response_id=raw_id, raw_response_hash=raw_hash,
                 provider_team_id=ps.provider_team_id, position=ps.position,
-                is_starter=ps.is_starter, extra=ps.stats_json,
+                is_starter=ps.is_starter, points=ps.points, stats=ps.stats_json,
             )
             if outcome is ObservationOutcome.INSERTED:
-                if role == "pitching":
+                if stat_group == "advanced":
                     ctx.result.advanced_stat_observations += 1
                 else:
                     ctx.result.player_stat_observations += 1
                 ctx.result.observations_normalized += 1
             _bucket(
-                ctx, "player_game_statistics",
-                "game_ref_id = ? AND provider_player_id = ? AND role = ?",
-                (game_ref_id, ps.provider_player_id, role), outcome,
+                ctx, "nba_player_statistics",
+                "game_ref_id = ? AND provider_player_id = ? AND stat_group = ?",
+                (game_ref_id, ps.provider_player_id, stat_group), outcome,
             )
 
 
@@ -1483,6 +1592,7 @@ async def _persist_injuries(
                             raw_response_id=raw_id, raw_response_hash=raw_hash,
                             provider_team_id=inj.provider_team_id, description=inj.description,
                             reason=inj.reason, return_date=inj.return_date,
+                            return_estimate=inj.return_estimate,
                         )
                         if outcome is ObservationOutcome.INSERTED:
                             result.injury_observations += 1
