@@ -239,6 +239,15 @@ PHASE_D2_TABLES: Final[tuple[str, ...]] = (
     "lineup_players",
 )
 
+#: Tables created by the D3 migration d012_nba_specifics, in dependency order.
+#: NBA-specific append-only observations only; NBA schedule/result/box/roster/
+#: lineup data reuses the d011 tables (no second canonical game system).
+PHASE_D3_TABLES: Final[tuple[str, ...]] = (
+    "nba_quarter_lines",
+    "injury_snapshots",
+    "play_snapshots",
+)
+
 #: Canonical game statuses an official schedule/result observation maps to. A
 #: superset of GAME_STATUSES with 'warmup' and an explicit 'unknown' -- an
 #: unmapped provider status is recorded as 'unknown' (never guessed final/
@@ -326,6 +335,11 @@ APPEND_ONLY_TABLES: Final[tuple[str, ...]] = (
     "probable_pitcher_snapshots",
     "lineup_snapshots",
     "lineup_players",
+    # Phase D3: NBA-specific append-only observations (BEFORE UPDATE/DELETE
+    # triggers in d012). Current state is derived from the newest observation.
+    "nba_quarter_lines",
+    "injury_snapshots",
+    "play_snapshots",
 )
 
 

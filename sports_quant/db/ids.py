@@ -82,6 +82,11 @@ PROBABLE_PITCHER_PREFIX: Final = "pps_"
 LINEUP_SNAPSHOT_PREFIX: Final = "lns_"
 LINEUP_PLAYER_PREFIX: Final = "lnp_"
 
+# Phase D3: NBA-specific append-only observations (BALLDONTLIE / offline hoopR).
+QUARTER_LINE_PREFIX: Final = "nql_"
+INJURY_SNAPSHOT_PREFIX: Final = "inj_"
+PLAY_SNAPSHOT_PREFIX: Final = "ply_"
+
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
 
 
@@ -321,3 +326,16 @@ def new_lineup_snapshot_id() -> str:
 
 def new_lineup_player_id() -> str:
     return prefixed_id(LINEUP_PLAYER_PREFIX)
+
+
+# Phase D3 factories.
+def new_quarter_line_id() -> str:
+    return prefixed_id(QUARTER_LINE_PREFIX)
+
+
+def new_injury_snapshot_id() -> str:
+    return prefixed_id(INJURY_SNAPSHOT_PREFIX)
+
+
+def new_play_snapshot_id() -> str:
+    return prefixed_id(PLAY_SNAPSHOT_PREFIX)

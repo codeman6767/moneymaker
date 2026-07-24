@@ -27,6 +27,7 @@ from typing import Any, Awaitable, Callable, Optional
 from .config import ReadOnlyStartupError, Settings, load_settings
 from .db.engine import Database, DatabaseError, table_exists
 from .db.init import initialize_database
+from .ingest.hoopr_import import HooprImportResult, import_hoopr_parquet
 from .ingest.kalshi_ingestor import DEFAULT_LIMIT, KalshiIngestResult, ingest_kalshi
 from .ingest.mlb_ingestor import (
     VALID_INCLUDES,
@@ -34,6 +35,8 @@ from .ingest.mlb_ingestor import (
     ingest_lineups,
     ingest_mlb,
 )
+from .ingest.nba_ingestor import VALID_INCLUDES as NBA_VALID_INCLUDES
+from .ingest.nba_ingestor import NbaIngestResult, ingest_injuries, ingest_nba
 from .ingest.odds_ingestor import OddsIngestResult, ingest_odds
 from .ingest.provider_audit import (
     SUPPORTED_AUDIT_PROVIDERS,
@@ -1020,6 +1023,289 @@ def run_ingest_lineups(
     return EXIT_ACTIVE_FAILURE if result.needs_failure_exit else 0
 
 
+# --------------------------------------------------------------------------- #
+# Phase D3: ingest-nba / ingest-injuries / import-hoopr
+# --------------------------------------------------------------------------- #
+def _nba_json(result: NbaIngestResult) -> dict[str, Any]:
+    return {
+        "command": result.command,
+        "dry_run": result.dry_run,
+        "status": result.status,
+        "run_id": result.run_id,
+        "requests_made": result.requests_made,
+        "pages_fetched": result.pages_fetched,
+        "raw_responses_received": result.raw_responses_received,
+        "games_received": result.games_received,
+        "teams_observed": result.teams_observed,
+        "players_observed": result.players_observed,
+        "schedule_observations": result.schedule_observations,
+        "result_observations": result.result_observations,
+        "corrections_appended": result.corrections_appended,
+        "team_stat_observations": result.team_stat_observations,
+        "player_stat_observations": result.player_stat_observations,
+        "advanced_stat_observations": result.advanced_stat_observations,
+        "quarter_observations": result.quarter_observations,
+        "play_observations": result.play_observations,
+        "lineup_observations": result.lineup_observations,
+        "lineup_players_observed": result.lineup_players_observed,
+        "injury_observations": result.injury_observations,
+        "provider_references_created": result.provider_references_created,
+        "observations_normalized": result.observations_normalized,
+        "rows_persisted": result.rows_persisted,
+        "records_inserted": result.records_inserted,
+        "records_changed": result.records_changed,
+        "records_unchanged": result.records_unchanged,
+        "records_rejected": result.records_rejected,
+        "records_truncated": result.records_truncated,
+        "data_quality_issues": result.data_quality_issues,
+        "capabilities_unavailable": result.capabilities_unavailable,
+        "capabilities_recorded": result.capabilities_recorded,
+        "active_failures": result.active_failures,
+        "active_failure": result.has_active_failure,
+        "truncations": result.truncations,
+        "error_type": result.error_type,
+        "error_message": result.error_message,
+    }
+
+
+def _report_nba(result: NbaIngestResult, out: Printer, *, as_json: bool) -> None:
+    if as_json:
+        out(json.dumps(_nba_json(result), sort_keys=True))
+        return
+    prefix = "[DRY-RUN] " if result.dry_run else ""
+    label = "" if result.dry_run else f" (run {result.run_id})"
+    out(f"{prefix}{result.command}{label}")
+    if result.status == "failed":
+        out(f"[FAILED ] {result.error_type}: {result.error_message}")
+        return
+    out(f"  requests: {result.requests_made} (BALLDONTLIE GOAT, GET-only); pages {result.pages_fetched}")
+    out(
+        f"  games: {result.games_received} received; teams {result.teams_observed}, "
+        f"players {result.players_observed}; refs {result.provider_references_created}"
+    )
+    out(
+        f"  schedule {result.schedule_observations}, results {result.result_observations} "
+        f"(corrections {result.corrections_appended}); quarters {result.quarter_observations}"
+    )
+    out(
+        f"  stats: team {result.team_stat_observations}, player {result.player_stat_observations}, "
+        f"advanced {result.advanced_stat_observations}; plays {result.play_observations}; "
+        f"lineups {result.lineup_observations} ({result.lineup_players_observed} players); "
+        f"injuries {result.injury_observations}"
+    )
+    out(
+        f"  normalized {result.observations_normalized}, persisted {result.rows_persisted} "
+        f"(inserted {result.records_inserted}, changed {result.records_changed}, "
+        f"unchanged {result.records_unchanged}); rejected {result.records_rejected}, "
+        f"truncated {result.records_truncated}"
+    )
+    out(
+        f"  data-quality {result.data_quality_issues}, capabilities-recorded "
+        f"{result.capabilities_recorded}, capabilities-unavailable "
+        f"{result.capabilities_unavailable}, active-failures {result.active_failures}"
+    )
+    if result.status == "partially_failed":
+        out(
+            f"[PARTIAL] partially_failed -- an active provider failure occurred "
+            f"({result.error_type}: {result.error_message})"
+        )
+    else:
+        out("[OK     ] succeeded")
+
+
+def _nba_client(settings: Settings, client: Optional[BalldontlieClient]) -> BalldontlieClient:
+    return client if client is not None else BalldontlieClient(settings.nba_data_api_key)
+
+
+def run_ingest_nba(
+    settings: Optional[Settings] = None,
+    *,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    game_id: Optional[int] = None,
+    includes: tuple[str, ...] = (),
+    database_path: Optional[Path] = None,
+    dry_run: bool = False,
+    as_json: bool = False,
+    out: Printer = print,
+    client: Optional[BalldontlieClient] = None,
+) -> int:
+    """Ingest NBA official data from BALLDONTLIE (GOAT). ``--dry-run`` persists nothing."""
+
+    if settings is None:
+        settings = load_settings()
+    else:
+        settings.enforce_read_only()
+
+    if game_id is not None and (from_date is not None or to_date is not None):
+        out("[FAILED ] --game-id cannot be combined with --from/--to")
+        return EXIT_ACTIVE_FAILURE
+    if game_id is None and from_date is None:
+        out("[FAILED ] one of --from (with optional --to) or --game-id is required")
+        return EXIT_ACTIVE_FAILURE
+    if (to_date is not None) and (from_date is None):
+        out("[FAILED ] --to requires --from")
+        return EXIT_ACTIVE_FAILURE
+
+    path = database_path if database_path is not None else settings.resolved_database_path()
+    if not dry_run:
+        code = _db_ready_or_exit(path, "play_snapshots", out)
+        if code is not None:
+            return code
+    database = Database(path)
+
+    owns_client = client is None
+    tier = BalldontlieTier(settings.nba_data_tier)
+
+    async def _run() -> NbaIngestResult:
+        bdl = _nba_client(settings, client)
+        try:
+            return await ingest_nba(
+                database=database, client=bdl, from_date=from_date, to_date=to_date,
+                game_id=game_id, includes=includes, tier=tier, dry_run=dry_run,
+            )
+        finally:
+            if owns_client:
+                await bdl.aclose()
+
+    result = asyncio.run(_run())
+    _report_nba(result, out, as_json=as_json)
+    return EXIT_ACTIVE_FAILURE if result.needs_failure_exit else 0
+
+
+def run_ingest_injuries(
+    settings: Optional[Settings] = None,
+    *,
+    sport: str = "nba",
+    date: Optional[str] = None,
+    database_path: Optional[Path] = None,
+    dry_run: bool = False,
+    as_json: bool = False,
+    out: Printer = print,
+    client: Optional[BalldontlieClient] = None,
+) -> int:
+    """Ingest current player injuries. Only ``--sport nba`` is supported in D3."""
+
+    if settings is None:
+        settings = load_settings()
+    else:
+        settings.enforce_read_only()
+
+    if sport != "nba":
+        out(f"[FAILED ] ingest-injuries supports --sport nba only (got {sport!r})")
+        return EXIT_ACTIVE_FAILURE
+
+    path = database_path if database_path is not None else settings.resolved_database_path()
+    if not dry_run:
+        code = _db_ready_or_exit(path, "injury_snapshots", out)
+        if code is not None:
+            return code
+    database = Database(path)
+
+    owns_client = client is None
+    tier = BalldontlieTier(settings.nba_data_tier)
+
+    async def _run() -> NbaIngestResult:
+        bdl = _nba_client(settings, client)
+        try:
+            return await ingest_injuries(
+                database=database, client=bdl, date=date, tier=tier, dry_run=dry_run,
+            )
+        finally:
+            if owns_client:
+                await bdl.aclose()
+
+    result = asyncio.run(_run())
+    _report_nba(result, out, as_json=as_json)
+    return EXIT_ACTIVE_FAILURE if result.needs_failure_exit else 0
+
+
+def _hoopr_json(result: HooprImportResult) -> dict[str, Any]:
+    return {
+        "command": result.command,
+        "dry_run": result.dry_run,
+        "status": result.status,
+        "run_id": result.run_id,
+        "file_name": result.file_name,
+        "file_sha256": result.file_sha256,
+        "schema": result.schema,
+        "schema_version": result.schema_version,
+        "rows_read": result.rows_read,
+        "plays_normalized": result.plays_normalized,
+        "games_observed": result.games_observed,
+        "players_observed": result.players_observed,
+        "provider_references_created": result.provider_references_created,
+        "observations_normalized": result.observations_normalized,
+        "rows_persisted": result.rows_persisted,
+        "records_inserted": result.records_inserted,
+        "records_changed": result.records_changed,
+        "records_unchanged": result.records_unchanged,
+        "records_rejected": result.records_rejected,
+        "error_type": result.error_type,
+        "error_message": result.error_message,
+    }
+
+
+def _report_hoopr(result: HooprImportResult, out: Printer, *, as_json: bool) -> None:
+    if as_json:
+        out(json.dumps(_hoopr_json(result), sort_keys=True))
+        return
+    prefix = "[DRY-RUN] " if result.dry_run else ""
+    label = "" if result.dry_run else f" (run {result.run_id})"
+    out(f"{prefix}{result.command}{label} (offline hoopR Parquet supplement; no network)")
+    if result.status == "failed":
+        out(f"[FAILED ] {result.error_type}: {result.error_message}")
+        return
+    out(
+        f"  file: {result.file_name} sha256={result.file_sha256} "
+        f"schema={result.schema} v{result.schema_version}"
+    )
+    out(
+        f"  rows {result.rows_read} -> normalized {result.plays_normalized}; games "
+        f"{result.games_observed}, players {result.players_observed}, refs "
+        f"{result.provider_references_created}"
+    )
+    out(
+        f"  persisted {result.rows_persisted} (inserted {result.records_inserted}, changed "
+        f"{result.records_changed}, unchanged {result.records_unchanged}); rejected "
+        f"{result.records_rejected}"
+    )
+    out("[OK     ] succeeded")
+
+
+def run_import_hoopr(
+    settings: Optional[Settings] = None,
+    *,
+    parquet_path: Path,
+    schema: str = "hoopr_pbp",
+    schema_version: int = 1,
+    database_path: Optional[Path] = None,
+    dry_run: bool = False,
+    as_json: bool = False,
+    out: Printer = print,
+) -> int:
+    """Import a hoopR play-by-play Parquet file offline. ``--dry-run`` persists nothing."""
+
+    if settings is None:
+        settings = load_settings()
+    else:
+        settings.enforce_read_only()
+
+    path = database_path if database_path is not None else settings.resolved_database_path()
+    if not dry_run:
+        code = _db_ready_or_exit(path, "play_snapshots", out)
+        if code is not None:
+            return code
+    database = Database(path)
+
+    result = import_hoopr_parquet(
+        database=database, path=parquet_path, schema=schema, schema_version=schema_version,
+        dry_run=dry_run,
+    )
+    _report_hoopr(result, out, as_json=as_json)
+    return EXIT_ACTIVE_FAILURE if result.failed else 0
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     """CLI dispatch.
 
@@ -1183,6 +1469,39 @@ def main(argv: Optional[list[str]] = None) -> int:
     lineups.add_argument("--dry-run", action="store_true", help="Fetch + normalize but persist nothing")
     lineups.add_argument("--json", dest="as_json", action="store_true", help="Machine-readable output")
 
+    nba = sub.add_parser(
+        "ingest-nba", help="Ingest NBA official data from BALLDONTLIE GOAT (GET-only)"
+    )
+    nba.add_argument("--from", dest="from_date", default=None, metavar="YYYY-MM-DD")
+    nba.add_argument("--to", dest="to_date", default=None, metavar="YYYY-MM-DD")
+    nba.add_argument("--game-id", dest="game_id", type=int, default=None, metavar="ID")
+    nba.add_argument(
+        "--include", dest="includes", action="append", choices=list(NBA_VALID_INCLUDES),
+        default=[], help="Optional group (repeatable): " + ", ".join(NBA_VALID_INCLUDES),
+    )
+    nba.add_argument("--db", dest="database_path", type=Path, default=None, metavar="PATH")
+    nba.add_argument("--dry-run", action="store_true", help="Fetch + normalize but persist nothing")
+    nba.add_argument("--json", dest="as_json", action="store_true", help="Machine-readable output")
+
+    injuries = sub.add_parser(
+        "ingest-injuries", help="Ingest current NBA player injuries from BALLDONTLIE (GET-only)"
+    )
+    injuries.add_argument("--sport", default="nba", choices=["nba"], help="Sport (nba only in D3)")
+    injuries.add_argument("--date", dest="date", default=None, metavar="YYYY-MM-DD")
+    injuries.add_argument("--db", dest="database_path", type=Path, default=None, metavar="PATH")
+    injuries.add_argument("--dry-run", action="store_true", help="Fetch + normalize but persist nothing")
+    injuries.add_argument("--json", dest="as_json", action="store_true", help="Machine-readable output")
+
+    hoopr = sub.add_parser(
+        "import-hoopr", help="Import a hoopR play-by-play Parquet file OFFLINE (no network, no R)"
+    )
+    hoopr.add_argument("--file", dest="parquet_path", type=Path, required=True, metavar="PATH")
+    hoopr.add_argument("--schema", default="hoopr_pbp", help="Supported schema (default: hoopr_pbp)")
+    hoopr.add_argument("--schema-version", dest="schema_version", type=int, default=1)
+    hoopr.add_argument("--db", dest="database_path", type=Path, default=None, metavar="PATH")
+    hoopr.add_argument("--dry-run", action="store_true", help="Read + normalize but persist nothing")
+    hoopr.add_argument("--json", dest="as_json", action="store_true", help="Machine-readable output")
+
     args = parser.parse_args(argv)
 
     if args.command == "provider-audit":
@@ -1229,6 +1548,48 @@ def main(argv: Optional[list[str]] = None) -> int:
                 sport=args.sport,
                 date=args.date,
                 game_pk=args.game_pk,
+                database_path=args.database_path,
+                dry_run=args.dry_run,
+                as_json=args.as_json,
+            )
+        except ReadOnlyStartupError as exc:
+            print(str(exc))
+            return 2
+
+    if args.command == "ingest-nba":
+        try:
+            return run_ingest_nba(
+                from_date=args.from_date,
+                to_date=args.to_date,
+                game_id=args.game_id,
+                includes=tuple(dict.fromkeys(args.includes)),
+                database_path=args.database_path,
+                dry_run=args.dry_run,
+                as_json=args.as_json,
+            )
+        except ReadOnlyStartupError as exc:
+            print(str(exc))
+            return 2
+
+    if args.command == "ingest-injuries":
+        try:
+            return run_ingest_injuries(
+                sport=args.sport,
+                date=args.date,
+                database_path=args.database_path,
+                dry_run=args.dry_run,
+                as_json=args.as_json,
+            )
+        except ReadOnlyStartupError as exc:
+            print(str(exc))
+            return 2
+
+    if args.command == "import-hoopr":
+        try:
+            return run_import_hoopr(
+                parquet_path=args.parquet_path,
+                schema=args.schema,
+                schema_version=args.schema_version,
                 database_path=args.database_path,
                 dry_run=args.dry_run,
                 as_json=args.as_json,

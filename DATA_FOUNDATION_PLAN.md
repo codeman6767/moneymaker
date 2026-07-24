@@ -30,9 +30,11 @@ account/balance/position/fill/order column in the schema. All 894 tests pass
 **Phase D provider selection and implementation design are complete; D1 provider
 infrastructure and D2 MLB ingestion code are complete (schema v11, migration
 `d011_official_games_stats`), and the D2 controlled live gate passed on July 24,
-2026. The controlled live MLB StatsAPI provider audit and bounded dry-run smoke
-test completed successfully; no persisted MLB ingestion or historical backfill
-has been performed.** D2
+2026. D3 NBA ingestion code is complete against mocked BALLDONTLIE GOAT contracts
+and offline hoopR fixtures (schema v12, migration `d012_nba_specifics`); the live
+BALLDONTLIE GOAT capability audit and bounded dry-run smoke test have not yet been
+performed, and no persisted MLB or NBA ingestion or historical backfill has been
+performed. D4–D5 not started.** D2
 added append-only, transition-aware official-MLB observation tables
 (schedule/result/inning/team+player stats/roster/probable/lineup), the extended
 MLB StatsAPI client (date-ranged schedule with probable/lineup hydration, box
@@ -105,7 +107,7 @@ backfill has been performed. D3–D5 have not started.
 | A | Database engine, migrations, core entities, `db-init` | ✅ Complete (schema v3) |
 | B | Raw responses, ingestion runs, sportsbook odds | ✅ Complete (schema v6, incl. `b006` integrity repair) |
 | C | Kalshi public events, markets, books, trades | ✅ Complete (schema v8, incl. `c008` integrity repair) |
-| D | Official providers, weather, canonical matching | ◧ **D1 infra + D2 MLB ingestion code complete (schema v11, incl. `d010` audit-integrity repair and `d011` official MLB snapshots); D2 controlled live gate passed 2026-07-24 (no persisted ingestion/backfill); D3–D5 not started** |
+| D | Official providers, weather, canonical matching | ◧ **D1 infra + D2 MLB ingestion complete (schema v11); D2 controlled live gate passed 2026-07-24 (no persisted ingestion/backfill); D3 NBA ingestion code complete against mocked BALLDONTLIE GOAT + offline hoopR fixtures (schema v12, `d012_nba_specifics`), live audit/smoke-test not yet performed; D4–D5 not started** |
 | E | Point-in-time builder, quality rules, leakage tests | ◻ Not started |
 
 Companion documents:
@@ -663,8 +665,11 @@ decisions/candidates, data-quality, provider_capabilities) and
 columns on `provider_capabilities`, the partial unique index pinning a provider
 venue id to one canonical venue, and `data_quality_issues` immutability), and
 `d011_official_games_stats` (v11 — D2's nine append-only official MLB observation
-tables) are applied. Planned next: `d012_nba_specifics` (v12 — quarter lines,
-injuries, plays), `d013_weather` (v13). Migration numbers are a single global
+tables), and `d012_nba_specifics` (v12 — D3's three NBA-specific append-only,
+transition-aware observation tables `nba_quarter_lines` / `injury_snapshots` /
+`play_snapshots`; NBA schedule/result/box/roster/lineup data reuses the d011
+tables, so there is no second canonical game system) are applied. Planned next:
+`d013_weather` (v13). Migration numbers are a single global
 forward-only sequence. No second canonical-game
 table: official ids attach to the existing
 `games.official_provider`/`official_game_key` and a `provider_game_references`

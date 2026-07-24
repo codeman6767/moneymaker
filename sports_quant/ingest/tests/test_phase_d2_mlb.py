@@ -737,12 +737,15 @@ async def test_no_secret_in_database_or_output(db: Database) -> None:
     assert SENTINEL not in "\n".join(lines)
 
 
-def test_d3_d5_remain_unimplemented() -> None:
+def test_d4_d5_remain_unimplemented() -> None:
     import importlib
 
-    for mod in ("nba_ingestor", "weather_ingestor", "hoopr_import"):
+    # D3 (nba_ingestor, hoopr_import) is now implemented; D4 (weather) is not.
+    for mod in ("weather_ingestor",):
         with pytest.raises(ModuleNotFoundError):
             importlib.import_module(f"sports_quant.ingest.{mod}")
+    for mod in ("nba_ingestor", "hoopr_import"):
+        importlib.import_module(f"sports_quant.ingest.{mod}")  # importable now
 
 
 def test_no_lineups_module_imports_gateway() -> None:

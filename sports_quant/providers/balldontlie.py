@@ -95,6 +95,42 @@ def _validate_seasons(values: Iterable[object]) -> list[int]:
     return validated
 
 
+def _validate_dates(values: Iterable[object]) -> list[str]:
+    """Validate a non-empty, bounded collection of ``YYYY-MM-DD`` dates."""
+
+    validated = [validate_iso_date(v) for v in values]
+    if not validated:
+        raise ValueError("dates requires at least one date")
+    if len(validated) > _MAX_LIST_SIZE:
+        raise ValueError(f"dates accepts at most {_MAX_LIST_SIZE} values (got {len(validated)})")
+    return validated
+
+
+def next_cursor(data: object) -> Optional[int]:
+    """Extract ``meta.next_cursor`` from a BALLDONTLIE payload, or ``None``.
+
+    Cursor pagination is bounded by the caller; this only reads the provider's
+    own next-cursor field. A missing/blank/non-integer cursor yields ``None`` (no
+    further page), never a fabricated one. ``0`` is a valid cursor value.
+    """
+
+    if not isinstance(data, dict):
+        return None
+    meta = data.get("meta")
+    if not isinstance(meta, dict):
+        return None
+    raw = meta.get("next_cursor")
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text.lstrip("-").isdigit():
+            return int(text)
+    return None
+
+
 def validate_iso_date(value: object) -> str:
     """Strictly validate a ``YYYY-MM-DD`` calendar date, or raise ``ValueError``.
 
@@ -244,15 +280,86 @@ class BalldontlieClient(BaseProviderClient):
     # *its own group only*. Play-by-play and lineups are documented GOAT
     # endpoints (they require a valid provider game id); the audit obtains that id
     # from the games probe rather than guessing one.
-    async def fetch_games(self, *, per_page: int = 1) -> ProviderResponse:
-        """GET /v1/games -- games / schedules / results group."""
+    async def fetch_games(
+        self,
+        *,
+        start_date: Optional[object] = None,
+        end_date: Optional[object] = None,
+        dates: Optional[Iterable[object]] = None,
+        game_ids: Optional[Iterable[object]] = None,
+        seasons: Optional[Iterable[object]] = None,
+        team_ids: Optional[Iterable[object]] = None,
+        cursor: Optional[int] = None,
+        per_page: int = 1,
+    ) -> ProviderResponse:
+        """GET /v1/games -- games / schedules / results group.
 
-        return await self._get("/v1/games", params={"per_page": _clamp_per_page(per_page)})
+        Optional documented filters bound the request for D3 ingestion:
+        ``start_date``/``end_date`` (an inclusive ``YYYY-MM-DD`` range, both
+        required together), ``dates[]`` (explicit days), ``game_ids[]``,
+        ``seasons[]``, ``team_ids[]``, and cursor pagination (``cursor`` +
+        ``per_page``). With no filter it returns the default page (used by the
+        audit). Every id/season/date is validated and every collection is bounded,
+        so the request URL can never grow unbounded.
+        """
 
-    async def fetch_stats(self, *, per_page: int = 1) -> ProviderResponse:
-        """GET /v1/stats -- per-player game statistics group (GOAT-gated)."""
+        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page)}
+        if (start_date is not None) ^ (end_date is not None):
+            raise ValueError("start_date and end_date must be provided together")
+        if start_date is not None and end_date is not None:
+            params["start_date"] = validate_iso_date(start_date)
+            params["end_date"] = validate_iso_date(end_date)
+        if dates is not None:
+            params["dates[]"] = _validate_dates(dates)
+        if game_ids is not None:
+            params["game_ids[]"] = _validate_ids(game_ids, label="game_ids")
+        if seasons is not None:
+            params["seasons[]"] = _validate_seasons(seasons)
+        if team_ids is not None:
+            params["team_ids[]"] = _validate_ids(team_ids, label="team_ids")
+        if cursor is not None:
+            params["cursor"] = cursor
+        return await self._get("/v1/games", params=params)
 
-        return await self._get("/v1/stats", params={"per_page": _clamp_per_page(per_page)})
+    async def fetch_game(self, game_id: object) -> ProviderResponse:
+        """GET /v1/games/{id} -- a single game by its provider id (GOAT).
+
+        ``game_id`` is validated to a positive integer before any request.
+        """
+
+        gid = _validate_game_id(game_id)
+        return await self._get(f"/v1/games/{gid}", params={})
+
+    async def fetch_stats(
+        self,
+        *,
+        game_ids: Optional[Iterable[object]] = None,
+        player_ids: Optional[Iterable[object]] = None,
+        seasons: Optional[Iterable[object]] = None,
+        dates: Optional[Iterable[object]] = None,
+        cursor: Optional[int] = None,
+        per_page: int = 1,
+    ) -> ProviderResponse:
+        """GET /v1/stats -- per-player game statistics group (GOAT-gated).
+
+        Documented array filters (``game_ids[]``/``player_ids[]``/``seasons[]``/
+        ``dates[]``) plus cursor pagination bound the request; every collection is
+        validated and bounded. With no filter it returns the default page (used by
+        the audit).
+        """
+
+        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page)}
+        if game_ids is not None:
+            params["game_ids[]"] = _validate_ids(game_ids, label="game_ids")
+        if player_ids is not None:
+            params["player_ids[]"] = _validate_ids(player_ids, label="player_ids")
+        if seasons is not None:
+            params["seasons[]"] = _validate_seasons(seasons)
+        if dates is not None:
+            params["dates[]"] = _validate_dates(dates)
+        if cursor is not None:
+            params["cursor"] = cursor
+        return await self._get("/v1/stats", params=params)
 
     async def fetch_box_scores(self, *, date: object) -> ProviderResponse:
         """GET /v1/box_scores?date=YYYY-MM-DD -- team/box statistics (GOAT-gated).
@@ -266,24 +373,46 @@ class BalldontlieClient(BaseProviderClient):
         valid_date = validate_iso_date(date)
         return await self._get("/v1/box_scores", params={"date": valid_date})
 
-    async def fetch_player_injuries(self, *, per_page: int = 1) -> ProviderResponse:
-        """GET /v1/player_injuries -- injuries group (tier-gated)."""
+    async def fetch_player_injuries(
+        self,
+        *,
+        team_ids: Optional[Iterable[object]] = None,
+        player_ids: Optional[Iterable[object]] = None,
+        cursor: Optional[int] = None,
+        per_page: int = 1,
+    ) -> ProviderResponse:
+        """GET /v1/player_injuries -- injuries group (tier-gated).
 
-        return await self._get(
-            "/v1/player_injuries", params={"per_page": _clamp_per_page(per_page)}
-        )
+        Optional ``team_ids[]``/``player_ids[]`` filters and cursor pagination are
+        the documented request shape; the endpoint reports the CURRENT injury
+        picture (it does not filter by an arbitrary historical date). Every id is
+        validated and every collection bounded.
+        """
 
-    async def fetch_plays(self, *, game_id: object, per_page: int = 1) -> ProviderResponse:
+        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page)}
+        if team_ids is not None:
+            params["team_ids[]"] = _validate_ids(team_ids, label="team_ids")
+        if player_ids is not None:
+            params["player_ids[]"] = _validate_ids(player_ids, label="player_ids")
+        if cursor is not None:
+            params["cursor"] = cursor
+        return await self._get("/v1/player_injuries", params=params)
+
+    async def fetch_plays(
+        self, *, game_id: object, cursor: Optional[int] = None, per_page: int = 1
+    ) -> ProviderResponse:
         """GET /v1/plays?game_id=ID -- play-by-play for one game (GOAT-gated).
 
         ``game_id`` is required and validated to a positive integer before any
         request is issued; an empty/blank/non-numeric id raises ``ValueError``.
+        Supports cursor pagination for a long play list.
         """
 
         gid = _validate_game_id(game_id)
-        return await self._get(
-            "/v1/plays", params={"game_id": gid, "per_page": _clamp_per_page(per_page)}
-        )
+        params: dict[str, Any] = {"game_id": gid, "per_page": _clamp_per_page(per_page)}
+        if cursor is not None:
+            params["cursor"] = cursor
+        return await self._get("/v1/plays", params=params)
 
     async def fetch_lineups(
         self, *, game_ids: Iterable[object], per_page: int = 25
