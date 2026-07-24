@@ -56,14 +56,27 @@ probe verified (with the probe, endpoint, HTTP status, error classification, and
 raw-response evidence), leaving unprobed capabilities declared-only; provider
 403s are only ever classified as tier-restricted with explicit plan/subscription
 evidence (never a broad word alone); and the BALLDONTLIE allow-list is tightened
-to explicit documented endpoints. A subsequent contract-correctness pass added
-dependency-aware game-id **and game-date** extraction, the documented
-`game_ids[]`/`seasons[]` array parameters, a required validated box-score `date`,
-truthful `succeeded`/`partially_failed`/`failed` audit statuses with matching CLI
-exit codes, evidence-based authentication reporting (not-applicable for keyless
-providers), one clear outcome per capability per run, and strict contract-level
-mocks. D2–D5 are not started. Every D1 test uses mocked transports; no live
-provider call was made for this work. Phase E remains planning.
+to explicit documented endpoints.
+
+**D1 provider infrastructure and D2 MLB ingestion code are complete. D3–D5 have
+not started. A live MLB provider audit and small smoke test remain required
+before a large backfill.** D2 ingests the MLB StatsAPI schedule, box scores, line
+scores, probable pitchers, posted lineups, and **date-aware rosters** into
+append-only, transition-aware official-observation tables (migration `d011`,
+schema v11), anchored on `provider_game_references` with provider player/team
+references created from each supplying response (canonical resolution deferred to
+D5). Two correctness distinctions are enforced: (1) **normal result progression
+is not a correction** — a score/hit/error increase, an inning advance, or a
+status-only transition (scheduled→pregame→in_progress→final with a
+logically-consistent cumulative result) appends an ordinary observation, whereas
+a **genuine correction** (a previously-final result changing, or a cumulative
+run/hit/error total *decreasing*) sets `is_correction = 1` and increments
+`corrections_appended`; (2) **date-aware roster ingestion** fetches each unique
+`(provider_team, official_game_date)` pair once, stores that official date as
+`roster_date`, and — when a game has no official date — records a data-quality
+note instead of substituting today's roster. Every D1/D2 test uses mocked
+transports; no live provider call was made for this work. Phase E remains
+planning.
 
 | Phase | Scope | Status |
 | --- | --- | --- |
@@ -625,11 +638,11 @@ command verifies auth/tier/capabilities before any large backfill.
 decisions/candidates, data-quality, provider_capabilities) and
 `d010_provider_audit_integrity` (v10 — the D1 audit-integrity repair: evidence
 columns on `provider_capabilities`, the partial unique index pinning a provider
-venue id to one canonical venue, and `data_quality_issues` immutability) are
-applied. Planned next: `d011_official_games_stats` (v11), `d012_nba_specifics`
-(v12 — quarter lines, injuries, plays), `d013_weather` (v13). Migration numbers
-are a single global forward-only sequence, so the later Phase D migrations shift
-up by one now that `d010` is the integrity repair. No second canonical-game
+venue id to one canonical venue, and `data_quality_issues` immutability), and
+`d011_official_games_stats` (v11 — D2's nine append-only official MLB observation
+tables) are applied. Planned next: `d012_nba_specifics` (v12 — quarter lines,
+injuries, plays), `d013_weather` (v13). Migration numbers are a single global
+forward-only sequence. No second canonical-game
 table: official ids attach to the existing
 `games.official_provider`/`official_game_key` and a `provider_game_references`
 crosswalk.

@@ -490,5 +490,204 @@ def test_d3_d5_remain_unimplemented() -> None:
             importlib.import_module(f"sports_quant.ingest.{mod}")
 
 
+# --------------------------------------------------------------------------- #
+# Result correction semantics (§1): normal progression is NOT a correction
+# --------------------------------------------------------------------------- #
+def _result_client(status: str, coded: str, abstract: str, hr: int, ar: int) -> MlbStatsApiClient:
+    g = game(game_pk=1, status=status, coded=coded, abstract=abstract)
+    return mlb_client(schedule_body=schedule(g),
+                      line_by_pk={"1": linescore(home_runs=hr, away_runs=ar)})
+
+
+async def _run_result(db: Database, status: str, coded: str, abstract: str, hr: int, ar: int):
+    return await _ingest(db, _result_client(status, coded, abstract, hr, ar),
+                         from_date="2024-04-09", includes=("results",))
+
+
+async def test_normal_score_progression_is_not_a_correction(db: Database) -> None:
+    total = 0
+    for hr, ar in ((0, 0), (1, 0), (1, 1), (3, 1)):  # in-progress, increasing
+        r = await _run_result(db, "In Progress", "I", "Live", hr, ar)
+        total += r.corrections_appended
+    assert total == 0
+    assert _count(db, "game_result_snapshots") == 4  # every transition kept
+    assert _count(db, "game_result_snapshots", "WHERE is_correction=1") == 0
+
+
+async def test_in_progress_to_final_same_result_is_not_a_correction(db: Database) -> None:
+    await _run_result(db, "In Progress", "I", "Live", 5, 4)
+    r = await _run_result(db, "Final", "F", "Final", 5, 4)  # status-only change
+    assert r.corrections_appended == 0
+    assert _count(db, "game_result_snapshots", "WHERE is_correction=1") == 0
+
+
+async def test_final_score_revision_is_a_correction(db: Database) -> None:
+    await _run_result(db, "Final", "F", "Final", 5, 4)
+    r = await _run_result(db, "Final", "F", "Final", 5, 3)  # a finished game changed
+    assert r.corrections_appended == 1
+    assert _count(db, "game_result_snapshots", "WHERE is_correction=1") == 1
+
+
+async def test_in_progress_run_decrease_is_a_correction(db: Database) -> None:
+    await _run_result(db, "In Progress", "I", "Live", 4, 2)
+    r = await _run_result(db, "In Progress", "I", "Live", 3, 2)  # a run total went backwards
+    assert r.corrections_appended == 1
+
+
+async def test_status_only_change_is_not_a_correction(db: Database) -> None:
+    # Scheduled -> pregame with no scores is pure progression.
+    g = game(game_pk=1, status="Scheduled", coded="S", abstract="Preview")
+    await _ingest(db, mlb_client(schedule_body=schedule(g),
+                  line_by_pk={"1": {"teams": {}, "innings": []}}),
+                  from_date="2024-04-09", includes=("results",))
+    g2 = game(game_pk=1, status="Pre-Game", coded="P", abstract="Preview")
+    r = await _ingest(db, mlb_client(schedule_body=schedule(g2),
+                      line_by_pk={"1": {"teams": {}, "innings": []}}),
+                      from_date="2024-04-09", includes=("results",))
+    assert r.corrections_appended == 0
+
+
+def test_result_is_correction_unit() -> None:
+    from sports_quant.db.repositories.official_games import _result_is_correction
+
+    def row(**kw):
+        base = {"mapped_status": "in_progress", "home_runs": None, "away_runs": None,
+                "home_hits": None, "away_hits": None, "home_errors": None, "away_errors": None}
+        base.update(kw)
+        return base
+
+    common = dict(home_runs=3, away_runs=2, home_hits=None, away_hits=None,
+                  home_errors=None, away_errors=None)
+    # No predecessor -> never a correction.
+    assert _result_is_correction(None, **common) is False
+    # Increase -> not a correction.
+    assert _result_is_correction(row(home_runs=2, away_runs=2), **common) is False
+    # Run decrease -> correction.
+    assert _result_is_correction(row(home_runs=4, away_runs=2), **common) is True
+    # Previously final -> any change is a correction.
+    assert _result_is_correction(row(mapped_status="final", home_runs=3, away_runs=2),
+                                 **common) is True
+    # Hit decrease (both present) -> correction.
+    assert _result_is_correction(
+        row(home_hits=9), home_runs=3, away_runs=2, home_hits=8, away_hits=None,
+        home_errors=None, away_errors=None) is True
+
+
+def test_out_of_order_result_backfill_does_not_regress_or_mislabel(db: Database) -> None:
+    # Directly exercise the repo with controlled observed_at ordering.
+    from sports_quant.db.repositories.official_games import SqliteResultRepository
+
+    ts = "2024-04-09T18:00:00.000000Z"
+    with db.connection() as conn:
+        conn.execute(
+            "INSERT INTO ingestion_runs (run_id, command, provider, operation, args_json, status, "
+            "requested_at, started_at, started_monotonic_ns, tool_version, created_at) VALUES "
+            "('run_x','ingest-mlb','mlb_statsapi','ingest_mlb','{}','started',?,?,0,'t',?)",
+            (ts, ts, ts))
+        conn.execute(
+            "INSERT INTO raw_responses (raw_response_id, run_id, provider, endpoint, "
+            "request_params_json, http_status, response_headers_json, requested_at, received_at, "
+            "elapsed_ns, body, body_bytes, body_hash, content_hash, created_at) VALUES "
+            "('raw_x','run_x','mlb_statsapi','/game/1/linescore','{}',200,'{}',?,?,1,'{}',2,'b','c',?)",
+            (ts, ts, ts))
+        conn.execute(
+            "INSERT INTO provider_game_references (reference_id, provider, provider_game_id, "
+            "first_raw_response_id, current_raw_response_id, current_raw_response_hash, "
+            "first_observed_at, last_observed_at, created_at, updated_at) VALUES "
+            "('pgr_x','mlb_statsapi','1','raw_x','raw_x','c',?,?,?,?)", (ts, ts, ts, ts))
+        repo = SqliteResultRepository(conn)
+        # Later observation first (T2, final 6-3), then an earlier backfill (T1, 5-3).
+        _id, out2, corr2 = repo.append(
+            game_ref_id="pgr_x", provider="mlb_statsapi", provider_game_id="1",
+            observed_at="2024-04-09T22:00:00.000000Z", ingested_at=ts, run_id="run_x",
+            raw_response_id="raw_x", raw_response_hash="c", mapped_status="final",
+            home_runs=6, away_runs=3)
+        _id, out1, corr1 = repo.append(
+            game_ref_id="pgr_x", provider="mlb_statsapi", provider_game_id="1",
+            observed_at="2024-04-09T20:00:00.000000Z", ingested_at=ts, run_id="run_x",
+            raw_response_id="raw_x", raw_response_hash="c", mapped_status="in_progress",
+            home_runs=5, away_runs=3)
+        # The earlier backfill has no predecessor -> not a correction, not mislabeled
+        # by the later row.
+        assert corr1 is False
+        # Current state (newest observed_at) is still the T2 final 6-3.
+        current = conn.execute(
+            "SELECT home_runs FROM game_result_snapshots "
+            "ORDER BY observed_at DESC, result_id DESC LIMIT 1").fetchone()[0]
+        assert current == 6
+
+
+# --------------------------------------------------------------------------- #
+# Date-aware roster ingestion (§2)
+# --------------------------------------------------------------------------- #
+async def test_roster_uses_official_game_date(db: Database) -> None:
+    seen: list[str] = []
+    c = mlb_client(
+        schedule_body=schedule(game(game_pk=1, home_team=133, away_team=147,
+                                    official_date="2024-05-01")),
+        roster_by_team={"133": roster(rperson(600)), "147": roster(rperson(700))}, seen=seen,
+    )
+    # from_date differs from the game's officialDate on purpose.
+    await _ingest(db, c, from_date="2024-04-09", includes=("rosters",))
+    with db.connection() as conn:
+        dates = {r[0] for r in conn.execute("SELECT roster_date FROM roster_snapshots")}
+    assert dates == {"2024-05-01"}  # the game's official date, not --from
+
+
+async def test_team_on_two_dates_fetched_once_per_date(db: Database) -> None:
+    seen: list[str] = []
+    c = mlb_client(
+        schedule_body={"dates": [{"date": "range", "games": [
+            game(game_pk=1, home_team=133, away_team=147, official_date="2024-04-09"),
+            game(game_pk=2, home_team=133, away_team=200, official_date="2024-04-10"),
+        ]}]},
+        roster_by_team={"133": roster(rperson(600)), "147": roster(rperson(700)),
+                        "200": roster(rperson(800))}, seen=seen,
+    )
+    r = await _ingest(db, c, from_date="2024-04-09", to_date="2024-04-10", includes=("rosters",))
+    # Team 133 plays both days -> two roster requests; 147 (day1) + 200 (day2).
+    assert r.roster_requests == 4
+    with db.connection() as conn:
+        d133 = {x[0] for x in conn.execute(
+            "SELECT roster_date FROM roster_snapshots WHERE provider_team_id='133'")}
+    assert d133 == {"2024-04-09", "2024-04-10"}
+
+
+async def test_game_pk_derives_roster_date_from_schedule(db: Database) -> None:
+    c = mlb_client(
+        schedule_body=schedule(game(game_pk=99, home_team=133, away_team=147,
+                                    official_date="2024-06-15")),
+        roster_by_team={"133": roster(rperson(600)), "147": roster(rperson(700))},
+    )
+    await _ingest(db, c, game_pk=99, includes=("rosters",))  # no --from
+    with db.connection() as conn:
+        dates = {r[0] for r in conn.execute("SELECT roster_date FROM roster_snapshots")}
+    assert dates == {"2024-06-15"}
+
+
+async def test_missing_official_date_skips_roster_with_dq_note(db: Database) -> None:
+    g = game(game_pk=1, home_team=133, away_team=147)
+    del g["officialDate"]  # no official date
+    seen: list[str] = []
+    c = mlb_client(schedule_body=schedule(g),
+                   roster_by_team={"133": roster(rperson(600))}, seen=seen)
+    r = await _ingest(db, c, from_date="2024-04-09", includes=("rosters",))
+    assert r.roster_requests == 0  # never fetched without a date
+    assert not [p for p in seen if p.endswith("/roster")]
+    assert _count(db, "roster_snapshots") == 0  # no fabricated roster
+    assert _count(db, "data_quality_issues", "WHERE rule_code='DQ-MLB-ROSTER-001'") >= 1
+
+
+async def test_dry_run_roster_persists_nothing_but_counts(db: Database) -> None:
+    before = _snapshot(db)
+    c = mlb_client(
+        schedule_body=schedule(game(game_pk=1, home_team=133, away_team=147)),
+        roster_by_team={"133": roster(rperson(600)), "147": roster(rperson(700))},
+    )
+    r = await _ingest(db, c, from_date="2024-04-09", includes=("rosters",), dry_run=True)
+    assert r.roster_observations_inserted == 2
+    assert _snapshot(db) == before
+
+
 # Keep the imported builders referenced so linters see them as used.
 _FIXTURE_BUILDERS: tuple[Callable[..., Any], ...] = (game, schedule, boxscore, linescore)

@@ -9,12 +9,49 @@ coerce a missing statistic to zero.
 
 from __future__ import annotations
 
+import sqlite3
 from typing import Any, Optional
 
 from ..ids import new_inning_line_id, new_result_snapshot_id, new_schedule_snapshot_id
 from ..schema import utc_now_iso
 from .base import Repository
 from .observations import ObservationOutcome, append_transition, observation_content_hash
+
+
+def _result_is_correction(
+    predecessor: Optional[sqlite3.Row],
+    *,
+    home_runs: Optional[int],
+    away_runs: Optional[int],
+    home_hits: Optional[int],
+    away_hits: Optional[int],
+    home_errors: Optional[int],
+    away_errors: Optional[int],
+) -> bool:
+    """Whether a new result revises a previously-observed one (a genuine
+    correction) rather than being ordinary live progression.
+
+    True only when: the predecessor was ``final`` (a finished game changed), or a
+    cumulative run/hit/error total *decreased* while both values are present.
+    Increases, inning advances, and status-only transitions return False. No
+    predecessor -> the first observation, never a correction.
+    """
+
+    if predecessor is None:
+        return False
+    if str(predecessor["mapped_status"]) == "final":
+        return True  # a previously-final result changed
+    for old, new in (
+        (predecessor["home_runs"], home_runs),
+        (predecessor["away_runs"], away_runs),
+        (predecessor["home_hits"], home_hits),
+        (predecessor["away_hits"], away_hits),
+        (predecessor["home_errors"], home_errors),
+        (predecessor["away_errors"], away_errors),
+    ):
+        if old is not None and new is not None and int(new) < int(old):
+            return True  # a cumulative total went backwards -> a revision
+    return False
 
 
 class SqliteScheduleRepository(Repository):
@@ -132,17 +169,26 @@ class SqliteResultRepository(Repository):
         provider_timestamp: Optional[str] = None,
         published_at: Optional[str] = None,
     ) -> tuple[Optional[str], ObservationOutcome, bool]:
-        """Append a result observation; auto-detect corrections. Returns
+        """Append a result observation; classify genuine corrections. Returns
         ``(id, outcome, is_correction)``.
 
-        ``is_correction`` is 1 when a *prior* result observation for this game
-        (at or before ``observed_at``) exists AND the new content differs from it
-        -- i.e. a previously observed result changed. The first observation is
-        never a correction; an identical replay writes no row and is not a
-        correction; an out-of-order backfill that is the new earliest observation
-        (no predecessor) is not a correction and does not regress current state.
-        ``is_correction`` is deliberately excluded from the content hash so it
-        cannot split two otherwise-identical observations.
+        Ordinary live-game progression is **not** a correction. Against the
+        immediate temporal predecessor (the latest observation at or before
+        ``observed_at``), ``is_correction`` is True only when evidence shows a
+        previously-observed value was *revised*:
+
+        * a previously **final** result changed at all; or
+        * a cumulative **run** total decreased (both values present); or
+        * a cumulative **hit** or **error** total decreased (both present).
+
+        Score/hit/error increases, inning advances, and status-only transitions
+        (scheduled→pregame→in_progress→final with a logically-consistent
+        cumulative result) are normal progression, never corrections. The first
+        observation is never a correction; an identical replay writes no row; an
+        out-of-order backfill is compared only to its own temporal predecessor, so
+        it is neither mislabeled by a *later* observation nor allowed to regress
+        current state (which is always derived from the newest ``observed_at``).
+        ``is_correction`` is excluded from the content hash.
         """
 
         content = {
@@ -153,15 +199,18 @@ class SqliteResultRepository(Repository):
         }
         content_hash = observation_content_hash(content)
         predecessor = self._fetch_one(
-            "SELECT content_hash FROM game_result_snapshots "
+            "SELECT content_hash, mapped_status, home_runs, away_runs, home_hits, away_hits, "
+            "home_errors, away_errors FROM game_result_snapshots "
             "WHERE game_ref_id = ? AND observed_at <= ? "
             "ORDER BY observed_at DESC, result_id DESC LIMIT 1",
             (game_ref_id, observed_at),
         )
         if predecessor is not None and str(predecessor["content_hash"]) == content_hash:
             return None, ObservationOutcome.UNCHANGED, False  # identical to predecessor
-        # A differing content with an existing prior observation is a correction.
-        is_correction = predecessor is not None
+        is_correction = _result_is_correction(
+            predecessor, home_runs=home_runs, away_runs=away_runs, home_hits=home_hits,
+            away_hits=away_hits, home_errors=home_errors, away_errors=away_errors,
+        )
         new_id = new_result_snapshot_id()
         now = utc_now_iso()
         cursor = self._conn.execute(

@@ -490,40 +490,64 @@ async def ingest_mlb(
                                                f"linescore gamePk {game_pk_str}", result)
         per_game[game_pk_str] = fetched
 
-    # Rosters are team-scoped: fetch each unique provider team ONCE per run
-    # (deduplicated across a doubleheader that reuses a team).
-    rosters_by_team: dict[str, Optional[ProviderResponse]] = {}
+    # Rosters are point-in-time: each unique (provider team, official game date)
+    # pair is fetched ONCE per run, using that game's official date -- never
+    # today's roster and never a date merely inherited from --from. A same-day
+    # doubleheader dedups to one fetch per team; a team on two dates is two
+    # fetches. Games without an official date get an honest DQ note, not a
+    # fabricated roster.
+    rosters_by_pair: dict[tuple[str, str], Optional[ProviderResponse]] = {}
+    roster_gaps: list[tuple[str, str]] = []  # (game_pk, provider_team_id) missing a date
     if "rosters" in include_set:
-        for team_id in _unique_team_ids(games):
+        pairs, roster_gaps = _roster_pairs(games)
+        for team_id, official_date in pairs:
             result.roster_requests += 1
-            rosters_by_team[team_id] = await _try_fetch(
-                client.fetch_roster, (team_id,), {"date": from_date},
-                f"roster team {team_id}", result,
+            rosters_by_pair[(team_id, official_date)] = await _try_fetch(
+                client.fetch_roster, (team_id,), {"date": official_date},
+                f"roster team {team_id} @ {official_date}", result,
             )
 
     if dry_run:
         # Normalize in memory only: count what WOULD be written, persist nothing.
-        _dry_run_count(games, per_game, rosters_by_team, include_set, result)
+        _dry_run_count(games, per_game, rosters_by_pair, roster_gaps, include_set, result)
         result.status = "partially_failed" if result.has_active_failure else "succeeded"
         return result
 
     return await _persist(
-        database, schedule, games, per_game, rosters_by_team, include_set, result, tool_version,
-        roster_date=from_date,
+        database, schedule, games, per_game, rosters_by_pair, roster_gaps, include_set,
+        result, tool_version,
     )
 
 
-def _unique_team_ids(games: list[dict[str, Any]]) -> list[str]:
-    """Distinct provider team ids across the games, in first-seen order."""
+def _roster_pairs(
+    games: list[dict[str, Any]],
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Distinct ``(provider_team_id, official_game_date)`` pairs to fetch, plus
+    ``(game_pk, provider_team_id)`` gaps where the game has no official date.
 
-    seen: list[str] = []
+    The date is each game's own ``officialDate`` -- so a team that plays on two
+    dates yields two pairs, and a same-day doubleheader dedups to one pair per
+    team. A game missing its official date contributes no roster fetch.
+    """
+
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    gaps: list[tuple[str, str]] = []
     for game in games:
-        teams = _as_dict(_as_dict(game).get("teams"))
-        for side in ("home", "away"):
-            tid = _provider_id(_as_dict(teams.get(side)).get("team"))
-            if tid and tid not in seen:
-                seen.append(tid)
-    return seen
+        norm, _reason = _normalize_schedule_game(game)
+        if norm is None:
+            continue
+        for tid in (norm.home_provider_team_id, norm.away_provider_team_id):
+            if not tid:
+                continue
+            if norm.game_date_local:
+                key = (tid, norm.game_date_local)
+                if key not in seen:
+                    seen.add(key)
+                    pairs.append(key)
+            else:
+                gaps.append((norm.game_pk, tid))
+    return pairs, gaps
 
 
 async def _fetch_schedule(
@@ -604,7 +628,8 @@ def _parse_roster(data: Any) -> tuple[list[_RosterPlayer], int]:
 def _dry_run_count(
     games: list[dict[str, Any]],
     per_game: dict[str, dict[str, Optional[ProviderResponse]]],
-    rosters_by_team: dict[str, Optional[ProviderResponse]],
+    rosters_by_pair: dict[tuple[str, str], Optional[ProviderResponse]],
+    roster_gaps: list[tuple[str, str]],
     include_set: set[str],
     result: MlbIngestResult,
 ) -> None:
@@ -680,7 +705,7 @@ def _dry_run_count(
                             result.player_statistics_inserted += 1
 
     if "rosters" in include_set:
-        for team_id, roster_resp in rosters_by_team.items():
+        for (team_id, _date), roster_resp in rosters_by_pair.items():
             if roster_resp is None:
                 continue  # a failed roster fetch is already an active failure
             roster_players, rejected = _parse_roster(roster_resp.data)
@@ -690,6 +715,8 @@ def _dry_run_count(
             for rp in roster_players:
                 result.roster_observations_inserted += 1
                 ref("player", rp.provider_player_id)
+        # A game with no official date contributes a DQ note (no roster fetched).
+        result.data_quality_issues += len(roster_gaps)
 
 
 # --------------------------------------------------------------------------- #
@@ -700,11 +727,11 @@ async def _persist(
     schedule: ProviderResponse,
     games: list[dict[str, Any]],
     per_game: dict[str, dict[str, Optional[ProviderResponse]]],
-    rosters_by_team: dict[str, Optional[ProviderResponse]],
+    rosters_by_pair: dict[tuple[str, str], Optional[ProviderResponse]],
+    roster_gaps: list[tuple[str, str]],
     include_set: set[str],
     result: MlbIngestResult,
     tool_version: str,
-    roster_date: Optional[str] = None,
 ) -> MlbIngestResult:
     started = time.monotonic_ns()
     with database.connection() as conn:
@@ -731,16 +758,16 @@ async def _persist(
                 game_raws[pk][kind] = _store_raw(conn, raw_repo, run.run_id, resp)
                 result.raw_responses_received += 1
 
-        # Roster raws (team-scoped), stored once each.
-        roster_raws: dict[str, tuple[str, str, str]] = {}
-        for team_id, roster_resp in rosters_by_team.items():
+        # Roster raws (one per team/date pair), stored once each.
+        roster_raws: dict[tuple[str, str], tuple[str, str, str]] = {}
+        for pair, roster_resp in rosters_by_pair.items():
             if roster_resp is not None:
-                roster_raws[team_id] = _store_raw(conn, raw_repo, run.run_id, roster_resp)
+                roster_raws[pair] = _store_raw(conn, raw_repo, run.run_id, roster_resp)
                 result.raw_responses_received += 1
 
         refs = SqliteProviderReferenceRepository(conn)
         dq = SqliteDataQualityRepository(conn)
-        ctx = _PersistCtx(conn, run.run_id, refs, dq, result, roster_date=roster_date)
+        ctx = _PersistCtx(conn, run.run_id, refs, dq, result)
 
         for game in games:
             norm, reason = _normalize_schedule_game(game)
@@ -761,18 +788,33 @@ async def _persist(
                 result.record_active_failure(_t, f"game {norm.game_pk}: {msg}")
                 result.note(f"game {norm.game_pk}: normalization failed ({msg})")
 
-        # Roster phase (team-scoped; each unique team's roster persisted once).
-        for team_id, roster_resp in rosters_by_team.items():
-            raw = roster_raws.get(team_id)
+        # Roster phase (one observation set per team/date pair, using that game's
+        # official date as roster_date).
+        for (team_id, official_date), roster_resp in rosters_by_pair.items():
+            raw = roster_raws.get((team_id, official_date))
             if roster_resp is None or raw is None:
                 continue  # a failed roster fetch never fabricates an empty roster
             try:
                 with transaction(conn):
-                    _persist_roster(ctx, team_id, roster_resp.data, raw)
+                    _persist_roster(ctx, team_id, official_date, roster_resp.data, raw)
             except Exception as exc:  # noqa: BLE001
                 _t, msg = sanitize_error(exc)
-                result.record_active_failure(_t, f"roster {team_id}: {msg}")
-                result.note(f"roster {team_id}: normalization failed ({msg})")
+                result.record_active_failure(_t, f"roster {team_id}@{official_date}: {msg}")
+                result.note(f"roster {team_id}@{official_date}: normalization failed ({msg})")
+
+        # Games missing an official date get an honest DQ note; no roster is
+        # fetched or fabricated for them (never today's roster).
+        for game_pk, team_id in roster_gaps:
+            with transaction(conn):
+                dq.record(
+                    severity="note", rule_code="DQ-MLB-ROSTER-001", entity_type="game",
+                    description=(
+                        f"roster skipped for team {team_id} on gamePk {game_pk}: "
+                        "no official game date available"
+                    ),
+                    provider=PROVIDER_MLB_STATSAPI, run_id=run.run_id, entity_id=game_pk,
+                )
+                result.data_quality_issues += 1
 
         # Truthful status: an active failure -> partially_failed (a genuine
         # provider/normalization failure occurred even if data persisted).
@@ -798,7 +840,6 @@ class _PersistCtx:
     refs: SqliteProviderReferenceRepository
     dq: SqliteDataQualityRepository
     result: MlbIngestResult
-    roster_date: Optional[str] = None
 
 
 def _game_ref(ctx: _PersistCtx, norm: _NormGame, raw: tuple[str, str, str]) -> str:
@@ -1109,14 +1150,17 @@ def _persist_boxscore(
 
 
 def _persist_roster(
-    ctx: _PersistCtx, provider_team_id: str, roster_data: Any, roster_raw: tuple[str, str, str],
+    ctx: _PersistCtx, provider_team_id: str, official_date: str, roster_data: Any,
+    roster_raw: tuple[str, str, str],
 ) -> None:
     """Persist one team's roster observations from its own raw response.
 
-    Creates the team reference and a provider player reference per valid roster
-    player (all with the roster response's own provenance), then appends
-    transition-aware roster observations. A missing player id is rejected (never
-    fabricated); canonical player ids stay NULL for D5.
+    ``official_date`` (the game's official date) is stored as ``roster_date`` --
+    the point-in-time context this roster was fetched for. Creates the team
+    reference and a provider player reference per valid roster player (all with
+    the roster response's own provenance), then appends transition-aware roster
+    observations. A missing player id is rejected (never fabricated); canonical
+    player ids stay NULL for D5.
     """
 
     raw_id, raw_hash, observed = roster_raw
@@ -1134,7 +1178,7 @@ def _persist_roster(
             provider_team_id=provider_team_id, provider_player_id=p.provider_player_id,
             observed_at=observed, ingested_at=ingested, run_id=ctx.run_id,
             raw_response_id=raw_id, raw_response_hash=raw_hash,
-            roster_date=ctx.roster_date, roster_status=p.roster_status,
+            roster_date=official_date, roster_status=p.roster_status,
             jersey_number=p.jersey_number, position=p.position,
         )
         if outcome is ObservationOutcome.INSERTED:

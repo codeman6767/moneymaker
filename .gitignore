@@ -31,3 +31,6 @@ data/
 *.db
 *.db-wal
 *.db-shm
+
+# Generated Graphify knowledge graph and caches
+graphify-out/
