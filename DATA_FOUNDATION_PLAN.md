@@ -24,8 +24,8 @@ first-vs-current metadata provenance, strict event/market/trade validation,
 accurate insert/update/dedup counters (including a new `ingestion_runs.records_updated`),
 and a single validation path shared by persisted and dry-run ingestion. No
 Kalshi credential, private key, or signing is used anywhere; there is no
-account/balance/position/fill/order column in the schema. All 559 tests pass
-under Ruff and mypy.
+account/balance/position/fill/order column in the schema. All 894 tests pass
+(1 skipped) under Ruff and mypy.
 
 **Phase D provider selection and implementation design are complete; D1 provider
 infrastructure and D2 MLB ingestion code are complete (schema v11, migration

@@ -27,12 +27,23 @@ def _result_is_correction(
     away_hits: Optional[int],
     home_errors: Optional[int],
     away_errors: Optional[int],
+    innings_played: Optional[int] = None,
+    winning_side: Optional[str] = None,
 ) -> bool:
-    """Whether a new result revises a previously-observed one (a genuine
+    """Whether a new result *revises* a previously-observed one (a genuine
     correction) rather than being ordinary live progression.
 
-    True only when: the predecessor was ``final`` (a finished game changed), or a
-    cumulative run/hit/error total *decreased* while both values are present.
+    A correction requires a **substantive** result value to change -- status
+    wording alone is never correction evidence. Specifically:
+
+    * a previously-``final`` observation is a correction only when a substantive
+      value (score, cumulative hits/errors, innings played, or winning side)
+      actually differs; a change to ``mapped_status``/status wording or
+      ``result_detail`` while every substantive value is unchanged is status-only,
+      not a correction; or
+    * (for any predecessor) a cumulative run/hit/error total *decreased* while
+      both values are present.
+
     Increases, inning advances, and status-only transitions return False. No
     predecessor -> the first observation, never a correction.
     """
@@ -40,7 +51,12 @@ def _result_is_correction(
     if predecessor is None:
         return False
     if str(predecessor["mapped_status"]) == "final":
-        return True  # a previously-final result changed
+        # A finished game changed -- but only a substantive revision counts.
+        return _substantive_result_differs(
+            predecessor, home_runs=home_runs, away_runs=away_runs, home_hits=home_hits,
+            away_hits=away_hits, home_errors=home_errors, away_errors=away_errors,
+            innings_played=innings_played, winning_side=winning_side,
+        )
     for old, new in (
         (predecessor["home_runs"], home_runs),
         (predecessor["away_runs"], away_runs),
@@ -52,6 +68,38 @@ def _result_is_correction(
         if old is not None and new is not None and int(new) < int(old):
             return True  # a cumulative total went backwards -> a revision
     return False
+
+
+def _substantive_result_differs(
+    predecessor: sqlite3.Row,
+    *,
+    home_runs: Optional[int],
+    away_runs: Optional[int],
+    home_hits: Optional[int],
+    away_hits: Optional[int],
+    home_errors: Optional[int],
+    away_errors: Optional[int],
+    innings_played: Optional[int],
+    winning_side: Optional[str],
+) -> bool:
+    """Whether any substantive result value differs from ``predecessor`` --
+    score, cumulative hits/errors, innings played, or winning side. Status
+    wording and ``result_detail`` are deliberately excluded."""
+
+    numeric = (
+        ("home_runs", home_runs), ("away_runs", away_runs),
+        ("home_hits", home_hits), ("away_hits", away_hits),
+        ("home_errors", home_errors), ("away_errors", away_errors),
+        ("innings_played", innings_played),
+    )
+    for column, new in numeric:
+        old = predecessor[column]
+        old_int = None if old is None else int(old)
+        if old_int != new:
+            return True
+    old_side = predecessor["winning_side"]
+    old_side_str = None if old_side is None else str(old_side)
+    return old_side_str != winning_side
 
 
 class SqliteScheduleRepository(Repository):
@@ -200,7 +248,7 @@ class SqliteResultRepository(Repository):
         content_hash = observation_content_hash(content)
         predecessor = self._fetch_one(
             "SELECT content_hash, mapped_status, home_runs, away_runs, home_hits, away_hits, "
-            "home_errors, away_errors FROM game_result_snapshots "
+            "home_errors, away_errors, innings_played, winning_side FROM game_result_snapshots "
             "WHERE game_ref_id = ? AND observed_at <= ? "
             "ORDER BY observed_at DESC, result_id DESC LIMIT 1",
             (game_ref_id, observed_at),
@@ -210,6 +258,7 @@ class SqliteResultRepository(Repository):
         is_correction = _result_is_correction(
             predecessor, home_runs=home_runs, away_runs=away_runs, home_hits=home_hits,
             away_hits=away_hits, home_errors=home_errors, away_errors=away_errors,
+            innings_played=innings_played, winning_side=winning_side,
         )
         new_id = new_result_snapshot_id()
         now = utc_now_iso()

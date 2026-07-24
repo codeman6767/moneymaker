@@ -547,26 +547,47 @@ async def test_status_only_change_is_not_a_correction(db: Database) -> None:
     assert r.corrections_appended == 0
 
 
+async def test_final_status_wording_change_same_score_is_not_a_correction(db: Database) -> None:
+    # A previously-final result re-observed with only its status wording changed
+    # ("Final" -> "Game Over", both map to canonical `final`) but the SAME 5-4
+    # score is status-only: never a correction, and no duplicate result row.
+    await _run_result(db, "Final", "F", "Final", 5, 4)
+    r = await _run_result(db, "Game Over", "F", "Final", 5, 4)  # wording only; same score
+    assert r.corrections_appended == 0
+    assert _count(db, "game_result_snapshots", "WHERE is_correction=1") == 0
+    assert _count(db, "game_result_snapshots") == 1  # the re-observation deduped
+
+
 def test_result_is_correction_unit() -> None:
     from sports_quant.db.repositories.official_games import _result_is_correction
 
     def row(**kw):
         base = {"mapped_status": "in_progress", "home_runs": None, "away_runs": None,
-                "home_hits": None, "away_hits": None, "home_errors": None, "away_errors": None}
+                "home_hits": None, "away_hits": None, "home_errors": None, "away_errors": None,
+                "innings_played": None, "winning_side": None}
         base.update(kw)
         return base
 
-    common = dict(home_runs=3, away_runs=2, home_hits=None, away_hits=None,
-                  home_errors=None, away_errors=None)
+    common: dict[str, Any] = dict(home_runs=3, away_runs=2, home_hits=None, away_hits=None,
+                                  home_errors=None, away_errors=None)
     # No predecessor -> never a correction.
     assert _result_is_correction(None, **common) is False
     # Increase -> not a correction.
     assert _result_is_correction(row(home_runs=2, away_runs=2), **common) is False
     # Run decrease -> correction.
     assert _result_is_correction(row(home_runs=4, away_runs=2), **common) is True
-    # Previously final -> any change is a correction.
+    # Previously final with the SAME substantive result (only status wording could
+    # differ) -> status-only, NOT a correction.
     assert _result_is_correction(row(mapped_status="final", home_runs=3, away_runs=2),
+                                 **common) is False
+    # Previously final with a substantive score change -> a correction.
+    assert _result_is_correction(row(mapped_status="final", home_runs=4, away_runs=2),
                                  **common) is True
+    # Previously final with a winning-side revision -> a correction.
+    assert _result_is_correction(
+        row(mapped_status="final", home_runs=3, away_runs=2, winning_side="away"),
+        home_runs=3, away_runs=2, home_hits=None, away_hits=None, home_errors=None,
+        away_errors=None, winning_side="home") is True
     # Hit decrease (both present) -> correction.
     assert _result_is_correction(
         row(home_hits=9), home_runs=3, away_runs=2, home_hits=8, away_hits=None,
