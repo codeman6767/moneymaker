@@ -3,9 +3,10 @@
 Concrete, staged implementation design for official MLB/NBA data, weather, and
 canonical matching.
 
-> **Status: Phase D2 MLB ingestion code complete; D3–D5 not started. No large
-> historical backfill has been performed. Live MLB access still requires a
-> successful approved provider audit and smoke test.** D1 (schema v10) built the
+> **Status: Phase D2 MLB ingestion code complete and its controlled live gate
+> passed on July 24, 2026; D3–D5 not started. The controlled live MLB StatsAPI
+> provider audit and bounded dry-run smoke test succeeded, but no persisted MLB
+> ingestion or historical backfill has been performed.** D1 (schema v10) built the
 > typed provider-capability system, the four provider clients over a shared
 > GET-only base, the tightened `http_policy` allow-lists, and the evidence-backed
 > dependency-aware `provider-audit` + `ingest-venues` CLI. **D2 (migration
@@ -77,7 +78,7 @@ Companion documents: `PHASE_D_PROVIDER_DECISIONS.md`, `DATA_ARCHITECTURE.md`,
   `NWS_BASE_URL`, `OPEN_METEO_BASE_URL`). Read-only invariants unchanged.
 - `sports_quant/cli.py` — register the Phase D sub-commands (incl. `provider-audit`).
 - `sports_quant/db/migrations/` — new immutable migrations `d009`…`d013`
-  (`d009`/`d010` built; `d011`–`d013` planned).
+  (`d009`–`d011` built; `d012`–`d013` planned).
 - `sports_quant/db/repositories/` — new typed repositories.
 - `sports_quant/db/models.py`, `ids.py`, `schema.py` — new row models / prefixes / constants.
 - `intel/player_matching.py` — **extend, not replace**: back the in-memory

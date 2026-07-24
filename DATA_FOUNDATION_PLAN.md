@@ -29,8 +29,10 @@ account/balance/position/fill/order column in the schema. All 894 tests pass
 
 **Phase D provider selection and implementation design are complete; D1 provider
 infrastructure and D2 MLB ingestion code are complete (schema v11, migration
-`d011_official_games_stats`). No large historical backfill has been performed;
-live MLB access still requires an approved provider audit and smoke test.** D2
+`d011_official_games_stats`), and the D2 controlled live gate passed on July 24,
+2026. The controlled live MLB StatsAPI provider audit and bounded dry-run smoke
+test completed successfully; no persisted MLB ingestion or historical backfill
+has been performed.** D2
 added append-only, transition-aware official-MLB observation tables
 (schedule/result/inning/team+player stats/roster/probable/lineup), the extended
 MLB StatsAPI client (date-ranged schedule with probable/lineup hydration, box
@@ -58,9 +60,10 @@ raw-response evidence), leaving unprobed capabilities declared-only; provider
 evidence (never a broad word alone); and the BALLDONTLIE allow-list is tightened
 to explicit documented endpoints.
 
-**D1 provider infrastructure and D2 MLB ingestion code are complete. D3–D5 have
-not started. A live MLB provider audit and small smoke test remain required
-before a large backfill.** D2 ingests the MLB StatsAPI schedule, box scores, line
+**D1 is complete; D2 MLB ingestion code is complete and its controlled live gate
+passed on July 24, 2026; D3–D5 have not started. The live MLB provider audit and
+bounded dry-run smoke test succeeded, but no persisted MLB ingestion or
+historical backfill has been performed.** D2 ingests the MLB StatsAPI schedule, box scores, line
 scores, probable pitchers, posted lineups, and **date-aware rosters** into
 append-only, transition-aware official-observation tables (migration `d011`,
 schema v11), anchored on `provider_game_references` with provider player/team
@@ -102,7 +105,7 @@ backfill has been performed. D3–D5 have not started.
 | A | Database engine, migrations, core entities, `db-init` | ✅ Complete (schema v3) |
 | B | Raw responses, ingestion runs, sportsbook odds | ✅ Complete (schema v6, incl. `b006` integrity repair) |
 | C | Kalshi public events, markets, books, trades | ✅ Complete (schema v8, incl. `c008` integrity repair) |
-| D | Official providers, weather, canonical matching | ◧ **D1 infra + D2 MLB ingestion code complete (schema v11, incl. `d010` audit-integrity repair and `d011` official MLB snapshots); D3–D5 not started** |
+| D | Official providers, weather, canonical matching | ◧ **D1 infra + D2 MLB ingestion code complete (schema v11, incl. `d010` audit-integrity repair and `d011` official MLB snapshots); D2 controlled live gate passed 2026-07-24 (no persisted ingestion/backfill); D3–D5 not started** |
 | E | Point-in-time builder, quality rules, leakage tests | ◻ Not started |
 
 Companion documents:
@@ -614,9 +617,10 @@ is never miscounted as a new insert.
 ### Phase D — Official providers, weather, and canonical matching
 
 > **Provider selection + implementation design complete; D1 provider
-> infrastructure and D2 MLB ingestion code complete (schema v11), D3–D5 not
-> started. No large historical backfill performed; live MLB access still requires
-> an approved provider audit and smoke test.** The authoritative, up-to-date
+> infrastructure and D2 MLB ingestion code complete (schema v11), and the D2
+> controlled live gate passed on July 24, 2026; D3–D5 not started. The controlled
+> live MLB StatsAPI provider audit and bounded dry-run smoke test succeeded, but
+> no persisted MLB ingestion or historical backfill has been performed.** The authoritative, up-to-date
 > Phase D plan lives in two dedicated documents —
 > `PHASE_D_PROVIDER_DECISIONS.md` (provider evaluation, selection, credentials,
 > cost/coverage, licensing risk) and `PHASE_D_IMPLEMENTATION_PLAN.md` (schema,
