@@ -29,8 +29,10 @@ Design (mirrors the D2 MLB ingestor and honours the permanent CLAUDE.md rules):
   The baseball-named d011 result/stat tables (``game_result_snapshots`` /
   ``team_game_statistics`` / ``player_game_statistics``) remain MLB-only.
 * NBA-specific append-only observations use the d012 tables directly:
-  ``nba_quarter_lines`` (derived from the detailed box-score response, since
-  ``/v1/games`` carries no per-quarter field), ``play_snapshots``, and
+  ``nba_quarter_lines`` (derived from the ``/v1/box_scores`` response's flat
+  per-period fields ``home_q1..q4`` / ``visitor_q1..q4`` + ``home_otN`` /
+  ``visitor_otN``, since ``/v1/games`` carries no per-quarter field),
+  ``play_snapshots``, and
   ``injury_snapshots`` (with an exact ``return_estimate`` text preserved and a
   parsed ``return_date`` only for an unambiguous full ISO date -- no fabricated
   year). Cross-sport schedule (``game_schedule_snapshots``) and lineup
@@ -51,6 +53,7 @@ Design (mirrors the D2 MLB ingestor and honours the permanent CLAUDE.md rules):
 from __future__ import annotations
 
 import hashlib
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
@@ -272,6 +275,25 @@ class _QuarterRow:
 
 
 @dataclass(frozen=True)
+class _QuartersParse:
+    """Outcome of parsing a box object's flat per-period score fields.
+
+    ``rows`` are the valid per-(period, side) lines for periods the provider
+    genuinely supplied on BOTH sides. ``asymmetric_periods`` names any period
+    where exactly one side was supplied (present + non-null) -- a malformed pairing
+    that is neither fabricated into a complete period nor silently dropped, but
+    recorded honestly as a rejection + data-quality note by the caller.
+    """
+
+    rows: list[_QuarterRow]
+    asymmetric_periods: list[int]
+
+
+#: ``home_ot3`` / ``visitor_ot12`` -> the numbered-overtime discovery pattern.
+_BOX_OT_KEY_RE = re.compile(r"^(?:home|visitor)_ot(\d+)$")
+
+
+@dataclass(frozen=True)
 class _NormGame:
     game_id: str
     date_local: Optional[str]
@@ -335,34 +357,62 @@ def _normalize_game(game: dict[str, Any]) -> tuple[Optional[_NormGame], Optional
     )
 
 
-def _parse_box_quarters(box_game: dict[str, Any]) -> list[_QuarterRow]:
+def _period_specs(box_game: dict[str, Any]) -> list[tuple[int, str, str]]:
+    """Ordered ``(period, home_field, visitor_field)`` specs for a box object.
+
+    Regulation quarters q1..q4 map to periods 1..4. Overtime periods are
+    discovered from any numbered ``home_otN`` / ``visitor_otN`` keys genuinely
+    present in the response and map to period ``4 + N``; they are ordered
+    **numerically** (so ``ot10`` follows ``ot2``, never precedes it), and a gap in
+    the numbering (e.g. ``ot1`` and ``ot3`` present, ``ot2`` absent) is preserved
+    -- no intermediate overtime is fabricated. No fixed period count is assumed.
+    """
+
+    specs: list[tuple[int, str, str]] = [
+        (n, f"home_q{n}", f"visitor_q{n}") for n in (1, 2, 3, 4)
+    ]
+    ot_numbers: set[int] = set()
+    for key in box_game:
+        match = _BOX_OT_KEY_RE.match(key)
+        if match:
+            ot_numbers.add(int(match.group(1)))
+    for n in sorted(ot_numbers):  # numeric ordering, not lexicographic
+        specs.append((4 + n, f"home_ot{n}", f"visitor_ot{n}"))
+    return specs
+
+
+def _parse_box_quarters(box_game: dict[str, Any]) -> _QuartersParse:
     """Derive per-period lines from a matched box-score game (best-effort).
 
-    Quarter/period scores are not exposed by the ``/v1/games`` listing, so they
-    are derived from the richer box-score object when it supplies a ``periods``
-    array (the exact GOAT field is pending live verification). ONLY periods the
-    provider actually supplied become rows; an absent period is never a row, and a
-    missing per-side score stays ``None`` (distinct from an explicit 0). Regulation
-    quarters and overtime periods are both supported.
+    Per-period scores are not exposed by the ``/v1/games`` listing, so they are
+    derived from the richer ``/v1/box_scores`` object. BALLDONTLIE supplies them as
+    **flat integer fields** -- ``home_q1..home_q4`` / ``visitor_q1..visitor_q4`` for
+    regulation and ``home_otN`` / ``visitor_otN`` for overtime -- NOT a nested
+    ``periods`` array. Mapping: ``qN -> period N``, ``otN -> period 4 + N``,
+    ``visitor -> away``.
+
+    A period is normalized (two rows, one per side) ONLY when both sides are
+    present and non-null; an explicit ``0`` is preserved (a real 0), a missing/null
+    score is never coerced to 0, and a period supplied on neither side is simply
+    not emitted. A period supplied on exactly one side is asymmetric/malformed:
+    it is never fabricated into a complete period and is surfaced for an honest
+    rejection + data-quality note instead.
     """
 
     rows: list[_QuarterRow] = []
-    periods = box_game.get("periods")
-    seen: set[tuple[int, str]] = set()
-    for entry in periods if isinstance(periods, list) else []:
-        if not isinstance(entry, dict):
-            continue
-        period = _opt_int(entry.get("period"))
-        if period is None or period < 1:
-            continue
-        for side, key in (("home", "home"), ("away", "away")):
-            if key not in entry:
-                continue  # a period side not supplied is never a fabricated row/zero
-            if (period, side) in seen:
-                continue
-            seen.add((period, side))
-            rows.append(_QuarterRow(period=period, side=side, points=_opt_int(entry.get(key))))
-    return rows
+    asymmetric: list[int] = []
+    for period, home_field, visitor_field in _period_specs(box_game):
+        home_pts = _opt_int(box_game.get(home_field))
+        away_pts = _opt_int(box_game.get(visitor_field))
+        home_present = home_pts is not None
+        away_present = away_pts is not None
+        if home_present and away_present:
+            rows.append(_QuarterRow(period=period, side="home", points=home_pts))
+            rows.append(_QuarterRow(period=period, side="away", points=away_pts))
+        elif home_present or away_present:
+            asymmetric.append(period)  # one side only -> honest reject, never fabricated
+        # neither side present -> period not supplied; no row, no rejection
+    return _QuartersParse(rows=rows, asymmetric_periods=asymmetric)
 
 
 @dataclass(frozen=True)
@@ -1089,8 +1139,12 @@ def _count_plan(fetched: _Fetched, include_set: set[str], result: NbaIngestResul
                 for _tr in _normalize_box_team_lines(box_game):
                     observe("team_stat_observations")
             if "quarters" in include_set:
-                for _q in _parse_box_quarters(box_game):
+                qparse = _parse_box_quarters(box_game)
+                for _q in qparse.rows:
                     observe("quarter_observations")
+                for _period in qparse.asymmetric_periods:  # honest one-sided rejection
+                    result.data_quality_issues += 1
+                    result.records_rejected += 1
         if "player-stats" in include_set:
             for page in fetched.stats_by_game.get(norm.game_id, []):
                 for row in _rows(page):
@@ -1421,7 +1475,8 @@ def _persist_box_quarters(
 ) -> None:
     raw_id, raw_hash, observed = ctx.raws[id(box_resp)]
     quarter_repo = SqliteQuarterLineRepository(ctx.conn)
-    for q in _parse_box_quarters(box_game):
+    parse = _parse_box_quarters(box_game)
+    for q in parse.rows:
         _qid, outcome = quarter_repo.append(
             game_ref_id=game_ref_id, provider=PROVIDER_BALLDONTLIE, provider_game_id=norm.game_id,
             period=q.period, side=q.side, points=q.points, observed_at=observed,
@@ -1433,6 +1488,18 @@ def _persist_box_quarters(
             ctx.result.observations_normalized += 1
         _bucket(ctx, "nba_quarter_lines", "game_ref_id = ? AND period = ? AND side = ?",
                 (game_ref_id, q.period, q.side), outcome)
+    for period in parse.asymmetric_periods:
+        ctx.dq.record(
+            severity="note", rule_code="DQ-NBA-QTR-001", entity_type="game",
+            description=(
+                f"box period {period} for game {norm.game_id} supplied a score for only "
+                "one side; no quarter row was fabricated for the missing side"
+            ),
+            provider=PROVIDER_BALLDONTLIE, run_id=ctx.run_id, raw_response_id=raw_id,
+            entity_id=norm.game_id,
+        )
+        ctx.result.data_quality_issues += 1
+        ctx.result.records_rejected += 1
 
 
 def _persist_player_stats(

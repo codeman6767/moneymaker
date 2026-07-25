@@ -33,7 +33,7 @@ from sports_quant.db.repositories.nba import (
 from sports_quant.db.repositories.observations import ObservationOutcome
 from sports_quant.db.repositories.references import SqliteProviderReferenceRepository
 from sports_quant.http_policy import ReadOnlyHTTPPolicy, build_readonly_client
-from sports_quant.ingest.nba_ingestor import ingest_injuries, ingest_nba
+from sports_quant.ingest.nba_ingestor import _parse_box_quarters, ingest_injuries, ingest_nba
 from sports_quant.providers.balldontlie import BalldontlieClient
 
 SENTINEL = "sk-nba-d3-sentinel-do-not-store"
@@ -62,13 +62,29 @@ def game(
     }
 
 
-def four_periods() -> list[dict[str, Any]]:
-    return [
-        {"period": 1, "home": 30, "away": 28},
-        {"period": 2, "home": 28, "away": 25},
-        {"period": 3, "home": 32, "away": 30},
-        {"period": 4, "home": 30, "away": 27},
-    ]
+def flat_quarters(
+    *,
+    home: tuple[Optional[int], ...] = (30, 28, 32, 30),
+    away: tuple[Optional[int], ...] = (28, 25, 30, 27),
+    ot: Optional[dict[int, tuple[Optional[int], Optional[int]]]] = None,
+) -> dict[str, Any]:
+    """Build BALLDONTLIE's real FLAT per-period box fields.
+
+    ``home``/``away`` give regulation quarter scores (``home_q1..``,
+    ``visitor_q1..``); a ``None`` entry emits the key with a JSON null (present but
+    unscored). ``ot`` maps an overtime number N -> ``(home_otN, visitor_otN)``.
+    No nested ``periods`` array is produced (that shape is not the live contract).
+    """
+
+    fields: dict[str, Any] = {}
+    for i, val in enumerate(home, start=1):
+        fields[f"home_q{i}"] = val
+    for i, val in enumerate(away, start=1):
+        fields[f"visitor_q{i}"] = val
+    for n, (hv, vv) in (ot or {}).items():
+        fields[f"home_ot{n}"] = hv
+        fields[f"visitor_ot{n}"] = vv
+    return fields
 
 
 def box_object(
@@ -78,11 +94,13 @@ def box_object(
     visitor_team: int = 14,
     home_score: Optional[int] = 120,
     visitor_score: Optional[int] = 110,
-    periods: Optional[list[dict[str, Any]]] = None,
+    quarters: Optional[dict[str, Any]] = None,
     include_id: Optional[int] = None,
 ) -> dict[str, Any]:
     """A contract-shaped /v1/box_scores object. NO top-level game id by default
-    (the documented response may omit it), so association is by date + team ids."""
+    (the documented response may omit it), so association is by date + team ids.
+    Per-period scores use BALLDONTLIE's flat ``home_qN``/``visitor_qN`` (+ ``otN``)
+    fields, never a nested ``periods`` array."""
 
     obj: dict[str, Any] = {
         "date": date,
@@ -92,7 +110,7 @@ def box_object(
         "visitor_team": {"id": visitor_team, "abbreviation": "LAL",
                          "players": [{"player": {"id": 222}, "pts": 25, "min": "36"}]},
     }
-    obj["periods"] = periods if periods is not None else four_periods()
+    obj.update(quarters if quarters is not None else flat_quarters())
     if include_id is not None:
         obj["id"] = include_id
     return obj
@@ -472,25 +490,112 @@ async def test_status_only_change_is_not_a_correction(db: Database) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Quarter lines derived from box: missing != zero, overtime supported
+# Quarter lines from the REAL flat BALLDONTLIE box fields (home_qN / *_otN).
+# The repaired parser reads flat fields, never a nested `periods` array.
 # --------------------------------------------------------------------------- #
-async def test_missing_quarter_is_not_stored_as_zero(db: Database) -> None:
-    periods = [{"period": 1, "home": 30, "away": 28}, {"period": 2, "home": 0}]  # away MISSING
-    box = [box_object(periods=periods)]
-    await _run(db, router(box=box), from_date="2024-04-09", to_date="2024-04-09",
-               includes=("quarters",))
+async def test_four_regulation_periods_normalized(db: Database) -> None:
+    # home_q1..q4 + visitor_q1..q4 -> periods 1..4, two sides each.
+    await _run(db, router(box=[box_object()]), from_date="2024-04-09",
+               to_date="2024-04-09", includes=("quarters",))
     with db.connection() as conn:
         rows = {(r[0], r[1]): r[2] for r in conn.execute(
             "SELECT period, side, points FROM nba_quarter_lines")}
-    assert rows == {(1, "home"): 30, (1, "away"): 28, (2, "home"): 0}
-    assert (2, "away") not in rows
+    assert rows == {
+        (1, "home"): 30, (1, "away"): 28, (2, "home"): 28, (2, "away"): 25,
+        (3, "home"): 32, (3, "away"): 30, (4, "home"): 30, (4, "away"): 27,
+    }
 
 
-async def test_overtime_periods_supported(db: Database) -> None:
-    periods = four_periods() + [{"period": 5, "home": 12, "away": 10}]
-    await _run(db, router(box=[box_object(periods=periods)]),
-               from_date="2024-04-09", to_date="2024-04-09", includes=("quarters",))
-    assert _count(db, "nba_quarter_lines", "WHERE period=5") == 2
+async def test_explicit_zero_quarter_preserved_and_null_not_zeroed(db: Database) -> None:
+    # q1: explicit 0 both sides (a real 0). q4: null both sides (period not supplied
+    # -> no row, never coerced to 0). q2/q3 normal.
+    q = flat_quarters(home=(0, 28, 32, None), away=(0, 25, 30, None))
+    await _run(db, router(box=[box_object(quarters=q)]), from_date="2024-04-09",
+               to_date="2024-04-09", includes=("quarters",))
+    with db.connection() as conn:
+        rows = {(r[0], r[1]): r[2] for r in conn.execute(
+            "SELECT period, side, points FROM nba_quarter_lines")}
+    assert rows[(1, "home")] == 0 and rows[(1, "away")] == 0  # explicit zero preserved
+    assert (4, "home") not in rows and (4, "away") not in rows  # null -> no row, no 0
+    assert 0 not in {v for (p, _s), v in rows.items() if p == 4}  # no fabricated 0
+
+
+async def test_single_overtime_maps_to_period_5(db: Database) -> None:
+    q = flat_quarters(ot={1: (12, 10)})
+    await _run(db, router(box=[box_object(quarters=q)]), from_date="2024-04-09",
+               to_date="2024-04-09", includes=("quarters",))
+    with db.connection() as conn:
+        rows = {(r[0], r[1]): r[2] for r in conn.execute(
+            "SELECT period, side, points FROM nba_quarter_lines WHERE period=5")}
+    assert rows == {(5, "home"): 12, (5, "away"): 10}  # ot1 -> period 5
+    assert _count(db, "nba_quarter_lines") == 10  # 4 regulation + 1 OT, 2 sides each
+
+
+async def test_one_sided_period_rejected_honestly(db: Database) -> None:
+    # q1 supplied on the home side only -> asymmetric: no fabricated pair, DQ note.
+    q = flat_quarters(home=(30, 28, 32, 30), away=(None, 25, 30, 27))
+    r = await _run(db, router(box=[box_object(quarters=q)]), from_date="2024-04-09",
+                   to_date="2024-04-09", includes=("quarters",))
+    with db.connection() as conn:
+        p1 = conn.execute("SELECT COUNT(*) FROM nba_quarter_lines WHERE period=1").fetchone()[0]
+        note = conn.execute(
+            "SELECT COUNT(*) FROM data_quality_issues WHERE rule_code='DQ-NBA-QTR-001'"
+        ).fetchone()[0]
+    assert p1 == 0  # neither side row fabricated for the asymmetric period
+    assert note == 1 and r.records_rejected >= 1  # honest rejection, visible in counters
+    assert _count(db, "nba_quarter_lines") == 6  # periods 2,3,4 only (3 x 2 sides)
+
+
+def test_parse_box_quarters_flat_fields_unit() -> None:
+    # Pure parser: numeric OT ordering, gap preservation, asymmetric detection.
+    box = box_object(quarters=flat_quarters(
+        home=(30, 28, 32, 30), away=(28, 25, 30, 27),
+        ot={1: (12, 10), 3: (8, 6), 10: (5, 4)},  # ot2 absent (a gap); ot10 present
+    ))
+    parse = _parse_box_quarters(box)
+    periods = [q.period for q in parse.rows]
+    # Regulation 1-4 then OT numerically: ot1->5, ot3->7, ot10->14 (ot2->6 NOT fabricated).
+    assert sorted(set(periods)) == [1, 2, 3, 4, 5, 7, 14]
+    assert 6 not in periods  # missing intermediate overtime never fabricated
+    # ot10 (period 14) sorts AFTER ot3 (period 7) -- numeric, not lexicographic.
+    ot_periods = [p for p in periods if p >= 5]
+    assert ot_periods == sorted(ot_periods)
+    assert parse.asymmetric_periods == []
+
+    # Asymmetric single-side period is surfaced, not turned into rows.
+    asym = _parse_box_quarters(box_object(quarters=flat_quarters(
+        home=(30, 28, 32, 30), away=(None, 25, 30, 27))))
+    assert asym.asymmetric_periods == [1]
+    assert all(q.period != 1 for q in asym.rows)
+
+
+def test_quarter_out_of_order_does_not_regress(db: Database) -> None:
+    with db.connection() as conn, transaction(conn):
+        gref = _seed_ref(conn)
+        repo = SqliteQuarterLineRepository(conn)
+        base: dict[str, Any] = dict(
+            game_ref_id=gref, provider="balldontlie", provider_game_id="1", period=1,
+            side="home", ingested_at=_t(1), run_id="run_t", raw_response_id="raw_t",
+            raw_response_hash="c")
+        repo.append(points=30, observed_at=_t(5), **base)             # later
+        _id, out = repo.append(points=28, observed_at=_t(2), **base)  # earlier, different
+        assert out is ObservationOutcome.INSERTED  # kept as history
+        assert repo.count() == 2
+        newest = conn.execute(
+            "SELECT points FROM nba_quarter_lines ORDER BY observed_at DESC LIMIT 1"
+        ).fetchone()[0]
+        assert newest == 30  # current state not regressed by the earlier backfill
+
+
+async def test_dry_run_quarter_counter_matches_plan(tmp_path: Path) -> None:
+    # 4 regulation + 1 OT = 5 periods x 2 sides = 10 would-be quarter rows.
+    q = flat_quarters(ot={1: (12, 10)})
+    missing = tmp_path / "never_q.db"
+    r = await _run(Database(missing), router(box=[box_object(quarters=q)]),
+                   from_date="2024-04-09", to_date="2024-04-09",
+                   includes=("quarters",), dry_run=True)
+    assert r.quarter_observations == 10  # matches the actual normalized plan
+    assert r.rows_persisted == 0 and not missing.exists()
 
 
 # --------------------------------------------------------------------------- #

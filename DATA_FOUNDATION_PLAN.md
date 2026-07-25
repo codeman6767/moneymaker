@@ -74,7 +74,13 @@ audit + bounded dry-run smoke tests passed on July 24, 2026 (audit
 `run_01KYB91H2DHG0SKJDMAV2SN88M`: exit 0, authenticated, 9 GET-only probes, 11
 observed capabilities; one completed-game `ingest-nba --dry-run` and one current
 `ingest-injuries --dry-run`, both persisting nothing and never creating their
-isolated database). No persisted NBA ingestion or historical NBA backfill has been
+isolated database). A supplemental modern-game dry run (2026-06-13) live-row-verified
+advanced statistics and plays and confirmed an honest empty lineup response, but
+exposed a quarter-line contract defect (BALLDONTLIE `/v1/box_scores` supplies flat
+`home_qN`/`visitor_qN`/`*_otN` fields, not a nested `periods` array); the parser has
+been repaired to the flat-key contract in mocked/offline form, and the bounded live
+dry run must be re-run to live-verify quarter parsing (quarter parsing is NOT yet
+live-verified). No persisted NBA ingestion or historical NBA backfill has been
 performed. D4–D5 have not started. The live MLB provider audit and bounded dry-run
 smoke test succeeded, but no persisted MLB ingestion or historical backfill has
 been performed.** D2 ingests the MLB StatsAPI schedule, box scores, line

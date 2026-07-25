@@ -11,8 +11,15 @@ canonical matching.
 > tests passed on July 24, 2026 (audit `run_01KYB91H2DHG0SKJDMAV2SN88M`: exit 0,
 > authenticated, 9 GET-only probes, 11 observed capabilities; one completed-game
 > `ingest-nba --dry-run` and one current `ingest-injuries --dry-run`, both
-> persisting nothing and never creating their isolated database). No persisted NBA
-> ingestion or historical NBA backfill has been performed. D4–D5 not started.** D1
+> persisting nothing and never creating their isolated database). A supplemental
+> modern-game dry run (2026-06-13) additionally live-row-verified advanced
+> statistics and plays and confirmed an honest empty lineup response, but exposed a
+> quarter-line contract defect: BALLDONTLIE `/v1/box_scores` supplies per-period
+> scores as flat `home_qN`/`visitor_qN` + `home_otN`/`visitor_otN` fields, not a
+> nested `periods` array — the parser has been repaired to the flat-key contract
+> (mocked/offline), and the bounded live dry run must be re-run to live-verify
+> quarter parsing. No persisted NBA ingestion or historical NBA backfill has been
+> performed. D4–D5 not started.** D1
 > (schema v10) built the
 > typed provider-capability system, the four provider clients over a shared
 > GET-only base, the tightened `http_policy` allow-lists, and the evidence-backed
@@ -688,11 +695,30 @@ Model column = recommended driver.
 > in provider history (consistent with `historical_depth = provider_history_limited`),
 > which supplies no supported advanced/period/play/lineup structure — an honest
 > zero, not a normalization failure (0 rejections, 0 data-quality notes, 0 active
-> failures). A separate current-injury dry run normalized 151 live injuries (each
-> keeping its provider player identity, 0 rejections). Both dry runs persisted
-> nothing (`run_id` null, 0 rows), did not create their isolated database, and left
-> every corpus NBA table at 0. **No persisted NBA ingestion or historical NBA
-> backfill has been performed.**
+> failures for that historical game). A separate current-injury dry run normalized
+> 151 live injuries (each keeping its provider player identity, 0 rejections). Both
+> dry runs persisted nothing (`run_id` null, 0 rows), did not create their isolated
+> database, and left every corpus NBA table at 0.
+>
+> **Supplemental modern-game dry run (2026-06-13) + quarter-line repair.** A bounded
+> one-day dry run on a completed 2026 NBA Finals game live-row-verified the
+> previously-unproven paths: advanced statistics (30 observations, `stat_group =
+> advanced`) and plays (536 observations) both normalized from live data, and
+> lineups returned an honest empty `data: []` response (best-effort, not available).
+> It also exposed a **quarter-line contract defect**: BALLDONTLIE `/v1/box_scores`
+> supplies per-period scores as **flat** integer fields — `home_q1..home_q4` /
+> `visitor_q1..visitor_q4` for regulation and `home_otN` / `visitor_otN` for
+> overtime — **not** the nested `periods` array the parser originally assumed, so
+> `quarter_observations` was 0 despite genuine non-null period data. `_parse_box_quarters`
+> has been **repaired** to the flat-key contract (`qN → period N`, `otN → period
+> 4+N`, `visitor → away`; explicit 0 preserved, null never coerced to 0, only
+> periods supplied on both sides normalized, one-sided periods rejected with a
+> `DQ-NBA-QTR-001` note, overtime discovered dynamically and ordered numerically
+> with no fabricated gaps), with the dry-run counter sharing the same parser. This
+> repair is verified against mocked/offline contract-shaped fixtures only. **The
+> bounded live dry run must be re-run in a separate task to live-verify quarter
+> parsing; quarter parsing is NOT yet live-verified.** No persisted NBA ingestion or
+> historical NBA backfill has been performed.
 
 - **Provider:** **BALLDONTLIE GOAT** (`NBA_DATA_API_KEY`). **Required tier: GOAT.**
   **Offline supplement:** **hoopR** via a typed Parquet import boundary (historical
