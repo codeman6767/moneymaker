@@ -99,8 +99,21 @@ data-quality notes; that game was a regulation game (no overtime), so null OT fi
 correctly produced no rows (overtime→period-5 mapping and explicit-zero preservation
 remain covered by the offline unit tests). No persisted NBA ingestion or historical
 NBA backfill has been performed. D4 weather ingestion code + its offline correctness
-review are complete at schema v14 (mocked NWS/Open-Meteo; no live weather audit or
-persisted weather ingestion); D5 has not started. The live MLB provider audit and
+review are complete at schema v14 (mocked NWS/Open-Meteo). The controlled live D4
+current-forecast gate then completed successfully: the NWS and Open-Meteo
+current-forecast provider audits each succeeded using keyless, GET-only requests
+(one GET apiece; auth not applicable; zero active failures; live_availability
+observed, historical depth left declared-only). A single bounded
+`ingest-weather --forecast --dry-run` used two isolated synthetic official-MLB
+fixtures at real outdoor venues — one US fixture (Wrigley Field) routed through NWS
+(2 GETs: point + hourly forecast) and one non-US fixture (London Stadium) routed
+through Open-Meteo (1 bounded current-forecast GET) — normalizing 10 forecast
+observations with zero rejections, zero data-quality notes, zero fallbacks and zero
+rows persisted; the scratch database was byte-for-byte unchanged by the dry run and
+was removed after verification. NWS station observations, Open-Meteo historical
+forecasts and Open-Meteo reanalysis remain mocked/offline verified rather than
+live-ingestor verified. No persisted weather ingestion or weather backfill has been
+performed; D5 has not started. The live MLB provider audit and
 bounded dry-run smoke test succeeded, but no persisted MLB ingestion or historical
 backfill has been performed.** D2 ingests the MLB StatsAPI schedule, box scores, line
 scores, probable pitchers, posted lineups, and **date-aware rosters** into

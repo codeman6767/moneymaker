@@ -35,8 +35,20 @@ canonical matching.
 > offline unit tests). No persisted NBA ingestion or historical NBA backfill has
 > been performed. D4 weather ingestion code is implemented at schema v14 against
 > mocked NWS/Open-Meteo contracts, including a focused correctness + point-in-time
-> repair (offline/mock-only; no live weather audit or persisted weather ingestion).
-> D5 not started.** D1
+> repair. The controlled live D4 current-forecast gate then completed successfully:
+> the NWS and Open-Meteo current-forecast provider audits each succeeded with
+> keyless, GET-only requests (one GET apiece, authentication not applicable, zero
+> active failures, `live_availability` observed and historical depth left
+> declared-only). A single bounded `ingest-weather --forecast --dry-run` used two
+> isolated synthetic official-MLB fixtures at real outdoor venues: a US fixture
+> (Wrigley Field) routed through NWS (2 GETs, point + hourly forecast) and a non-US
+> fixture (London Stadium) routed through Open-Meteo (1 bounded current-forecast
+> GET), normalizing 10 forecast observations with zero rejections, zero DQ notes,
+> zero fallbacks and zero rows persisted; the scratch database was byte-for-byte
+> unchanged and was removed after verification. NWS station observations, Open-Meteo
+> historical forecasts and Open-Meteo reanalysis remain mocked/offline verified, not
+> live-ingestor verified. No persisted weather ingestion or weather backfill has been
+> performed. D5 not started.** D1
 > (schema v10) built the
 > typed provider-capability system, the four provider clients over a shared
 > GET-only base, the tightened `http_policy` allow-lists, and the evidence-backed
