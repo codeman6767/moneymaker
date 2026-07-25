@@ -186,6 +186,67 @@ class SqliteGameRepository(Repository):
     def count(self) -> int:
         return self._count("SELECT COUNT(*) FROM games")
 
+    # -- D5 canonicalization finders (read-only) -----------------------------
+    def find_by_official_key(
+        self, *, official_provider: str, official_game_key: str
+    ) -> Optional[Game]:
+        """The canonical game anchored on an exact ``(provider, key)`` pair.
+
+        The official key survives reschedules and doubleheader ambiguity, so it
+        is the strongest identity evidence (tier 1).
+        """
+
+        row = self._fetch_one(
+            f"SELECT {self._COLUMNS} FROM games "
+            "WHERE official_provider = ? AND official_game_key = ?",
+            (official_provider, official_game_key),
+        )
+        return None if row is None else self._to_model(row)
+
+    def find_natural(
+        self,
+        *,
+        league_id: str,
+        game_date_local: str,
+        home_team_id: str,
+        away_team_id: str,
+        game_number: int = 1,
+    ) -> Optional[Game]:
+        """The canonical game on the natural schedule key (unique index a002)."""
+
+        row = self._fetch_one(
+            f"SELECT {self._COLUMNS} FROM games WHERE league_id = ? AND game_date_local = ? "
+            "AND home_team_id = ? AND away_team_id = ? AND game_number = ?",
+            (league_id, game_date_local, home_team_id, away_team_id, game_number),
+        )
+        return None if row is None else self._to_model(row)
+
+    def find_in_window(
+        self,
+        *,
+        league_id: str,
+        home_team_id: str,
+        away_team_id: str,
+        start_low: str,
+        start_high: str,
+    ) -> list[Game]:
+        """Games with the same orientation whose start lies within a UTC window.
+
+        Deterministically ordered by ``(scheduled_start, game_number, game_id)``
+        so a caller sees the same first candidate on every rebuild.
+        """
+
+        return [
+            self._to_model(r)
+            for r in self._fetch_all(
+                f"SELECT {self._COLUMNS} FROM games WHERE league_id = ? "
+                "AND home_team_id = ? AND away_team_id = ? "
+                "AND scheduled_start >= ? AND scheduled_start <= ? "
+                "ORDER BY scheduled_start, game_number, game_id",
+                (league_id, home_team_id, away_team_id, start_low, start_high),
+            )
+        ]
+
     # -- Status transitions --------------------------------------------------
     def record_status(
         self,

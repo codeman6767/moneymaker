@@ -12,6 +12,7 @@ One generic implementation backs three tables, keyed by ``kind``; SQL stays here
 
 from __future__ import annotations
 
+import enum
 import sqlite3
 from typing import Optional, Protocol
 
@@ -24,6 +25,14 @@ from ..models import ProviderReference
 from ..schema import utc_now_iso
 from .base import Repository, RepositoryError
 from .kalshi import UpsertOutcome
+
+
+class LinkOutcome(str, enum.Enum):
+    """Result of applying a canonical link to a provider reference (D5)."""
+
+    LINKED = "linked"  # was NULL, now points at the canonical entity
+    ALREADY_LINKED = "already_linked"  # already pointed at this same entity (idempotent)
+    CONFLICT = "conflict"  # already linked to a DIFFERENT entity -- not regressed
 
 # kind -> (table, provider-id column, canonical-fk column, id factory)
 _TABLES: dict[str, tuple[str, str, str, object]] = {
@@ -123,6 +132,42 @@ class SqliteProviderReferenceRepository(Repository):
             return refreshed, UpsertOutcome.UPDATED
 
         return existing, UpsertOutcome.UNCHANGED
+
+    def link_canonical(
+        self,
+        *,
+        kind: str,
+        provider: str,
+        provider_entity_id: str,
+        canonical_id: str,
+        match_decision_id: str,
+    ) -> tuple[Optional[ProviderReference], LinkOutcome]:
+        """Apply an accepted match's canonical link to a provider reference.
+
+        Only ever sets the link NULL -> value (D5's job), never re-points a link
+        that already resolved to a *different* entity -- that is a
+        ``CONFLICT``, left untouched so a later, weaker attempt cannot regress an
+        established link (the d009 identity trigger enforces the same rule at the
+        database). Re-applying the same link is idempotent (``ALREADY_LINKED``)
+        and leaves the row byte-stable across reruns.
+        """
+
+        table, _pid, canon_col, _factory = self._table(kind)
+        existing = self.get(kind, provider, provider_entity_id)
+        if existing is None:
+            raise RepositoryError(
+                f"no {kind} reference for {provider}:{provider_entity_id} to link"
+            )
+        if existing.canonical_id is None:
+            self._conn.execute(
+                f"UPDATE {table} SET {canon_col} = ?, match_decision_id = ?, updated_at = ? "
+                "WHERE reference_id = ?",
+                (canonical_id, match_decision_id, utc_now_iso(), existing.reference_id),
+            )
+            return self._fetch(kind, existing.reference_id), LinkOutcome.LINKED
+        if existing.canonical_id == canonical_id:
+            return existing, LinkOutcome.ALREADY_LINKED
+        return existing, LinkOutcome.CONFLICT
 
     def get(
         self, kind: str, provider: str, provider_entity_id: str

@@ -50,7 +50,8 @@ canonical matching.
 > unchanged and was removed after verification. NWS station observations, Open-Meteo
 > historical forecasts and Open-Meteo reanalysis remain mocked/offline verified, not
 > live-ingestor verified. No persisted weather ingestion or weather backfill has been
-> performed. D5 not started.** D1
+> performed. D5A deterministic canonical + official-game matching is complete
+> (mocked/offline); D5B market matching not started.** D1
 > (schema v10) built the
 > typed provider-capability system, the four provider clients over a shared
 > GET-only base, the tightened `http_policy` allow-lists, and the evidence-backed
@@ -123,7 +124,7 @@ canonical matching.
 > persisted NBA ingestion or historical backfill has been performed. D4 weather
 > ingestion code is complete at schema v14 and its controlled live NWS/Open-Meteo
 > current-forecast gate has passed (station observations, historical forecasts, and
-> reanalysis remain mocked/offline verified); D5 has not started.**
+> reanalysis remain mocked/offline verified); D5A deterministic canonical + official-game matching is complete (mocked/offline); D5B market matching has not started.**
 
 Companion documents: `PHASE_D_PROVIDER_DECISIONS.md`, `DATA_ARCHITECTURE.md`,
 `POINT_IN_TIME_DATA.md`, `ENTITY_MATCHING.md`, `DATA_FOUNDATION_PLAN.md`.
@@ -827,7 +828,7 @@ Model column = recommended driver.
 > scratch database byte-for-byte unchanged and removed) have passed. NWS station
 > observations, Open-Meteo historical forecasts, and reanalysis remain
 > mocked/offline verified. No persisted weather ingestion or weather backfill has
-> been performed. D5 has not started.**
+> been performed. D5A deterministic canonical + official-game matching is complete (mocked/offline); D5B market matching has not started.**
 
 - **Provider:** **NWS** primary (US, no key); **Open-Meteo** secondary + the
   historical-forecast/archive (no key). **No paid weather key at D1/D4.** Open-Meteo
@@ -874,6 +875,21 @@ Model column = recommended driver.
   Open-Meteo historical-forecast API shape.
 
 ### D5 — Canonical matching  ·  model: **OpusPlan**
+
+> **Status: D5A complete (mocked/offline); D5B not started.** D5A shipped as the
+> `sports_quant/matching/` package: deterministic team / player / venue resolvers
+> (exact-provider-id 1.00 / exact-alias 0.99 / normalized-scoped 0.95 / unscoped
+> 0.90), a venue-aware `game_date_local` helper (actual-venue tz → provider local
+> date → home-venue tz → UTC + `DQ-TZ-001`, capped confidence), and an
+> official-game canonicalizer linking/creating the existing canonical `games` row
+> (official-key 1.00 / schedule-key 0.95 ≤90 min / 0.88 ≤12 h / neutral-swapped
+> 0.85, `needs_manual_review` + `DQ-MATCH-007`). Every attempt records one
+> `entity_match_decisions` row + normalized `match_candidates` (losers kept);
+> provider references link only after acceptance and never regress. Threshold
+> 0.85; matcher version `d5a-1`. `match-games` + `matching-review` CLI are local
+> and network-free. Seasons (empty at ship) are ensured deterministically per
+> (league, year, phase) since `games.season_id` is `NOT NULL`. **D5B (sportsbook
+> `match-markets` + Kalshi market matching) is NOT built; Phase E has not started.**
 
 - **Provider:** none (pure compute over ingested data).
 - **Create:** `matching/{__init__,normalize,teams,players,games,markets,decisions,

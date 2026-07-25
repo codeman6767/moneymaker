@@ -11,32 +11,25 @@ surfaced rather than silently mis-assigned (requirement 7).
 from __future__ import annotations
 
 import enum
-import re
-import unicodedata
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from .base import PlayerRef
+from sports_quant.db.normalize import normalize_name as _canonical_normalize
 
-_SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
-_PUNCT = re.compile(r"[^a-z0-9\s]")
-_WS = re.compile(r"\s+")
+from .base import PlayerRef
 
 
 def normalize_name(name: str) -> str:
     """Deterministically normalize a display name to a match key.
 
-    Steps: strip accents -> lowercase -> drop punctuation -> collapse
-    whitespace -> remove common generational suffixes.
+    Delegates to the single canonical normalizer
+    (``sports_quant.db.normalize.normalize_name``) so this module and the Phase D
+    matcher can never diverge (ENTITY_MATCHING.md §2; D5A task §4). The
+    generational suffix is dropped from the key exactly as before; callers that
+    need the suffix use the canonical normalizer directly.
     """
 
-    decomposed = unicodedata.normalize("NFKD", name)
-    ascii_only = "".join(c for c in decomposed if not unicodedata.combining(c))
-    lowered = ascii_only.lower()
-    depunct = _PUNCT.sub(" ", lowered)
-    collapsed = _WS.sub(" ", depunct).strip()
-    tokens = [t for t in collapsed.split(" ") if t and t not in _SUFFIXES]
-    return " ".join(tokens)
+    return _canonical_normalize(name).normalized
 
 
 class MatchStatus(str, enum.Enum):

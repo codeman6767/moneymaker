@@ -222,14 +222,16 @@ retroactively reinterpret old decisions.
 
 ## 4. Game matching
 
-> **Phase D status.** Official-game matching is **planned, not built** — its
-> implementation contract is `PHASE_D_IMPLEMENTATION_PLAN.md` §4. Phase D adds the
-> official-provider anchor (MLB StatsAPI `gamePk`, balldontlie game id) via the
-> existing `games.official_provider`/`official_game_key` columns and a new
-> `provider_game_references` crosswalk (no second canonical-game table), then
-> matches sportsbook events (Phase B, already ingested with `game_id` NULL) and
-> Kalshi events/markets (Phase C, already ingested with `game_id` NULL) to the
-> canonical `games` row by the schedule key below. `game_date_local` is resolved
+> **Phase D status (D5A — built, mocked/offline).** Official-game matching is
+> **implemented** in `sports_quant/matching/` (D5A); its build note is
+> `PHASE_D_IMPLEMENTATION_PLAN.md` §D5. D5A anchors on the official provider (MLB
+> StatsAPI `gamePk`, balldontlie game id) via the existing
+> `games.official_provider`/`official_game_key` columns and the
+> `provider_game_references` crosswalk (no second canonical-game table), resolving
+> each official provider game to the canonical `games` row by the official key and
+> the schedule key below. **Matching sportsbook events and Kalshi events/markets
+> (both ingested with `game_id` NULL) to the canonical game is D5B and is NOT yet
+> built.** `game_date_local` is resolved
 > by a **venue-aware timezone hierarchy** (`PHASE_D_IMPLEMENTATION_PLAN.md` §5.1):
 > (1) the **actual event venue** timezone (neutral/temporary/relocated sites
 > included), (2) an official provider-supplied local date/timezone when reliable,

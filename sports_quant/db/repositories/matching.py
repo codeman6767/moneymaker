@@ -177,6 +177,36 @@ class SqliteMatchingRepository(Repository):
             )
         return [self._to_decision(r) for r in rows]
 
+    def decisions_for_source(
+        self,
+        *,
+        source_provider: str,
+        source_ref: str,
+        entity_type: Optional[str] = None,
+        as_of: Optional[str] = None,
+    ) -> list[MatchDecision]:
+        """Decisions for one source reference, optionally as of a cutoff.
+
+        ``as_of`` filters on ``decided_at <= cutoff`` (DQ-PIT-010): a decision
+        made after the cutoff is invisible to a point-in-time read, so a match
+        made with information from the future cannot leak into an earlier
+        dataset. Ordered by ``(decided_at, match_id)`` for a stable rebuild.
+        """
+
+        sql = (
+            f"SELECT {self._DECISION_COLUMNS} FROM entity_match_decisions "
+            "WHERE source_provider = ? AND source_ref = ?"
+        )
+        params: list[object] = [source_provider, source_ref]
+        if entity_type is not None:
+            sql += " AND entity_type = ?"
+            params.append(entity_type)
+        if as_of is not None:
+            sql += " AND decided_at <= ?"
+            params.append(as_of)
+        sql += " ORDER BY decided_at, match_id"
+        return [self._to_decision(r) for r in self._fetch_all(sql, tuple(params))]
+
     def count(self) -> int:
         return self._count("SELECT COUNT(*) FROM entity_match_decisions")
 
