@@ -115,7 +115,8 @@ class PlayerResolver:
         if not query.normalized:
             return self._unmatched("empty player name after normalization")
 
-        rows = self._name_rows(league_id, query.normalized)
+        rows = self._name_rows(league_id, query.normalized, provider)
+        scope = "neutral" if all(r.provider == "" for r in rows) else provider
         # Suffix in the input is binding; absent suffix is permissive.
         if query.suffix != NO_SUFFIX:
             rows = [r for r in rows if r.suffix == query.suffix]
@@ -133,17 +134,21 @@ class PlayerResolver:
         if not candidate_ids:
             return self._unmatched(f"no player matches {query.normalized!r}")
 
-        # Tier 2 -- disambiguate by canonical team membership when >1 remain.
+        # Tier 2 -- disambiguate by season-valid canonical team membership.
         tier = TIER_LEAGUE_NAME
         score = SCORE_LEAGUE_NAME
         if len(candidate_ids) > 1 and team_id is not None:
-            on_team = self._on_team(candidate_ids, team_id)
+            on_team = self._on_team(candidate_ids, team_id, season_year)
             if len(on_team) == 1:
                 candidate_ids = on_team
                 tier, score = TIER_TEAM_NAME, SCORE_TEAM_NAME
             elif len(on_team) > 1:
                 candidate_ids = on_team
-        elif len(candidate_ids) == 1 and team_id is not None and self._on_team(candidate_ids, team_id):
+        elif (
+            len(candidate_ids) == 1
+            and team_id is not None
+            and self._on_team(candidate_ids, team_id, season_year)
+        ):
             tier, score = TIER_TEAM_NAME, SCORE_TEAM_NAME
 
         # Birth date is only ever a collision breaker, never invented.
@@ -160,7 +165,12 @@ class PlayerResolver:
                 score=score,
                 tier=tier,
                 entity_id=cid,
-                candidates=(Candidate(entity_id=cid, score=score, tier=tier, method=tier),),
+                candidates=(
+                    Candidate(
+                        entity_id=cid, score=score, tier=tier, method=tier,
+                        evidence=f"provider scope={scope}",
+                    ),
+                ),
                 season_scoped=season_year is not None,
             )
 
@@ -214,11 +224,22 @@ class PlayerResolver:
         league = None if row["league_id"] is None else str(row["league_id"])
         return str(row["player_id"]), league
 
-    def _name_rows(self, league_id: str, normalized: str) -> list[_PlayerRow]:
+    def _name_rows(self, league_id: str, normalized: str, provider: str) -> list[_PlayerRow]:
+        """Alias rows for the name, scoped to the resolving provider.
+
+        Only the resolving provider's own aliases and intentionally
+        provider-neutral (``provider = ''``) aliases are candidates; a different
+        provider's alias is never used, so two providers that happen to share a
+        normalized alias text or provider-id value cannot cross-match (provider
+        scope is enforced here, before any team / season / suffix / birth-date
+        disambiguation). League scope is enforced by the ``league_id`` filter.
+        """
+
         rows = self._conn.execute(
             "SELECT player_id, normalized, suffix, provider, is_ambiguous "
-            "FROM player_aliases WHERE league_id = ? AND normalized = ?",
-            (league_id, normalized),
+            "FROM player_aliases WHERE league_id = ? AND normalized = ? "
+            "AND provider IN (?, '') ORDER BY player_id, provider",
+            (league_id, normalized, provider),
         ).fetchall()
         return [
             _PlayerRow(
@@ -256,16 +277,31 @@ class PlayerResolver:
                 kept.append(str(r["player_id"]))
         return sorted(kept)
 
-    def _on_team(self, ids: list[str], team_id: str) -> list[str]:
+    def _on_team(
+        self, ids: list[str], team_id: str, season_year: Optional[int] = None
+    ) -> list[str]:
+        """Which candidate players were on ``team_id`` -- season-restricted.
+
+        When ``season_year`` is supplied, only roster observations dated within
+        that season count, so a later-season (e.g. post-trade) roster cannot
+        resolve an earlier-season reference. An undated roster is not accepted as
+        season-valid evidence. Absence from a roster is never evidence against a
+        player. Deterministically ordered.
+        """
+
         if not ids:
             return []
         placeholders = ",".join("?" for _ in ids)
-        rows = self._conn.execute(
+        sql = (
             "SELECT DISTINCT rs.player_id FROM roster_snapshots rs "
             "JOIN provider_team_references ptr ON rs.team_ref_id = ptr.reference_id "
-            f"WHERE ptr.team_id = ? AND rs.player_id IN ({placeholders})",  # noqa: S608
-            (team_id, *ids),
-        ).fetchall()
+            f"WHERE ptr.team_id = ? AND rs.player_id IN ({placeholders})"  # noqa: S608
+        )
+        params: list[object] = [team_id, *ids]
+        if season_year is not None:
+            sql += " AND rs.roster_date LIKE ?"
+            params.append(f"{season_year}-%")
+        rows = self._conn.execute(sql, tuple(params)).fetchall()
         return sorted(str(r["player_id"]) for r in rows)
 
     def _birth_filter(self, ids: list[str], birth_date: str) -> list[str]:

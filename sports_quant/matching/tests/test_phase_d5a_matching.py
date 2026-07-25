@@ -559,8 +559,11 @@ def test_doubleheader_indistinguishable_ambiguous(conn: sqlite3.Connection) -> N
                       away_provider_team_id="102", scheduled_start=start, season=2026,
                       game_date_local="2026-07-25", venue_provider_id="V1")  # 30 min apart, no number
     r = _match(conn, from_date="2026-07-25", to_date="2026-07-25")
-    assert r.counters.canonical_games_created == 1  # first creates
-    assert r.counters.ambiguous >= 1  # the second is indistinguishable
+    # Starts 30 min apart with no game number: mutually indistinguishable, so
+    # NEITHER is confidently numbered -- both ambiguous, none arbitrarily created.
+    assert r.counters.canonical_games_created == 0
+    assert r.counters.ambiguous == 2
+    assert SqliteGameRepository(conn).count() == 0
 
 
 def test_missing_team_stops_matching(conn: sqlite3.Connection) -> None:

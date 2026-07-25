@@ -213,6 +213,7 @@ def seed_roster(
     provider_player_id: str,
     player_id: str,
     observed_at: str = T0,
+    roster_date: Optional[str] = None,
 ) -> None:
     """Link a canonical player to a canonical team via a roster observation.
 
@@ -239,12 +240,13 @@ def seed_roster(
         conn.execute(
             "INSERT INTO roster_snapshots "
             "(roster_id, team_ref_id, provider, provider_team_id, provider_player_id, "
-            " player_id, observed_at, ingested_at, raw_response_id, raw_response_hash, "
-            " content_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " player_id, roster_date, observed_at, ingested_at, raw_response_id, "
+            " raw_response_hash, content_hash, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 new_roster_snapshot_id(), ref.reference_id, provider, provider_team_id,
-                provider_player_id, player_id, observed_at, observed_at, rid, rhash,
-                f"roster-{provider_player_id}", observed_at,
+                provider_player_id, player_id, roster_date, observed_at, observed_at, rid, rhash,
+                f"roster-{provider_team_id}-{provider_player_id}", observed_at,
             ),
         )
 

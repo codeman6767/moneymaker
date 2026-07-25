@@ -92,19 +92,28 @@ class MatchPlayersService:
         self, provider: str, provider_player_id: str, league_id: str,
         season_year: Optional[int], result: MatchPlayersResult,
     ) -> None:
-        team_id = self._roster_team(provider, provider_player_id)
+        team_id = self._roster_team(provider, provider_player_id, season_year)
         res = self._resolver.resolve(
             provider=provider, provider_player_id=provider_player_id, league_id=league_id,
             team_id=team_id, season_year=season_year,
         )
-        self._record(provider, provider_player_id, res, result)
+        raw_id = self._reference_raw_id(provider, provider_player_id)
+        decision_id = self._record(provider, provider_player_id, res, raw_id, result)
         if res.scope_conflict:
             self._dq_issue(
                 result, rule_code="DQ-MATCH-015", entity_id=provider_player_id, provider=provider,
                 description="exact provider player link resolves into the wrong league",
             )
         elif res.is_matched:
-            self._link(provider, provider_player_id, res, result)
+            self._link(provider, provider_player_id, res, decision_id, result)
+
+    def _reference_raw_id(self, provider: str, provider_player_id: str) -> Optional[str]:
+        row = self._conn.execute(
+            "SELECT current_raw_response_id FROM provider_player_references "
+            "WHERE provider = ? AND provider_player_id = ?",
+            (provider, provider_player_id),
+        ).fetchone()
+        return None if row is None else str(row["current_raw_response_id"])
 
     def _unresolved(self, provider: str, provider_player_id: Optional[str]) -> list[str]:
         sql = (
@@ -117,26 +126,36 @@ class MatchPlayersService:
             params.append(provider_player_id)
         return [str(r["provider_player_id"]) for r in self._conn.execute(sql, tuple(params))]
 
-    def _roster_team(self, provider: str, provider_player_id: str) -> Optional[str]:
-        """The canonical team the player most recently appeared under, if linked.
+    def _roster_team(
+        self, provider: str, provider_player_id: str, season_year: Optional[int]
+    ) -> Optional[str]:
+        """The canonical team the provider player is on, as season-valid evidence.
 
-        Absence from any roster returns ``None`` -- never used as evidence
-        against a player's identity, only as a positive disambiguator.
+        When ``--season`` is supplied, only roster observations dated within that
+        season are considered, so a traded player's newest team cannot resolve an
+        earlier-season reference. If the season's rosters name **more than one**
+        distinct team (a genuine mid-season conflict), ``None`` is returned so the
+        team tier is omitted rather than chosen by row order. Absence from any
+        roster returns ``None`` (never evidence against the player).
         """
 
-        row = self._conn.execute(
-            "SELECT ptr.team_id AS team_id FROM roster_snapshots rs "
+        sql = (
+            "SELECT DISTINCT ptr.team_id AS team_id FROM roster_snapshots rs "
             "JOIN provider_team_references ptr ON rs.team_ref_id = ptr.reference_id "
-            "WHERE rs.provider = ? AND rs.provider_player_id = ? AND ptr.team_id IS NOT NULL "
-            "ORDER BY rs.observed_at DESC, rs.roster_id DESC LIMIT 1",
-            (provider, provider_player_id),
-        ).fetchone()
-        return None if row is None else str(row["team_id"])
+            "WHERE rs.provider = ? AND rs.provider_player_id = ? AND ptr.team_id IS NOT NULL"
+        )
+        params: list[object] = [provider, provider_player_id]
+        if season_year is not None:
+            sql += " AND rs.roster_date LIKE ?"
+            params.append(f"{season_year}-%")
+        teams = sorted({str(r["team_id"]) for r in self._conn.execute(sql, tuple(params))})
+        return teams[0] if len(teams) == 1 else None
 
     # -- decision + link ----------------------------------------------------- #
     def _record(
-        self, provider: str, provider_player_id: str, res: Resolution, result: MatchPlayersResult
-    ) -> None:
+        self, provider: str, provider_player_id: str, res: Resolution,
+        raw_response_id: Optional[str], result: MatchPlayersResult,
+    ) -> Optional[str]:
         outcome = "rejected" if res.scope_conflict else res.outcome()
         result.counters.decisions_evaluated += 1
         result.counters.candidates_recorded += len(res.candidates)
@@ -151,8 +170,8 @@ class MatchPlayersService:
         if res.needs_review:
             result.counters.manual_review_required += 1
         if self._dry_run:
-            return
-        self._match.record_decision(
+            return None
+        decision = self._match.record_decision(
             entity_type="player", source_provider=provider, source_ref=provider_player_id,
             outcome=outcome, method=res.method, score=res.score, threshold=THRESHOLD,
             matcher_version=self._version,
@@ -164,16 +183,18 @@ class MatchPlayersService:
             matched_entity_id=res.entity_id,
             rejection_reason=None if outcome == "accepted" else (res.reason or "unresolved"),
             needs_manual_review=res.needs_review, run_id=self._run_id,
+            raw_response_id=raw_response_id,
         )
+        return decision.match_id
 
     def _link(
-        self, provider: str, provider_player_id: str, res: Resolution, result: MatchPlayersResult
+        self, provider: str, provider_player_id: str, res: Resolution,
+        decision_id: Optional[str], result: MatchPlayersResult,
     ) -> None:
-        if self._dry_run or res.entity_id is None:
+        # Links to the exact decision from THIS attempt, not a "latest decision"
+        # lookup that a same-timestamp sibling could win.
+        if self._dry_run or res.entity_id is None or decision_id is None:
             return
-        decisions = self._match.decisions_for_source(
-            source_provider=provider, source_ref=provider_player_id, entity_type="player")
-        decision_id = decisions[-1].match_id if decisions else ""
         _ref, outcome = self._refs.link_canonical(
             kind="player", provider=provider, provider_entity_id=provider_player_id,
             canonical_id=res.entity_id, match_decision_id=decision_id,

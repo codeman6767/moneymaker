@@ -313,6 +313,18 @@ built to avoid.
 3. Otherwise — two same-day games with indistinguishable start times —
    `AMBIGUOUS`, both candidates recorded, manual review.
 
+> **D5A implementation: batch-order-independent.** The inferred number in rule 2
+> is the game's chronological rank computed from the **whole schedule corpus**
+> (the latest observation of every provider game sharing the same provider,
+> provider home/away team ids, and provider local date, ranked by
+> `(scheduled_start, provider_game_id)`) — never from whichever canonical sibling
+> happened to be created first, and never by sorting on the provider-game id. The
+> result is therefore identical regardless of database insertion order, processing
+> order, or which sibling is presented first (verified under 100 randomized
+> orders), and a bounded run that processes only the later game still numbers it
+> `2` because the earlier sibling is visible in the source schedule. Under rule 3,
+> **both** games are ambiguous — neither is arbitrarily created as game 1.
+
 Split doubleheaders (separate admissions, typically ~5 h apart) resolve cleanly
 under rule 2. Traditional doubleheaders (second game ~30 min after the first
 ends, start time often listed identically or as TBD) frequently hit rule 3, and

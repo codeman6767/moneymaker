@@ -904,8 +904,27 @@ Model column = recommended driver.
 > conflict, not a 1.00 match, and is never auto-repaired. **Schema limitation:**
 > provider player names are not stored structurally, so player resolution keys on
 > the provider id via provider-scoped `player_aliases` + roster-derived team;
-> league scope is provable from `players.league_id`. **D5B (sportsbook
-> `match-markets` + Kalshi market matching) is NOT built; Phase E has not started.**
+> league scope is provable from `players.league_id`.
+>
+> **D5A independent review hardening.** Player alias lookup is **provider-scoped**
+> (only the resolving provider's own aliases and provider-neutral `''` aliases are
+> candidates — a different provider's alias never cross-matches, before any team /
+> season / suffix / birth-date step). Roster-derived team evidence is
+> **season-valid**: with `--season YEAR` only rosters dated in that season count
+> (a traded player's newer team cannot resolve an earlier reference; conflicting
+> in-season teams omit the team tier rather than pick by row order; absence from a
+> roster is never negative evidence). Doubleheader numbering is **batch-order
+> independent** — the chronological rank is computed from the whole schedule corpus
+> (verified under 100 shuffles), not from creation order. The home-venue timezone
+> tier is **time-bounded**: only prior home games (`scheduled_start < target`)
+> contribute, so a future game or later relocation cannot shift an earlier game's
+> local date. Every decision now attaches the source schedule/reference
+> `raw_response_id` (and the match `run_id`); provider references link to the
+> **exact** decision from the same attempt (not a "latest decision" lookup). PIT
+> reads use `decisions_for_source(..., as_of=cutoff)` — a current
+> `provider_*_references.*_id` link is not by itself PIT-safe (Phase E must consult
+> the decision timeline). **D5B (sportsbook `match-markets` + Kalshi market
+> matching) is NOT built; Phase E has not started.**
 
 - **Provider:** none (pure compute over ingested data).
 - **Create:** `matching/{__init__,normalize,teams,players,games,markets,decisions,
