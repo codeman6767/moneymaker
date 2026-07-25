@@ -42,6 +42,7 @@ from sports_quant.ingest.weather_ingestor import (
     _pit_for,
     ingest_weather,
     normalize_direction_deg,
+    normalize_nws_observations,
     normalize_open_meteo,
     normalize_speed_ms,
     normalize_temperature_c,
@@ -152,22 +153,46 @@ def nws_observations(features: Optional[list[dict[str, Any]]] = None) -> dict[st
     return {"features": features}
 
 
-def om_hourly(*, times: Optional[list[str]] = None, temps: Optional[list[Any]] = None,
+#: Canonical Open-Meteo hourly_units (what the client requests / validates).
+OM_UNITS = {
+    "time": "unixtime", "temperature_2m": "°C", "apparent_temperature": "°C",
+    "dew_point_2m": "°C", "relative_humidity_2m": "%", "wind_speed_10m": "m/s",
+    "wind_gusts_10m": "m/s", "wind_direction_10m": "°", "precipitation": "mm",
+    "precipitation_probability": "%", "weather_code": "wmo code",
+}
+
+
+def _epoch(utc_str: str) -> int:
+    """A naive-UTC wall time string -> Unix seconds (mirrors Open-Meteo unixtime)."""
+    from datetime import datetime, timezone
+    return int(datetime.fromisoformat(utc_str).replace(tzinfo=timezone.utc).timestamp())
+
+
+def om_hourly(*, utc_times: Optional[list[str]] = None, temps: Optional[list[Any]] = None,
               extra: Optional[dict[str, list[Any]]] = None,
+              units: Optional[dict[str, str]] = None,
               with_probability: bool = True) -> dict[str, Any]:
-    if times is None:
-        times = ["2026-07-22T23:00", "2026-07-23T00:00"]
+    """A contract-shaped Open-Meteo response: hourly time as Unix seconds (the
+    client requests ``timeformat=unixtime`` + ``timezone=UTC``), plus ``hourly_units``."""
+
+    if utc_times is None:
+        utc_times = ["2026-07-22T23:00", "2026-07-23T00:00"]
     if temps is None:
         temps = [21.0, 20.5]
+    times = [_epoch(t) for t in utc_times]
     hourly: dict[str, Any] = {"time": times, "temperature_2m": temps,
                               "wind_speed_10m": [3.0] * len(times),
                               "wind_direction_10m": [270.0] * len(times),
                               "precipitation": [0.0] * len(times)}
+    u = dict(OM_UNITS)
     if with_probability:
         hourly["precipitation_probability"] = [10] * len(times)
     if extra:
         hourly.update(extra)
-    return {"hourly": hourly}
+    if units:
+        u.update(units)
+    return {"hourly": hourly, "hourly_units": u, "timezone": "GMT",
+            "utc_offset_seconds": 0}
 
 
 def _nws_client(handler: Callable[[httpx.Request], httpx.Response]) -> NwsClient:
@@ -279,7 +304,7 @@ async def test_us_outdoor_game_uses_nws(db: Database) -> None:
     seed_game(db, country="USA", roof="open")
     r = await _run(db, make_clients(), mode="forecast")
     assert r.status == "succeeded"
-    assert r.nws_requests == 1 and r.open_meteo_requests == 0
+    assert r.nws_requests == 2 and r.open_meteo_requests == 0  # point + hourly forecast GETs
     assert r.forecast_observations == 2
     with db.connection() as conn:
         providers = {x[0] for x in conn.execute("SELECT DISTINCT provider FROM weather_snapshots")}
@@ -668,7 +693,7 @@ async def test_same_venue_separate_dates_receive_separate_requests(db: Database)
                              from_date="2026-07-22", to_date="2026-07-23")
     await make_clients().aclose()
     assert r.request_groups_deduplicated == 0  # different dates -> separate groups
-    assert r.nws_requests == 2  # one NWS point/forecast per date
+    assert r.nws_requests == 4  # two dates x (point + hourly forecast) GETs
 
 
 async def test_doubleheader_windows_do_not_cross_attach(db: Database) -> None:
@@ -870,3 +895,331 @@ async def test_mlb_and_nba_tables_untouched_by_weather(db: Database) -> None:
     assert _count(db, "nba_game_results") == 0
     assert _count(db, "game_result_snapshots") == 0
     assert _count(db, "weather_snapshots") == 2
+
+
+# --------------------------------------------------------------------------- #
+# REPAIR: Open-Meteo epoch timestamps + timezone correctness
+# --------------------------------------------------------------------------- #
+async def test_open_meteo_epoch_converts_to_correct_utc(db: Database) -> None:
+    # Two epoch hours 23:00 and 00:00 UTC; the game window covers both.
+    seed_game(db, country="Canada", venue_name="Rogers Centre", lat=43.64, lon=-79.39,
+              tz="America/Toronto", start="2026-07-22T23:05:00Z")
+    await _run(db, make_clients(), mode="forecast")
+    with db.connection() as conn:
+        vts = sorted(r[0] for r in conn.execute("SELECT valid_time FROM weather_snapshots"))
+    assert vts == ["2026-07-22T23:00:00.000000Z", "2026-07-23T00:00:00.000000Z"]
+
+
+async def test_non_utc_venue_does_not_shift_into_wrong_window(db: Database) -> None:
+    # A Pacific venue whose UTC window is 05:05-10:05 (next day) for a 06:05Z start.
+    # Only the epoch hour inside the UTC window is attached; a local-as-UTC bug would
+    # have shifted a 23:00-local hour in.
+    body = om_hourly(utc_times=["2026-07-23T06:00", "2026-07-23T07:00", "2026-07-22T13:00"],
+                     temps=[18.0, 17.5, 30.0])
+    seed_game(db, country="Canada", venue_name="BC Place", lat=49.28, lon=-123.11,
+              tz="America/Vancouver", start="2026-07-23T06:05:00Z", date="2026-07-23")
+    await _run(db, make_clients(om_forecast=body), from_date="2026-07-23", to_date="2026-07-23",
+               mode="forecast")
+    with db.connection() as conn:
+        vts = sorted(r[0] for r in conn.execute("SELECT valid_time FROM weather_snapshots"))
+    # 13:00Z (would be an in-window hour only under a wrong-offset bug) is excluded.
+    assert vts == ["2026-07-23T06:00:00.000000Z", "2026-07-23T07:00:00.000000Z"]
+
+
+def test_open_meteo_malformed_timestamp_is_noted_not_crashed() -> None:
+    from datetime import datetime, timezone
+    body = {"hourly": {"time": [_epoch("2026-07-22T23:00"), "not-an-epoch"],
+                       "temperature_2m": [21.0, 22.0]},
+            "hourly_units": OM_UNITS}
+    rows, notes, rejected = normalize_open_meteo(
+        body, window_start=datetime(2026, 7, 22, 20, tzinfo=timezone.utc),
+        window_end=datetime(2026, 7, 23, 3, tzinfo=timezone.utc))
+    assert rejected is False and len(rows) == 1
+    assert any("malformed hourly time" in n for n in notes)
+
+
+# --------------------------------------------------------------------------- #
+# REPAIR: cross-midnight request date ranges
+# --------------------------------------------------------------------------- #
+async def test_late_night_window_requests_both_dates(db: Database) -> None:
+    seen: dict[str, list[tuple[str, str]]] = {"dates": []}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        p = req.url.path
+        if p == "/v1/forecast":
+            seen["dates"].append((req.url.params.get("start_date"),
+                                  req.url.params.get("end_date")))
+        return httpx.Response(200, json=om_hourly(), headers={"content-type": "application/json"})
+    http = build_readonly_client(base_url="https://api.open-meteo.com",
+                                 policy=ReadOnlyHTTPPolicy.for_open_meteo_all(),
+                                 inner_transport=httpx.MockTransport(handler))
+    om = OpenMeteoClient(base_url="https://api.open-meteo.com", client=http)
+    clients = WeatherClients(nws=_nws_client(default_nws_handler()), om_forecast=om,
+                             om_historical=_om_client("https://historical-forecast-api.open-meteo.com", om_hourly()),
+                             om_archive=_om_client("https://archive-api.open-meteo.com", om_hourly()))
+    # 23:45Z start -> window 22:45Z .. 03:45Z next day: crosses midnight -> two dates.
+    seed_game(db, country="Canada", venue_name="Rogers Centre", lat=43.64, lon=-79.39,
+              tz="America/Toronto", start="2026-07-22T23:45:00Z")
+    await ingest_weather(database=db, clients=clients, mode="forecast",
+                         from_date="2026-07-22", to_date="2026-07-22")
+    await clients.aclose()
+    assert seen["dates"] == [("2026-07-22", "2026-07-23")]  # both calendar dates requested
+
+
+async def test_early_game_previous_date_window(db: Database) -> None:
+    seen: list[tuple[str, str]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/v1/forecast":
+            seen.append((req.url.params.get("start_date"), req.url.params.get("end_date")))
+        return httpx.Response(200, json=om_hourly(), headers={"content-type": "application/json"})
+    http = build_readonly_client(base_url="https://api.open-meteo.com",
+                                 policy=ReadOnlyHTTPPolicy.for_open_meteo_all(),
+                                 inner_transport=httpx.MockTransport(handler))
+    om = OpenMeteoClient(base_url="https://api.open-meteo.com", client=http)
+    clients = WeatherClients(nws=_nws_client(default_nws_handler()), om_forecast=om,
+                             om_historical=_om_client("https://historical-forecast-api.open-meteo.com", om_hourly()),
+                             om_archive=_om_client("https://archive-api.open-meteo.com", om_hourly()))
+    # 00:30Z start -> window 23:30Z (previous date) .. 04:30Z: spans the previous date.
+    seed_game(db, country="Canada", venue_name="Rogers Centre", lat=43.64, lon=-79.39,
+              tz="America/Toronto", start="2026-07-23T00:30:00Z", date="2026-07-23")
+    await ingest_weather(database=db, clients=clients, mode="forecast",
+                         from_date="2026-07-23", to_date="2026-07-23")
+    await clients.aclose()
+    assert seen == [("2026-07-22", "2026-07-23")]
+
+
+async def test_cross_midnight_doubleheader_dedup_and_dates(db: Database) -> None:
+    seen: list[tuple[str, str]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/v1/forecast":
+            seen.append((req.url.params.get("start_date"), req.url.params.get("end_date")))
+        return httpx.Response(200, json=om_hourly(
+            utc_times=["2026-07-22T18:00", "2026-07-22T23:00", "2026-07-23T00:00"],
+            temps=[25.0, 20.0, 19.0]), headers={"content-type": "application/json"})
+    http = build_readonly_client(base_url="https://api.open-meteo.com",
+                                 policy=ReadOnlyHTTPPolicy.for_open_meteo_all(),
+                                 inner_transport=httpx.MockTransport(handler))
+    om = OpenMeteoClient(base_url="https://api.open-meteo.com", client=http)
+    clients = WeatherClients(nws=_nws_client(default_nws_handler()), om_forecast=om,
+                             om_historical=_om_client("https://historical-forecast-api.open-meteo.com", om_hourly()),
+                             om_archive=_om_client("https://archive-api.open-meteo.com", om_hourly()))
+    # DH: game 1 18:05Z (window 17:05-22:05), game 2 23:45Z (window 22:45-03:45 next day).
+    seed_game(db, game_pk="1", venue_pid="3", country="Canada", venue_name="Rogers Centre",
+              lat=43.64, lon=-79.39, tz="America/Toronto", start="2026-07-22T18:05:00Z")
+    seed_game(db, game_pk="2", venue_pid="3", seed_venue=False, start="2026-07-22T23:45:00Z")
+    r = await ingest_weather(database=db, clients=clients, mode="forecast",
+                             from_date="2026-07-22", to_date="2026-07-22")
+    await clients.aclose()
+    assert seen == [("2026-07-22", "2026-07-23")]  # ONE request spanning both dates
+    assert r.request_groups_deduplicated == 1
+    with db.connection() as conn:
+        g1 = {x[0] for x in conn.execute(
+            "SELECT valid_time FROM weather_snapshots WHERE provider_game_id='1'")}
+        g2 = {x[0] for x in conn.execute(
+            "SELECT valid_time FROM weather_snapshots WHERE provider_game_id='2'")}
+    assert g1 == {"2026-07-22T18:00:00.000000Z"}  # only game 1's window
+    assert g2 == {"2026-07-22T23:00:00.000000Z", "2026-07-23T00:00:00.000000Z"}
+
+
+# --------------------------------------------------------------------------- #
+# REPAIR: unit validation, extra, wind ranges
+# --------------------------------------------------------------------------- #
+async def test_open_meteo_hourly_units_validated_unexpected_becomes_null(db: Database) -> None:
+    # temperature returned in °F (not the requested °C) -> canonical value NULL + extra + note.
+    body = om_hourly(units={"temperature_2m": "°F"})
+    seed_game(db, country="Canada", venue_name="Rogers Centre", lat=43.64, lon=-79.39,
+              tz="America/Toronto")
+    r = await _run(db, make_clients(om_forecast=body), mode="forecast")
+    with db.connection() as conn:
+        rows = conn.execute("SELECT temperature_c, wind_speed_ms, extra FROM weather_snapshots"
+                            ).fetchall()
+        note = conn.execute("SELECT COUNT(*) FROM data_quality_issues "
+                            "WHERE rule_code='DQ-WX-NORM-001'").fetchone()[0]
+    assert all(row[0] is None for row in rows)          # temperature not trusted -> NULL
+    assert all(row[1] == 3.0 for row in rows)           # wind (correct unit) still normalized
+    assert all("temperature_2m" in (row[2] or "") for row in rows)  # preserved in extra
+    assert note >= 1 and r.data_quality_issues >= 1
+
+
+def test_nws_precipitation_unit_validated() -> None:
+    from datetime import datetime, timezone
+    feats = nws_observations(features=[{"properties": {
+        "timestamp": "2026-07-22T23:00:00+00:00",
+        "precipitationLastHour": {"value": 2.0, "unitCode": "wmoUnit:m"}}}])  # metres!
+    rows, _notes = normalize_nws_observations(
+        feats, window_start=datetime(2026, 7, 22, 22, 5, tzinfo=timezone.utc),
+        window_end=datetime(2026, 7, 23, 3, 5, tzinfo=timezone.utc), station="KBOS")
+    assert len(rows) == 1
+    assert rows[0].values.precip_amount_mm == 2000.0  # 2 m -> 2000 mm (converted, not assumed)
+
+
+def test_scalar_wind_normalizes_range_does_not() -> None:
+    assert normalize_speed_ms("10 mph", None)[0] == pytest.approx(4.4704, abs=1e-4)
+    val, note = normalize_speed_ms("5 to 10 mph", None)
+    assert val is None and note is not None and "range" in note
+
+
+async def test_wind_range_preserved_in_extra_with_null_speed(db: Database) -> None:
+    hourly = nws_hourly(periods=[{
+        "startTime": "2026-07-22T23:00:00+00:00", "temperature": 70, "temperatureUnit": "F",
+        "windSpeed": "5 to 10 mph", "windDirection": "N", "shortForecast": "Breezy"}])
+    seed_game(db)
+    r = await _run(db, make_clients(nws_handler=default_nws_handler(hourly=hourly)),
+                   mode="forecast")
+    with db.connection() as conn:
+        speed, extra = conn.execute(
+            "SELECT wind_speed_ms, extra FROM weather_snapshots").fetchone()
+    assert speed is None  # a range is never collapsed to a scalar
+    assert "5 to 10 mph" in (extra or "")
+    assert r.data_quality_issues >= 1  # a normalization note recorded
+
+
+# --------------------------------------------------------------------------- #
+# REPAIR: normalization DQ notes (dry-run vs persisted)
+# --------------------------------------------------------------------------- #
+async def test_normalization_notes_counted_in_dry_run(db: Database) -> None:
+    hourly = nws_hourly(periods=[{
+        "startTime": "2026-07-22T23:00:00+00:00", "temperature": 70, "temperatureUnit": "F",
+        "windSpeed": "5 to 10 mph", "windDirection": "N", "shortForecast": "Breezy"}])
+    seed_game(db)
+    r = await _run(db, make_clients(nws_handler=default_nws_handler(hourly=hourly)),
+                   mode="forecast", dry_run=True)
+    assert r.data_quality_issues >= 1 and r.rows_persisted == 0
+    assert _count(db, "data_quality_issues") == 0  # dry-run persisted nothing
+
+
+async def test_normalization_notes_persisted_with_provenance(db: Database) -> None:
+    hourly = nws_hourly(periods=[{
+        "startTime": "2026-07-22T23:00:00+00:00", "temperature": 70, "temperatureUnit": "F",
+        "windSpeed": "5 to 10 mph", "windDirection": "N", "shortForecast": "Breezy"}])
+    seed_game(db)
+    await _run(db, make_clients(nws_handler=default_nws_handler(hourly=hourly)), mode="forecast")
+    with db.connection() as conn:
+        row = conn.execute(
+            "SELECT rule_code, provider, run_id, raw_response_id, entity_id "
+            "FROM data_quality_issues WHERE rule_code='DQ-WX-NORM-001'").fetchone()
+    assert row is not None
+    assert row[1] == "nws" and row[2] is not None and row[3] is not None and row[4] == "745804"
+
+
+# --------------------------------------------------------------------------- #
+# REPAIR: per-response provider identity during fallback
+# --------------------------------------------------------------------------- #
+async def test_nws_discovery_keeps_provider_after_fallback(db: Database) -> None:
+    # /points succeeds (nws); the returned hourly URL 404s (geographic) -> Open-Meteo
+    # fallback. The point response must stay `nws`; weather rows use `open_meteo`.
+    def handler(req: httpx.Request) -> httpx.Response:
+        p = req.url.path
+        if p.startswith("/points/"):
+            return httpx.Response(200, json=nws_point(),
+                                  headers={"content-type": "application/geo+json"})
+        if p.endswith("/forecast/hourly"):
+            return httpx.Response(404, json={"detail": "not found"},
+                                  headers={"content-type": "application/geo+json"})
+        return httpx.Response(200, json={}, headers={"content-type": "application/geo+json"})
+    clients = make_clients(nws_handler=handler)
+    seed_game(db, country="USA")
+    r = await _run(db, clients, mode="forecast")
+    assert r.provider_fallbacks == 1 and r.active_failures == 0
+    with db.connection() as conn:
+        points = conn.execute(
+            "SELECT provider FROM raw_responses WHERE endpoint LIKE '/points/%'").fetchall()
+        wx_provider = {x[0] for x in conn.execute(
+            "SELECT DISTINCT provider FROM weather_snapshots")}
+        wx_raw_provider = conn.execute(
+            "SELECT r.provider FROM weather_snapshots w JOIN raw_responses r "
+            "ON w.raw_response_id = r.raw_response_id LIMIT 1").fetchone()[0]
+    assert all(p[0] == "nws" for p in points)  # discovery response stays NWS
+    assert wx_provider == {"open_meteo"}       # weather rows are Open-Meteo
+    assert wx_raw_provider == "open_meteo"     # and reference the OM response
+
+
+# --------------------------------------------------------------------------- #
+# REPAIR: request counters + fallback classification
+# --------------------------------------------------------------------------- #
+async def test_actual_nws_request_count(db: Database) -> None:
+    seed_game(db)
+    r = await _run(db, make_clients(), mode="actual")
+    assert r.nws_requests == 3  # point + station discovery + station observations
+    assert r.requests_made == 3 and r.open_meteo_requests == 0
+
+
+async def test_fallback_request_totals(db: Database) -> None:
+    seed_game(db, country="USA")
+    r = await _run(db, make_clients(nws_handler=default_nws_handler(point_status=404)),
+                   mode="forecast")
+    # 1 NWS point attempt (404) + 1 Open-Meteo forecast = 2 total GETs.
+    assert r.nws_requests == 1 and r.open_meteo_requests == 1 and r.requests_made == 2
+    assert r.provider_fallbacks == 1
+
+
+async def test_dry_run_and_persisted_report_same_network_counts(db: Database) -> None:
+    seed_game(db)
+    r_dry = await _run(db, make_clients(), mode="forecast", dry_run=True)
+    r_wet = await _run(db, make_clients(), mode="forecast")
+    assert (r_dry.requests_made, r_dry.nws_requests, r_dry.open_meteo_requests) == \
+        (r_wet.requests_made, r_wet.nws_requests, r_wet.open_meteo_requests) == (2, 2, 0)
+
+
+async def test_nws_5xx_does_not_fall_back(db: Database) -> None:
+    seed_game(db, country="USA")
+    r = await _run(db, make_clients(nws_handler=default_nws_handler(point_status=503)),
+                   mode="forecast")
+    assert r.active_failures == 1 and r.provider_fallbacks == 0
+    assert _count(db, "weather_snapshots") == 0
+
+
+async def test_invalid_returned_url_is_active_failure_not_fallback(db: Database) -> None:
+    # /points returns an OFF-HOST forecast URL -> SSRF-blocked -> active failure, NOT fallback.
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path.startswith("/points/"):
+            return httpx.Response(200, json={"properties": {
+                "forecastHourly": "https://evil.example.com/gridpoints/x/1,1/forecast/hourly",
+                "observationStations": "https://api.weather.gov/gridpoints/BOX/70,76/stations"}},
+                headers={"content-type": "application/geo+json"})
+        return httpx.Response(200, json={}, headers={"content-type": "application/geo+json"})
+    seed_game(db, country="USA")
+    r = await _run(db, make_clients(nws_handler=handler), mode="forecast")
+    assert r.active_failures == 1 and r.provider_fallbacks == 0
+    assert _count(db, "weather_snapshots") == 0
+
+
+# --------------------------------------------------------------------------- #
+# REPAIR: missing-venue DQ evidence (persist + dry-run)
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("kwargs,code", [
+    ({"lat": None, "lon": None}, "DQ-WX-COORD-001"),
+    ({"tz": None}, "DQ-WX-TZ-001"),
+    ({"roof": None}, "DQ-WX-ROOF-001"),
+    ({"start": None}, "DQ-WX-SCHED-001"),
+])
+async def test_missing_metadata_persists_dq_and_makes_no_request(
+    db: Database, kwargs: dict[str, Any], code: str
+) -> None:
+    seed_game(db, **kwargs)
+    r = await _run(db, make_clients(), mode="forecast")
+    assert r.games_skipped_missing_venue == 1 and r.games_eligible == 0
+    assert r.nws_requests == 0 and r.open_meteo_requests == 0
+    with db.connection() as conn:
+        got = conn.execute("SELECT COUNT(*) FROM data_quality_issues WHERE rule_code=?",
+                           (code,)).fetchone()[0]
+    assert got == 1
+
+
+async def test_missing_metadata_dry_run_persists_no_dq(db: Database) -> None:
+    seed_game(db, lat=None, lon=None)
+    r = await _run(db, make_clients(), mode="forecast", dry_run=True)
+    assert r.games_skipped_missing_venue == 1 and r.data_quality_issues >= 1
+    assert _count(db, "data_quality_issues") == 0  # dry-run persisted nothing
+
+
+async def test_indoor_skip_is_not_a_data_quality_issue(db: Database) -> None:
+    seed_game(db, roof="dome")
+    r = await _run(db, make_clients(), mode="forecast")
+    assert r.indoor_games_skipped == 1
+    with db.connection() as conn:
+        dq = conn.execute("SELECT COUNT(*) FROM data_quality_issues "
+                         "WHERE rule_code LIKE 'DQ-WX-%'").fetchone()[0]
+    assert dq == 0  # an intentional not-applicable skip is not bad data

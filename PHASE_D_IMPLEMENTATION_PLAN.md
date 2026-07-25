@@ -33,7 +33,10 @@ canonical matching.
 > was a regulation game (no overtime), so null OT fields correctly produced no rows
 > (overtime→period-5 mapping and explicit-zero preservation remain covered by the
 > offline unit tests). No persisted NBA ingestion or historical NBA backfill has
-> been performed. D4–D5 not started.** D1
+> been performed. D4 weather ingestion code is implemented at schema v14 against
+> mocked NWS/Open-Meteo contracts, including a focused correctness + point-in-time
+> repair (offline/mock-only; no live weather audit or persisted weather ingestion).
+> D5 not started.** D1
 > (schema v10) built the
 > typed provider-capability system, the four provider clients over a shared
 > GET-only base, the tightened `http_policy` allow-lists, and the evidence-backed
@@ -100,10 +103,12 @@ canonical matching.
 > supported schema, file-level SHA-256 provenance, idempotent re-import,
 > `import-hoopr` CLI). `pyarrow` is an OPTIONAL (`tracking` extra) dependency: the
 > hoopR tests skip cleanly when it is absent, so the standard `.[dev]` CI job
-> collects and runs the full non-hoopR D3 suite. **The live BALLDONTLIE GOAT
-> capability audit and bounded dry-run smoke test have not yet been performed; no
-> persisted NBA ingestion or historical backfill has been performed. D4–D5 have
-> not started.**
+> collects and runs the full non-hoopR D3 suite. **D3's controlled BALLDONTLIE GOAT
+> live capability audit, injury dry run, modern-game verification, and live
+> verification of the repaired flat-key regulation-quarter parser all passed; no
+> persisted NBA ingestion or historical backfill has been performed. D4 weather
+> ingestion code is implemented at schema v14 against mocked NWS/Open-Meteo
+> contracts (offline/mock-only); D5 has not started.**
 
 Companion documents: `PHASE_D_PROVIDER_DECISIONS.md`, `DATA_ARCHITECTURE.md`,
 `POINT_IN_TIME_DATA.md`, `ENTITY_MATCHING.md`, `DATA_FOUNDATION_PLAN.md`.
@@ -821,6 +826,24 @@ Model column = recommended driver.
   historical rows carry `pit_eligible` = UNKNOWN with a `DQ-WX-PIT-001` note;
   request dedup for same venue/date/mode; idempotent; append-only; exact
   raw-response provenance; `--dry-run` creates no database and persists nothing.
+- **Correctness + PIT repair (offline/mock-only):** Open-Meteo is requested with
+  `timeformat=unixtime` + `timezone=UTC`, so hourly timestamps are unambiguous UTC
+  instants (no naive-local/DST/offset hazard); the request date range is the UTC
+  union of member game windows, so a cross-midnight or previous-date window fetches
+  every calendar date needed (each game still filtered to its own window, never
+  cross-attached). Provider units are VALIDATED (Open-Meteo `hourly_units`; NWS
+  `unitCode` incl. precipitation) — an unexpected unit leaves the canonical value
+  NULL, preserves the exact value/unit in typed `extra`, and records a
+  `DQ-WX-NORM-001` note (other valid fields kept). A wind RANGE (`"5 to 10 mph"`)
+  is never collapsed to a scalar (NULL + `extra` + note). Each raw response keeps
+  ITS OWN provider identity, so an NWS discovery response stays `nws` after an
+  Open-Meteo geographic fallback while the derived rows reference the Open-Meteo
+  response. Request counters count actual GETs (`nws_requests`/`open_meteo_requests`/
+  `requests_made` identical in dry-run and persisted mode); `provider_fallbacks`
+  counts events. Missing-metadata skips emit distinct DQ codes
+  (`DQ-WX-VENUE/ROOF/COORD/TZ/SCHED-001`) with no provider request; an indoor skip
+  is intentional, not a DQ. Only a genuine NWS geographic 404 falls back; an
+  off-host/invalid returned URL or a 5xx/parse failure stays an active failure.
 - **Expected blockers:** venue coord/roof accuracy; NWS US-only (Toronto → Open-Meteo);
   Open-Meteo historical-forecast API shape.
 

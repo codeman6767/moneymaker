@@ -82,7 +82,7 @@ class OpenMeteoClient(BaseProviderClient):
     @staticmethod
     def _common_params(
         latitude: float, longitude: float, hourly: str,
-        start_date: Optional[object], end_date: Optional[object], timezone: str,
+        start_date: Optional[object], end_date: Optional[object],
     ) -> dict[str, Any]:
         params: dict[str, Any] = {
             "latitude": float(latitude),
@@ -92,7 +92,12 @@ class OpenMeteoClient(BaseProviderClient):
             "temperature_unit": "celsius",
             "wind_speed_unit": "ms",
             "precipitation_unit": "mm",
-            "timezone": timezone,
+            # Absolute epoch-second timestamps + a UTC date range: the returned
+            # hourly times are unambiguous UTC instants (no naive-local parsing, no
+            # venue-offset or DST hazard), and ``start_date``/``end_date`` are
+            # interpreted in UTC to match the caller's UTC weather window.
+            "timezone": "UTC",
+            "timeformat": "unixtime",
         }
         if (start_date is None) ^ (end_date is None):
             raise ValueError("start_date and end_date must be provided together")
@@ -109,13 +114,12 @@ class OpenMeteoClient(BaseProviderClient):
         hourly: str = DEFAULT_FORECAST_HOURLY,
         start_date: Optional[object] = None,
         end_date: Optional[object] = None,
-        timezone: str = "UTC",
     ) -> ProviderResponse:
         """GET /v1/forecast -- the CURRENT forecast (api.open-meteo.com)."""
 
         return await self._get(
             "/v1/forecast",
-            params=self._common_params(latitude, longitude, hourly, start_date, end_date, timezone),
+            params=self._common_params(latitude, longitude, hourly, start_date, end_date),
         )
 
     async def fetch_historical_forecast(
@@ -126,7 +130,6 @@ class OpenMeteoClient(BaseProviderClient):
         start_date: object,
         end_date: object,
         hourly: str = DEFAULT_FORECAST_HOURLY,
-        timezone: str = "UTC",
     ) -> ProviderResponse:
         """GET /v1/forecast on the HISTORICAL FORECAST host (stitched previous runs).
 
@@ -137,7 +140,7 @@ class OpenMeteoClient(BaseProviderClient):
 
         return await self._get(
             "/v1/forecast",
-            params=self._common_params(latitude, longitude, hourly, start_date, end_date, timezone),
+            params=self._common_params(latitude, longitude, hourly, start_date, end_date),
         )
 
     async def fetch_archive(
@@ -148,7 +151,6 @@ class OpenMeteoClient(BaseProviderClient):
         start_date: object,
         end_date: object,
         hourly: str = DEFAULT_ARCHIVE_HOURLY,
-        timezone: str = "UTC",
     ) -> ProviderResponse:
         """GET /v1/archive on the ARCHIVE host -- ERA5 REANALYSIS (observation-grade).
 
@@ -158,5 +160,5 @@ class OpenMeteoClient(BaseProviderClient):
 
         return await self._get(
             "/v1/archive",
-            params=self._common_params(latitude, longitude, hourly, start_date, end_date, timezone),
+            params=self._common_params(latitude, longitude, hourly, start_date, end_date),
         )

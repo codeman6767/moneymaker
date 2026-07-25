@@ -25,9 +25,9 @@ accurate insert/update/dedup counters (including a new `ingestion_runs.records_u
 and a single validation path shared by persisted and dry-run ingestion. No
 Kalshi credential, private key, or signing is used anywhere; there is no
 account/balance/position/fill/order column in the schema. The suite passes under
-Ruff and mypy: 948 passed / 1 skipped locally (optional PyArrow present), and 941
-passed / 4 skipped under the standard `.[dev]` CI with PyArrow absent (only the
-optional hoopR/PyArrow modules skip).
+Ruff and mypy: 1028 passed / 1 skipped locally (optional PyArrow present); under
+the standard `.[dev]` CI with PyArrow absent only the optional hoopR/PyArrow
+modules skip.
 
 **D4 weather ingestion code is complete at schema v14 (migration `d014_weather`)
 against mocked NWS and Open-Meteo contracts: NWS is primary for supported US
@@ -45,11 +45,14 @@ infrastructure and D2 MLB ingestion code are complete (schema v11, migration
 2026. D3 NBA ingestion code is complete and correctness-repaired against mocked
 BALLDONTLIE GOAT contracts and offline hoopR fixtures (schema v13, migrations
 `d012_nba_specifics` + `d013_nba_typed_repairs` — NBA storage is sport-correct:
-points/period, not runs/innings; NBA stat groups, not batting/pitching); the live
-BALLDONTLIE GOAT capability audit and bounded dry-run smoke test have not yet been
-performed, and no persisted MLB or NBA ingestion or historical backfill has been
-performed. D4 weather ingestion code is complete at schema v14 (see the status
-paragraph above); D5 has not started.** D2
+points/period, not runs/innings; NBA stat groups, not batting/pitching). D3's
+controlled BALLDONTLIE GOAT LIVE audit, injury dry run, modern-game verification,
+and the live verification of the repaired flat-key regulation-quarter parser all
+passed; no persisted NBA ingestion or historical NBA backfill has occurred. D4
+weather ingestion code is implemented at schema v14 against mocked NWS and
+Open-Meteo contracts (this correctness repair is offline/mock-only); no live
+NWS/Open-Meteo audit, persisted weather ingestion, or weather backfill has
+occurred. D5 has not started.** D2
 added append-only, transition-aware official-MLB observation tables
 (schedule/result/inning/team+player stats/roster/probable/lineup), the extended
 MLB StatsAPI client (date-ranged schedule with probable/lineup hydration, box
@@ -132,10 +135,13 @@ requests (one per distinct team/official-date pair), 0 corrections, 0
 data-quality issues, 0 rejections, and 0 active failures. The dry run persisted
 nothing — its isolated target database was never created and the corpus changed
 only from the persisted audit run. No persisted MLB ingestion or historical
-backfill has been performed. D3 NBA ingestion code + mocked/offline correctness
+backfill has been performed. D3 NBA ingestion + its mocked/offline correctness
 repair are complete at schema v13 (`d012_nba_specifics` + `d013_nba_typed_repairs`);
-the live BALLDONTLIE GOAT audit and bounded dry-run smoke test have not yet been
-performed and no persisted NBA ingestion/backfill has occurred. D4–D5 have not
+D3's controlled BALLDONTLIE GOAT live audit, injury dry run, modern-game
+verification, and live verification of the repaired flat-key regulation-quarter
+parser all passed, and no persisted NBA ingestion/backfill has occurred. D4 weather
+ingestion code is implemented at schema v14 against mocked NWS/Open-Meteo contracts
+(offline/mock-only; no live weather audit/persisted ingestion). D5 has not
 started.
 
 | Phase | Scope | Status |
