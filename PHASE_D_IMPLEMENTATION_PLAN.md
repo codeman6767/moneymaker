@@ -10,8 +10,10 @@ canonical matching.
 > forecasts, and reanalysis are stored as DISTINCT data kinds; indoor/fixed-roof
 > games are skipped without network requests; retractable-roof games are
 > conditionally applicable unless roof-open status is known; historical rows are
-> not automatically point-in-time-safe. No live NWS/Open-Meteo audit, persisted
-> weather ingestion, or weather backfill has been performed. D5 has not started.**
+> not automatically point-in-time-safe. The controlled live NWS/Open-Meteo
+> current-forecast audits and a bounded zero-persistence dry run have passed; no
+> persisted weather ingestion or weather backfill has been performed. D5 has not
+> started.**
 >
 > **Status: Phase D2 MLB ingestion code complete and its controlled live gate
 > passed on July 24, 2026. D3 NBA ingestion code is complete and correctness-
@@ -119,8 +121,9 @@ canonical matching.
 > live capability audit, injury dry run, modern-game verification, and live
 > verification of the repaired flat-key regulation-quarter parser all passed; no
 > persisted NBA ingestion or historical backfill has been performed. D4 weather
-> ingestion code is implemented at schema v14 against mocked NWS/Open-Meteo
-> contracts (offline/mock-only); D5 has not started.**
+> ingestion code is complete at schema v14 and its controlled live NWS/Open-Meteo
+> current-forecast gate has passed (station observations, historical forecasts, and
+> reanalysis remain mocked/offline verified); D5 has not started.**
 
 Companion documents: `PHASE_D_PROVIDER_DECISIONS.md`, `DATA_ARCHITECTURE.md`,
 `POINT_IN_TIME_DATA.md`, `ENTITY_MATCHING.md`, `DATA_FOUNDATION_PLAN.md`.
@@ -809,16 +812,22 @@ Model column = recommended driver.
 
 ### D4 — Weather  ·  model: **Sonnet**
 
-> **Status: code complete at schema v14 (migration `d014_weather`) against mocked
-> NWS + Open-Meteo contracts.** Created `ingest/weather_ingestor.py`
+> **Status: complete at schema v14 (migration `d014_weather`); code built against
+> mocked NWS + Open-Meteo contracts and its controlled live current-forecast gate
+> passed (see status below).** Created `ingest/weather_ingestor.py`
 > (`ingest-weather --forecast|--actual|--historical-forecast`), `db/repositories/weather.py`
 > (append-only transition-aware `SqliteWeatherRepository`), extended the NWS client
 > (point → validated returned forecast/station URLs → station observations, with
 > explicit unit normalization) and the Open-Meteo client (three pinned hosts:
 > current forecast, Historical Forecast API, ERA5 archive), pinned the two new
 > hosts in `config` + `http_policy`, and added `tests/test_phase_d4_weather.py`.
-> **No live NWS/Open-Meteo audit, persisted weather ingestion, or weather backfill
-> has been performed. D5 has not started.**
+> **The controlled live NWS/Open-Meteo current-forecast audits (1 GET each,
+> `succeeded`) and a bounded `--forecast` dry run (2 games, 3 GETs, 10 forecast
+> observations, 0 rejections, 0 DQ notes, 0 active failures, 0 rows persisted;
+> scratch database byte-for-byte unchanged and removed) have passed. NWS station
+> observations, Open-Meteo historical forecasts, and reanalysis remain
+> mocked/offline verified. No persisted weather ingestion or weather backfill has
+> been performed. D5 has not started.**
 
 - **Provider:** **NWS** primary (US, no key); **Open-Meteo** secondary + the
   historical-forecast/archive (no key). **No paid weather key at D1/D4.** Open-Meteo
@@ -829,7 +838,7 @@ Model column = recommended driver.
   fixtures + tests.
 - **Modify:** `cli.py` (`ingest-weather`).
 - **Migration:** `d014` (v14). **Tables:** weather_snapshots (venues from d009).
-- **Completion (met, mocked/offline):** forecast + actual + historical-forecast +
+- **Completion (criteria met, verified by mocked/offline unit tests):** forecast + actual + historical-forecast +
   reanalysis persisted as distinct kinds; outdoor-only gating by `venues.roof_type`
   (dome/fixed/indoor skipped with no request; retractable conditional, never
   assumed open); honest NWS→Open-Meteo geographic fallback (a 5xx/parse failure is
@@ -838,7 +847,7 @@ Model column = recommended driver.
   historical rows carry `pit_eligible` = UNKNOWN with a `DQ-WX-PIT-001` note;
   request dedup for same venue/date/mode; idempotent; append-only; exact
   raw-response provenance; `--dry-run` creates no database and persists nothing.
-- **Correctness + PIT repair (offline/mock-only):** Open-Meteo is requested with
+- **Correctness + PIT repair (verified by mocked/offline unit tests):** Open-Meteo is requested with
   `timeformat=unixtime` + `timezone=UTC`, so hourly timestamps are unambiguous UTC
   instants (no naive-local/DST/offset hazard); the request date range is the UTC
   union of member game windows, so a cross-midnight or previous-date window fetches

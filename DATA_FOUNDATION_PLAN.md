@@ -35,9 +35,10 @@ outdoor MLB venues, Open-Meteo covers non-US venues and the explicitly selected
 historical products, and forecasts / station observations / historical forecasts /
 reanalysis are stored as distinct kinds; indoor/fixed-roof games are skipped with
 no network request, retractable-roof games are conditionally applicable, and
-historical rows are not automatically point-in-time-safe. No live NWS/Open-Meteo
-audit, persisted weather ingestion, or weather backfill has been performed. D5 has
-not started.**
+historical rows are not automatically point-in-time-safe. The controlled live
+NWS/Open-Meteo current-forecast audits and a bounded zero-persistence dry run have
+passed; no persisted weather ingestion or weather backfill has been performed. D5
+has not started.**
 
 **Phase D provider selection and implementation design are complete; D1 provider
 infrastructure and D2 MLB ingestion code are complete (schema v11, migration
@@ -49,10 +50,13 @@ points/period, not runs/innings; NBA stat groups, not batting/pitching). D3's
 controlled BALLDONTLIE GOAT LIVE audit, injury dry run, modern-game verification,
 and the live verification of the repaired flat-key regulation-quarter parser all
 passed; no persisted NBA ingestion or historical NBA backfill has occurred. D4
-weather ingestion code is implemented at schema v14 against mocked NWS and
-Open-Meteo contracts (this correctness repair is offline/mock-only); no live
-NWS/Open-Meteo audit, persisted weather ingestion, or weather backfill has
-occurred. D5 has not started.** D2
+weather ingestion code is complete at schema v14, and its controlled live
+NWS/Open-Meteo current-forecast audits (1 GET each, succeeded) and bounded
+zero-persistence `--forecast` dry run (2 games, 3 GETs, 10 forecast observations,
+0 rejections, 0 DQ notes, 0 active failures, 0 rows persisted; scratch database
+unchanged and removed) have passed; NWS station observations, Open-Meteo historical
+forecasts, and reanalysis remain mocked/offline verified; no persisted weather
+ingestion or weather backfill has occurred. D5 has not started.** D2
 added append-only, transition-aware official-MLB observation tables
 (schedule/result/inning/team+player stats/roster/probable/lineup), the extended
 MLB StatsAPI client (date-ranged schedule with probable/lineup hydration, box
@@ -155,16 +159,17 @@ repair are complete at schema v13 (`d012_nba_specifics` + `d013_nba_typed_repair
 D3's controlled BALLDONTLIE GOAT live audit, injury dry run, modern-game
 verification, and live verification of the repaired flat-key regulation-quarter
 parser all passed, and no persisted NBA ingestion/backfill has occurred. D4 weather
-ingestion code is implemented at schema v14 against mocked NWS/Open-Meteo contracts
-(offline/mock-only; no live weather audit/persisted ingestion). D5 has not
-started.
+ingestion code is complete at schema v14, and its controlled live NWS/Open-Meteo
+current-forecast audits and bounded zero-persistence dry run passed (station
+observations, historical forecasts, and reanalysis remain mocked/offline verified;
+no persisted weather ingestion or backfill). D5 has not started.
 
 | Phase | Scope | Status |
 | --- | --- | --- |
 | A | Database engine, migrations, core entities, `db-init` | ✅ Complete (schema v3) |
 | B | Raw responses, ingestion runs, sportsbook odds | ✅ Complete (schema v6, incl. `b006` integrity repair) |
 | C | Kalshi public events, markets, books, trades | ✅ Complete (schema v8, incl. `c008` integrity repair) |
-| D | Official providers, weather, canonical matching | ◧ **D1 infra + D2 MLB ingestion complete (schema v11); D2 controlled live gate passed 2026-07-24 (no persisted ingestion/backfill); D3 NBA ingestion code complete + correctness-repaired against mocked BALLDONTLIE GOAT + offline hoopR fixtures (schema v13, `d012_nba_specifics` + `d013_nba_typed_repairs`); D4 weather ingestion code complete against mocked NWS + Open-Meteo (schema v14, `d014_weather`), no live weather audit/persisted ingestion; D5 not started** |
+| D | Official providers, weather, canonical matching | ◧ **D1 infra + D2 MLB ingestion complete (schema v11); D2 controlled live gate passed 2026-07-24 (no persisted ingestion/backfill); D3 NBA ingestion code complete + correctness-repaired against mocked BALLDONTLIE GOAT + offline hoopR fixtures (schema v13, `d012_nba_specifics` + `d013_nba_typed_repairs`); D4 complete (schema v14, `d014_weather`): controlled live NWS + Open-Meteo current-forecast audits + bounded zero-persistence dry run passed (station obs / historical forecasts / reanalysis remain mocked/offline; no persisted weather ingestion/backfill); D5 not started** |
 | E | Point-in-time builder, quality rules, leakage tests | ◻ Not started |
 
 Companion documents:
@@ -684,8 +689,12 @@ is never miscounted as a new insert.
 > `run_01KYB91H2DHG0SKJDMAV2SN88M`: exit 0, authenticated, 9 GET-only probes, 11
 > observed capabilities; completed-game `ingest-nba --dry-run` and current
 > `ingest-injuries --dry-run` both persisted nothing and never created their
-> isolated database); no persisted NBA ingestion/backfill has occurred, and D4–D5
-> have not started. The controlled live MLB StatsAPI provider
+> isolated database); no persisted NBA ingestion/backfill has occurred. D4 weather
+> ingestion is complete at schema v14 (`d014_weather`), and its controlled live
+> NWS/Open-Meteo current-forecast audits and bounded zero-persistence dry run passed
+> (station observations, historical forecasts, and reanalysis remain mocked/offline
+> verified; no persisted weather ingestion/backfill); D5 has not started. The
+> controlled live MLB StatsAPI provider
 > audit and bounded dry-run smoke test succeeded, but no persisted MLB ingestion
 > or historical backfill has been performed.** The authoritative, up-to-date
 > Phase D plan lives in two dedicated documents —
