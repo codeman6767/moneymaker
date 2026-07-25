@@ -39,6 +39,7 @@ from .model import (
     Candidate,
     Resolution,
 )
+from .season import league_code_from_id, season_bounds
 
 
 @dataclass(frozen=True)
@@ -128,8 +129,13 @@ class PlayerResolver:
                 ids, TIER_LEAGUE_NAME, "player alias is flagged ambiguous", via_ambiguous=True
             )
 
+        bounds = (
+            season_bounds(league_code_from_id(league_id), season_year)
+            if season_year is not None
+            else None
+        )
         candidate_ids = sorted({r.player_id for r in rows})
-        candidate_ids = self._season_filter(candidate_ids, season_year)
+        candidate_ids = self._season_filter(candidate_ids, bounds)
 
         if not candidate_ids:
             return self._unmatched(f"no player matches {query.normalized!r}")
@@ -138,7 +144,7 @@ class PlayerResolver:
         tier = TIER_LEAGUE_NAME
         score = SCORE_LEAGUE_NAME
         if len(candidate_ids) > 1 and team_id is not None:
-            on_team = self._on_team(candidate_ids, team_id, season_year)
+            on_team = self._on_team(candidate_ids, team_id, bounds)
             if len(on_team) == 1:
                 candidate_ids = on_team
                 tier, score = TIER_TEAM_NAME, SCORE_TEAM_NAME
@@ -147,7 +153,7 @@ class PlayerResolver:
         elif (
             len(candidate_ids) == 1
             and team_id is not None
-            and self._on_team(candidate_ids, team_id, season_year)
+            and self._on_team(candidate_ids, team_id, bounds)
         ):
             tier, score = TIER_TEAM_NAME, SCORE_TEAM_NAME
 
@@ -252,15 +258,20 @@ class PlayerResolver:
             for r in rows
         ]
 
-    def _season_filter(self, ids: list[str], season_year: Optional[int]) -> list[str]:
-        """Keep players whose career window includes the season (when known).
+    def _season_filter(
+        self, ids: list[str], bounds: Optional[tuple[str, str]]
+    ) -> list[str]:
+        """Keep players whose career window overlaps the season interval.
 
-        A player with no curated debut/final date is kept -- an absent window is
-        not evidence of absence.
+        ``bounds`` is the league-specific ``(start, end)`` from
+        :func:`season_bounds`, so MLB and NBA agree with the roster filter about
+        season identity. A player with no curated debut/final date is kept -- an
+        absent window is not evidence of absence, never proof of validity.
         """
 
-        if season_year is None or not ids:
+        if bounds is None or not ids:
             return ids
+        lo, hi = bounds
         placeholders = ",".join("?" for _ in ids)
         rows = self._conn.execute(
             f"SELECT player_id, debut_date, final_game_date FROM players "  # noqa: S608
@@ -271,22 +282,23 @@ class PlayerResolver:
         for r in rows:
             debut = r["debut_date"]
             final = r["final_game_date"]
-            debut_ok = debut is None or int(str(debut)[:4]) <= season_year
-            final_ok = final is None or int(str(final)[:4]) >= season_year
+            debut_ok = debut is None or str(debut) <= hi
+            final_ok = final is None or str(final) >= lo
             if debut_ok and final_ok:
                 kept.append(str(r["player_id"]))
         return sorted(kept)
 
     def _on_team(
-        self, ids: list[str], team_id: str, season_year: Optional[int] = None
+        self, ids: list[str], team_id: str, bounds: Optional[tuple[str, str]] = None
     ) -> list[str]:
         """Which candidate players were on ``team_id`` -- season-restricted.
 
-        When ``season_year`` is supplied, only roster observations dated within
-        that season count, so a later-season (e.g. post-trade) roster cannot
-        resolve an earlier-season reference. An undated roster is not accepted as
-        season-valid evidence. Absence from a roster is never evidence against a
-        player. Deterministically ordered.
+        When ``bounds`` (the league-specific season interval) is supplied, only
+        roster observations dated within that interval count, so a later-season
+        (e.g. post-trade) roster cannot resolve an earlier-season reference, and
+        an NBA season spanning two calendar years is handled correctly. An undated
+        roster is not accepted as season-valid evidence. Absence from a roster is
+        never evidence against a player. Deterministically ordered.
         """
 
         if not ids:
@@ -298,9 +310,9 @@ class PlayerResolver:
             f"WHERE ptr.team_id = ? AND rs.player_id IN ({placeholders})"  # noqa: S608
         )
         params: list[object] = [team_id, *ids]
-        if season_year is not None:
-            sql += " AND rs.roster_date LIKE ?"
-            params.append(f"{season_year}-%")
+        if bounds is not None:
+            sql += " AND rs.roster_date IS NOT NULL AND rs.roster_date >= ? AND rs.roster_date <= ?"
+            params.extend(bounds)
         rows = self._conn.execute(sql, tuple(params)).fetchall()
         return sorted(str(r["player_id"]) for r in rows)
 

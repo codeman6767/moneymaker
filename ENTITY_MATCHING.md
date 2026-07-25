@@ -313,17 +313,33 @@ built to avoid.
 3. Otherwise — two same-day games with indistinguishable start times —
    `AMBIGUOUS`, both candidates recorded, manual review.
 
-> **D5A implementation: batch-order-independent.** The inferred number in rule 2
-> is the game's chronological rank computed from the **whole schedule corpus**
-> (the latest observation of every provider game sharing the same provider,
-> provider home/away team ids, and provider local date, ranked by
-> `(scheduled_start, provider_game_id)`) — never from whichever canonical sibling
-> happened to be created first, and never by sorting on the provider-game id. The
-> result is therefore identical regardless of database insertion order, processing
-> order, or which sibling is presented first (verified under 100 randomized
-> orders), and a bounded run that processes only the later game still numbers it
-> `2` because the earlier sibling is visible in the source schedule. Under rule 3,
-> **both** games are ambiguous — neither is arbitrarily created as game 1.
+> **D5A implementation: batch-order-independent, grouped by the resolved slate.**
+> The inferred number in rule 2 is the game's chronological rank computed from the
+> **whole schedule corpus** (the latest observation of every provider game sharing
+> the same provider and provider home/away team ids), ranked by
+> `(scheduled_start, provider_game_id)` — never from whichever canonical sibling
+> was created first, and never by sorting on the provider-game id. Siblings are
+> grouped by the **resolved venue-local date**: each candidate's local date is
+> derived through the same venue-aware hierarchy (actual venue tz → provider local
+> date → knowledge-bounded home-venue tz → UTC), so a **missing provider local
+> date does not collapse the game to a single-game slate** and a cross-midnight UTC
+> start still lands on the correct local slate. When choosing each sibling's latest
+> observation, ties on `observed_at` break on `schedule_id` (a creation-ordered
+> ULID), never on SQLite row order. The result is identical regardless of insertion
+> order, processing order, or which sibling is presented first (verified under 100
+> randomized orders); a bounded run that processes only the later game still
+> numbers it `2` because the earlier sibling is visible in the source schedule; a
+> provider-supplied game number always overrides. Under rule 3, **both** games are
+> ambiguous — neither is arbitrarily created as game 1.
+>
+> **Season intervals (`matching/season.py`).** Roster-team and career-window
+> filtering use the providers' own season convention: **MLB** `season` is the
+> calendar year (`[Y-01-01, Y-12-31]`); **BALLDONTLIE NBA** `season` is the start
+> year of a two-year season (`2024` = the 2024-25 season, `[Y-07-01, (Y+1)-06-30]`).
+> A single helper feeds both filters, so they never disagree about which season a
+> `roster_date` belongs to; an undated roster is never season-proven evidence, and
+> conflicting teams within the applicable season omit the team tier rather than
+> choosing by row order.
 
 Split doubleheaders (separate admissions, typically ~5 h apart) resolve cleanly
 under rule 2. Traditional doubleheaders (second game ~30 min after the first

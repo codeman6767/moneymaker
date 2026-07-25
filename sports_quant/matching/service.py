@@ -236,7 +236,10 @@ class MatchGamesService:
         # neither the actual event venue tz nor a provider local date is
         # available, so an actual/neutral venue is never replaced by the home park.
         home_tz = (
-            self._home_venue_tz(home.entity_id, before=_opt(sched, "scheduled_start"))
+            self._home_venue_tz(
+                home.entity_id, before_start=_opt(sched, "scheduled_start"),
+                cutoff=_opt(sched, "observed_at"),
+            )
             if actual_tz is None and not provider_local
             else None
         )
@@ -281,7 +284,6 @@ class MatchGamesService:
             venue_id=venue.venue_id if venue is not None else None,
             provider_home_pid=home_pid,
             provider_away_pid=away_pid,
-            provider_local_date=provider_local,
             result=result,
         )
 
@@ -361,7 +363,6 @@ class MatchGamesService:
         venue_id: Optional[str],
         provider_home_pid: Optional[str],
         provider_away_pid: Optional[str],
-        provider_local_date: Optional[str],
         result: MatchGamesResult,
     ) -> None:
         # Tier 1 -- exact official key anchors identity across reschedules / DHs.
@@ -440,7 +441,7 @@ class MatchGamesService:
             local_date=local_date, schedule_game_number=schedule_game_number,
             mapped_status=mapped_status, venue_id=venue_id, start=start,
             provider_home_pid=provider_home_pid, provider_away_pid=provider_away_pid,
-            provider_local_date=provider_local_date, result=result,
+            result=result,
         )
 
     def _create_game(
@@ -462,7 +463,6 @@ class MatchGamesService:
         start: datetime,
         provider_home_pid: Optional[str],
         provider_away_pid: Optional[str],
-        provider_local_date: Optional[str],
         result: MatchGamesResult,
     ) -> None:
         if provider not in _OFFICIAL_PROVIDERS:
@@ -478,8 +478,9 @@ class MatchGamesService:
 
         game_number = self._slate_game_number(
             provider=provider, provider_home_pid=provider_home_pid,
-            provider_away_pid=provider_away_pid, provider_local_date=provider_local_date,
-            provider_game_id=provider_game_id, schedule_game_number=schedule_game_number,
+            provider_away_pid=provider_away_pid, provider_game_id=provider_game_id,
+            target_local_date=local_date, home_team_id=home_team_id,
+            schedule_game_number=schedule_game_number,
         )
         if game_number is None:
             self._record_game_ambiguous(
@@ -536,56 +537,103 @@ class MatchGamesService:
         provider: str,
         provider_home_pid: Optional[str],
         provider_away_pid: Optional[str],
-        provider_local_date: Optional[str],
         provider_game_id: str,
+        target_local_date: str,
+        home_team_id: str,
         schedule_game_number: Any,
     ) -> Optional[int]:
         """Deterministic doubleheader game number, independent of processing order.
 
         A provider-supplied game number always wins. Otherwise the number is the
-        game's **chronological rank** within its slate, computed from the *whole
-        schedule corpus* (the latest observation of every provider game sharing
-        the same provider, provider home/away team ids, and provider local date)
-        ranked by ``(scheduled_start, provider_game_id)`` -- NOT from whichever
-        canonical sibling happened to be created first. This makes the result
-        identical regardless of provider-game ids, database insertion order, or
-        which sibling is presented first, and it sees an earlier unresolved
-        sibling even in a bounded run that processes only the later game. Two
-        starts within 90 minutes are indistinguishable -> ``None`` (ambiguous).
+        game's **chronological rank** within its slate. The slate is grouped by the
+        **resolved venue-local date** -- each sibling's local date is derived
+        through the same venue-aware hierarchy (actual venue tz -> provider local
+        date -> knowledge-bounded home-venue tz -> UTC), so a missing provider
+        local date does NOT collapse the game to a single-game slate. Siblings are
+        the latest observation of every provider game sharing the same provider and
+        provider home/away team ids whose resolved local date equals this game's,
+        ranked by ``(scheduled_start, provider_game_id)`` over the *whole schedule
+        corpus* -- never by created-game order or provider-id sort. Two starts
+        within 90 minutes are indistinguishable -> ``None`` (ambiguous). A partial
+        bounded run still sees an unresolved earlier sibling in the corpus.
         """
 
         if schedule_game_number is not None:
             return int(schedule_game_number)
-        # A slate needs a provider-stated local date to group siblings safely;
-        # without one, treat this as a single game (no doubleheader inference).
-        if provider_home_pid is None or provider_away_pid is None or provider_local_date is None:
+        if provider_home_pid is None or provider_away_pid is None:
             return 1
 
-        rows = self._conn.execute(
-            "SELECT provider_game_id, scheduled_start, observed_at "
-            "FROM game_schedule_snapshots WHERE provider = ? AND home_provider_team_id = ? "
-            "AND away_provider_team_id = ? AND game_date_local = ? AND scheduled_start IS NOT NULL",
-            (provider, provider_home_pid, provider_away_pid, provider_local_date),
-        ).fetchall()
-        # Latest observation per provider game (deterministic on ties).
-        latest: dict[str, tuple[str, str]] = {}  # pgid -> (observed_at, scheduled_start)
-        for r in rows:
-            pgid = str(r["provider_game_id"])
-            obs = str(r["observed_at"])
-            prev = latest.get(pgid)
-            if prev is None or obs > prev[0]:
-                latest[pgid] = (obs, str(r["scheduled_start"]))
-        target = latest.get(provider_game_id)
+        siblings: list[tuple[str, str]] = []  # (scheduled_start, provider_game_id)
+        for row in self._latest_slate_rows(provider, provider_home_pid, provider_away_pid):
+            ss = _opt(row, "scheduled_start")
+            if ss is None:
+                continue
+            if self._row_local_date(row, home_team_id) == target_local_date:
+                siblings.append((ss, str(row["provider_game_id"])))
+        target = next((s for s in siblings if s[1] == provider_game_id), None)
         if target is None:
             return 1
-        target_start = target[1]
-        others = [(ss, pgid) for pgid, (_obs, ss) in latest.items() if pgid != provider_game_id]
+        target_start = target[0]
+        others = [s for s in siblings if s[1] != provider_game_id]
         target_dt = _parse_utc(target_start)
         for ss, _pgid in others:
             if abs(_parse_utc(ss) - target_dt) < _DOUBLEHEADER_GAP:
                 return None  # a same-slate sibling within 90 min -> indistinguishable
         # Rank = 1 + siblings that sort strictly before this game chronologically.
         return 1 + sum(1 for ss, pgid in others if (ss, pgid) < (target_start, provider_game_id))
+
+    def _latest_slate_rows(
+        self, provider: str, provider_home_pid: str, provider_away_pid: str
+    ) -> list[sqlite3.Row]:
+        """The latest schedule observation of every provider game for this matchup.
+
+        Ordered so the first row seen per provider game is its deterministic
+        current observation: newest ``observed_at`` first, then ``schedule_id``
+        (a creation-ordered ULID) as a stable tie-break -- so two rows sharing an
+        ``observed_at`` are never resolved by SQLite's physical row order.
+        """
+
+        rows = self._conn.execute(
+            "SELECT schedule_id, provider_game_id, scheduled_start, game_date_local, "
+            "venue_provider_id, observed_at, provider FROM game_schedule_snapshots "
+            "WHERE provider = ? AND home_provider_team_id = ? AND away_provider_team_id = ? "
+            "AND scheduled_start IS NOT NULL "
+            "ORDER BY provider_game_id, observed_at DESC, schedule_id DESC",
+            (provider, provider_home_pid, provider_away_pid),
+        ).fetchall()
+        latest: dict[str, sqlite3.Row] = {}
+        for r in rows:
+            pgid = str(r["provider_game_id"])
+            if pgid not in latest:  # rows are pre-ordered; first per game is latest
+                latest[pgid] = r
+        return list(latest.values())
+
+    def _row_local_date(self, row: sqlite3.Row, home_team_id: str) -> Optional[str]:
+        """A schedule row's resolved venue-local date (read-only; records nothing)."""
+
+        venue: Optional[Venue] = None
+        vpid = _opt(row, "venue_provider_id")
+        if vpid:
+            vres = self._venue_resolver.resolve(
+                provider=str(row["provider"]), provider_venue_id=vpid)
+            if vres.is_matched and vres.entity_id is not None:
+                venue = self._venues.get(vres.entity_id)
+        actual_tz = venue.timezone if venue is not None else None
+        provider_local = _opt(row, "game_date_local")
+        home_tz = (
+            self._home_venue_tz(
+                home_team_id, before_start=_opt(row, "scheduled_start"),
+                cutoff=_opt(row, "observed_at"))
+            if actual_tz is None and not provider_local
+            else None
+        )
+        try:
+            return resolve_local_date(
+                scheduled_start=_opt(row, "scheduled_start"), actual_venue_tz=actual_tz,
+                provider_local_date=provider_local, home_venue_tz=home_tz,
+            ).game_date_local
+        except InvalidTimezoneError:
+            return None
 
     def _window_candidates(
         self,
@@ -613,27 +661,42 @@ class MatchGamesService:
             and g.official_provider != self._current_provider
         )
 
-    def _home_venue_tz(self, home_team_id: str, *, before: Optional[str]) -> Optional[str]:
+    def _home_venue_tz(
+        self, home_team_id: str, *, before_start: Optional[str], cutoff: Optional[str]
+    ) -> Optional[str]:
         """The canonical home team's ordinary venue timezone, or ``None``.
 
-        Time-bounded: only this team's NON-neutral home games that were *already
-        scheduled to start before* the target game (`scheduled_start < before`)
-        are considered, so a future canonical game -- or a later relocation --
-        can never supply the timezone for an earlier match. A timezone is
-        returned only when those prior games share exactly one venue timezone; an
-        ambiguous home history (a relocation spanning zones) yields ``None``
-        rather than a guess. Never used to replace an actual/neutral event venue
-        (the caller consults it only when no actual venue tz and no provider local
-        date exist).
+        Bounded by BOTH event time and knowledge time. A prior canonical game may
+        contribute its venue timezone only when:
+
+        * its scheduled start precedes the target start (``scheduled_start <
+          before_start``) -- so a future game never influences an earlier match;
+        * it is non-neutral with a venue set;
+        * its canonical identity is backed by an **accepted, non-swapped** game
+          match decision whose ``decided_at <= cutoff`` -- so a game discovered or
+          matched only in a *later* backfill (or a later manual approval of a
+          review-gated swapped match) is invisible at the target's schedule
+          observation cutoff, and an unreviewed neutral-swapped match never
+          supplies ordinary home-venue evidence.
+
+        A timezone is returned only when the qualifying prior games share exactly
+        one venue timezone; an ambiguous home history (a relocation spanning
+        zones) yields ``None`` rather than a guess. Never used to replace an
+        actual/neutral event venue (the caller consults it only when no actual
+        venue tz and no provider local date exist). With no cutoff or no
+        before-start, no evidence qualifies -> ``None`` (conservative).
         """
 
-        if before is None:
+        if before_start is None or cutoff is None:
             return None
         rows = self._conn.execute(
-            "SELECT DISTINCT venue FROM games "
-            "WHERE home_team_id = ? AND is_neutral_site = 0 AND venue IS NOT NULL "
-            "AND scheduled_start < ?",
-            (home_team_id, before),
+            "SELECT DISTINCT g.venue AS venue FROM games g "
+            "JOIN entity_match_decisions d ON d.matched_entity_id = g.game_id "
+            "WHERE g.home_team_id = ? AND g.is_neutral_site = 0 AND g.venue IS NOT NULL "
+            "AND g.scheduled_start < ? "
+            "AND d.entity_type = 'game' AND d.outcome = 'accepted' "
+            "AND d.method <> ? AND d.decided_at <= ?",
+            (home_team_id, before_start, TIER_SCHEDULE_SWAPPED, cutoff),
         ).fetchall()
         zones: set[str] = set()
         for r in rows:
@@ -792,18 +855,28 @@ class MatchGamesService:
     ) -> None:
         # Links the reference to the exact decision created by THIS attempt --
         # never an unconstrained "latest decision" lookup that a same-timestamp
-        # sibling could win.
+        # sibling could win. Errors are NOT blanket-swallowed: a genuinely absent
+        # crosswalk row is an explicit, checked skip (the canonical id is still
+        # used directly for the game), while a conflicting link is blocking and any
+        # real repository/constraint failure propagates to command failure.
         if self._dry_run or res.entity_id is None or decision_id is None:
             return
-        try:
-            _ref, outcome = self._refs.link_canonical(
-                kind=kind, provider=provider, provider_entity_id=provider_entity_id,
-                canonical_id=res.entity_id, match_decision_id=decision_id,
-            )
-        except Exception:  # noqa: BLE001 - a missing reference is not linkable; skip.
+        if self._refs.get(kind, provider, provider_entity_id) is None:
+            # No provider crosswalk row for this team/venue (optional for game
+            # canonicalization) -- nothing to link, and never a silent catch.
             return
+        _ref, outcome = self._refs.link_canonical(
+            kind=kind, provider=provider, provider_entity_id=provider_entity_id,
+            canonical_id=res.entity_id, match_decision_id=decision_id,
+        )
         if outcome == LinkOutcome.LINKED:
             result.counters.provider_references_linked += 1
+        elif outcome == LinkOutcome.CONFLICT:
+            self._dq_issue(
+                result, severity="blocking", rule_code="DQ-MATCH-016", entity_type=kind,
+                entity_id=provider_entity_id, provider=provider,
+                description=f"provider {kind} already linked to a different canonical entity",
+            )
 
     def _link_game_reference(
         self, provider: str, provider_game_id: str, game_id: str,

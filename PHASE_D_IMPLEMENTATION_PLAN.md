@@ -925,6 +925,24 @@ Model column = recommended driver.
 > `provider_*_references.*_id` link is not by itself PIT-safe (Phase E must consult
 > the decision timeline). **D5B (sportsbook `match-markets` + Kalshi market
 > matching) is NOT built; Phase E has not started.**
+>
+> **D5A follow-up repair (season / slate / knowledge-time / link integrity).**
+> Season validity is now **league-specific** (`matching/season.py`): MLB uses the
+> calendar year, NBA uses the BALLDONTLIE start-year convention spanning two
+> calendar years (`[Y-07-01, (Y+1)-06-30]`); the same helper drives roster-team and
+> career-window filtering so they agree. Doubleheader grouping now uses the
+> **resolved venue-local date** (venue tz → provider date → knowledge-bounded home
+> tz → UTC) rather than requiring a provider local date, with a `schedule_id`
+> tie-break on equal `observed_at`. The home-venue tier is bounded by **knowledge
+> time as well as event time**: a prior game contributes only when it has an
+> accepted, non-swapped game decision with `decided_at ≤ the target schedule
+> observation cutoff` — so a game discovered in a later backfill, a later manual
+> approval, or an unreviewed neutral-swapped match cannot shift an earlier game's
+> local date (conservative UTC + `DQ-TZ-001` when nothing qualifies). The generic
+> provider-reference link path **no longer swallows exceptions**: an absent
+> optional crosswalk is an explicit checked skip, a conflicting link is blocking
+> (`DQ-MATCH-016`), and a real repository/constraint failure propagates to command
+> exit 1.
 
 - **Provider:** none (pure compute over ingested data).
 - **Create:** `matching/{__init__,normalize,teams,players,games,markets,decisions,

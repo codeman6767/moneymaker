@@ -28,6 +28,7 @@ from ..db.repositories.matching import CandidateInput, SqliteMatchingRepository
 from ..db.repositories.references import LinkOutcome, SqliteProviderReferenceRepository
 from .model import MATCHER_VERSION, THRESHOLD, Resolution
 from .players import PlayerResolver
+from .season import league_code_from_id, season_bounds
 from .service import _PROVIDER_LEAGUE, MatchCounters
 
 
@@ -92,7 +93,7 @@ class MatchPlayersService:
         self, provider: str, provider_player_id: str, league_id: str,
         season_year: Optional[int], result: MatchPlayersResult,
     ) -> None:
-        team_id = self._roster_team(provider, provider_player_id, season_year)
+        team_id = self._roster_team(provider, provider_player_id, league_id, season_year)
         res = self._resolver.resolve(
             provider=provider, provider_player_id=provider_player_id, league_id=league_id,
             team_id=team_id, season_year=season_year,
@@ -127,16 +128,19 @@ class MatchPlayersService:
         return [str(r["provider_player_id"]) for r in self._conn.execute(sql, tuple(params))]
 
     def _roster_team(
-        self, provider: str, provider_player_id: str, season_year: Optional[int]
+        self, provider: str, provider_player_id: str, league_id: str,
+        season_year: Optional[int],
     ) -> Optional[str]:
         """The canonical team the provider player is on, as season-valid evidence.
 
         When ``--season`` is supplied, only roster observations dated within that
-        season are considered, so a traded player's newest team cannot resolve an
-        earlier-season reference. If the season's rosters name **more than one**
-        distinct team (a genuine mid-season conflict), ``None`` is returned so the
-        team tier is omitted rather than chosen by row order. Absence from any
-        roster returns ``None`` (never evidence against the player).
+        league's season *interval* are considered (MLB calendar year; NBA
+        July-to-June, spanning two calendar years -- see ``season.season_bounds``),
+        so a traded player's newer team cannot resolve an earlier-season reference.
+        If the season's rosters name **more than one** distinct team (a genuine
+        mid-season conflict), ``None`` is returned so the team tier is omitted
+        rather than chosen by row order. Absence from any roster returns ``None``
+        (never evidence against the player).
         """
 
         sql = (
@@ -146,8 +150,9 @@ class MatchPlayersService:
         )
         params: list[object] = [provider, provider_player_id]
         if season_year is not None:
-            sql += " AND rs.roster_date LIKE ?"
-            params.append(f"{season_year}-%")
+            lo, hi = season_bounds(league_code_from_id(league_id), season_year)
+            sql += " AND rs.roster_date IS NOT NULL AND rs.roster_date >= ? AND rs.roster_date <= ?"
+            params.extend((lo, hi))
         teams = sorted({str(r["team_id"]) for r in self._conn.execute(sql, tuple(params))})
         return teams[0] if len(teams) == 1 else None
 

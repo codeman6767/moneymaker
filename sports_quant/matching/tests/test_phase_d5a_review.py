@@ -161,8 +161,8 @@ def test_dh_number_order_independent_100_shuffles(tmp_path: Path) -> None:
             for pgid in rng.sample(ids, len(ids)):  # shuffled query order
                 num = svc._slate_game_number(
                     provider=MLB, provider_home_pid="101", provider_away_pid="102",
-                    provider_local_date="2026-07-25", provider_game_id=pgid,
-                    schedule_game_number=None)
+                    provider_game_id=pgid, target_local_date="2026-07-25",
+                    home_team_id="tm_mlb_thm", schedule_game_number=None)
                 assert num == expected[pgid]
 
 

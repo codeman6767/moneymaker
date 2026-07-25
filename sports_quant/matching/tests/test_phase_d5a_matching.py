@@ -405,7 +405,15 @@ def _create_canonical(
     conn: sqlite3.Connection, *, league_code: str, home_team_id: str, away_team_id: str,
     scheduled_start: str, game_date_local: str, official_provider=None, official_game_key=None,
     is_neutral_site: bool = False, game_number: int = 1,
+    decided_at: str = "2020-01-01T00:00:00.000000Z", decision_method: str = "official_key_exact",
 ) -> str:
+    """Create a canonical game plus a supporting accepted game decision.
+
+    The decision's ``decided_at`` (and ``method``) let a test control whether this
+    prior game qualifies as knowledge-time-bounded home-venue evidence.
+    """
+
+    from sports_quant.db.ids import new_match_decision_id
     from sports_quant.db.repositories.leagues import SqliteSeasonRepository
 
     lg = f"lg_{league_code.lower()}"
@@ -420,6 +428,17 @@ def _create_canonical(
             game_date_local=game_date_local, game_number=game_number,
             is_neutral_site=is_neutral_site, official_provider=official_provider,
             official_game_key=official_game_key,
+        )
+        conn.execute(
+            "INSERT INTO entity_match_decisions (match_id, entity_type, source_provider, "
+            "source_ref, matched_entity_id, outcome, method, score, threshold, matcher_version, "
+            "decided_at, created_at) VALUES (?, 'game', ?, ?, ?, 'accepted', ?, 1.0, 0.85, 'v', "
+            "?, ?)",
+            (
+                new_match_decision_id(), official_provider or "seed",
+                official_game_key or game.game_id, game.game_id, decision_method,
+                decided_at, decided_at,
+            ),
         )
     return game.game_id
 
