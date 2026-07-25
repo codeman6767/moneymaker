@@ -69,11 +69,15 @@ to explicit documented endpoints.
 **D1 is complete; D2 MLB ingestion code is complete and its controlled live gate
 passed on July 24, 2026. D3 NBA ingestion code and its mocked/offline correctness
 repair are complete at schema v13 (migrations `d012_nba_specifics` +
-`d013_nba_typed_repairs`); the live BALLDONTLIE GOAT capability audit and bounded
-dry-run smoke test have not yet been performed, and no persisted NBA ingestion or
-historical NBA backfill has been performed. D4–D5 have not started. The live MLB
-provider audit and bounded dry-run smoke test succeeded, but no persisted MLB
-ingestion or historical backfill has been performed.** D2 ingests the MLB StatsAPI schedule, box scores, line
+`d013_nba_typed_repairs`), and its controlled live BALLDONTLIE GOAT capability
+audit + bounded dry-run smoke tests passed on July 24, 2026 (audit
+`run_01KYB91H2DHG0SKJDMAV2SN88M`: exit 0, authenticated, 9 GET-only probes, 11
+observed capabilities; one completed-game `ingest-nba --dry-run` and one current
+`ingest-injuries --dry-run`, both persisting nothing and never creating their
+isolated database). No persisted NBA ingestion or historical NBA backfill has been
+performed. D4–D5 have not started. The live MLB provider audit and bounded dry-run
+smoke test succeeded, but no persisted MLB ingestion or historical backfill has
+been performed.** D2 ingests the MLB StatsAPI schedule, box scores, line
 scores, probable pitchers, posted lineups, and **date-aware rosters** into
 append-only, transition-aware official-observation tables (migration `d011`,
 schema v11), anchored on `provider_game_references` with provider player/team
@@ -634,9 +638,13 @@ is never miscounted as a new insert.
 > infrastructure and D2 MLB ingestion code complete (schema v11), and the D2
 > controlled live gate passed on July 24, 2026. D3 NBA ingestion code + its
 > mocked/offline correctness repair are complete at schema v13 (`d012_nba_specifics`
-> + `d013_nba_typed_repairs`); the live BALLDONTLIE GOAT audit and bounded dry-run
-> smoke test have not yet been performed, no persisted NBA ingestion/backfill has
-> occurred, and D4–D5 have not started. The controlled live MLB StatsAPI provider
+> + `d013_nba_typed_repairs`), and its controlled live BALLDONTLIE GOAT audit +
+> bounded dry-run smoke tests passed on July 24, 2026 (audit
+> `run_01KYB91H2DHG0SKJDMAV2SN88M`: exit 0, authenticated, 9 GET-only probes, 11
+> observed capabilities; completed-game `ingest-nba --dry-run` and current
+> `ingest-injuries --dry-run` both persisted nothing and never created their
+> isolated database); no persisted NBA ingestion/backfill has occurred, and D4–D5
+> have not started. The controlled live MLB StatsAPI provider
 > audit and bounded dry-run smoke test succeeded, but no persisted MLB ingestion
 > or historical backfill has been performed.** The authoritative, up-to-date
 > Phase D plan lives in two dedicated documents —

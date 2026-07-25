@@ -6,10 +6,14 @@ canonical matching.
 > **Status: Phase D2 MLB ingestion code complete and its controlled live gate
 > passed on July 24, 2026. D3 NBA ingestion code is complete and correctness-
 > repaired against mocked BALLDONTLIE GOAT contracts and offline hoopR fixtures
-> (schema v13, migrations `d012_nba_specifics` + `d013_nba_typed_repairs`); the
-> live BALLDONTLIE GOAT capability audit and bounded dry-run smoke test have NOT
-> yet been performed, and no persisted NBA ingestion or historical backfill has
-> been performed. D4–D5 not started.** D1 (schema v10) built the
+> (schema v13, migrations `d012_nba_specifics` + `d013_nba_typed_repairs`), and
+> its controlled live BALLDONTLIE GOAT capability audit + bounded dry-run smoke
+> tests passed on July 24, 2026 (audit `run_01KYB91H2DHG0SKJDMAV2SN88M`: exit 0,
+> authenticated, 9 GET-only probes, 11 observed capabilities; one completed-game
+> `ingest-nba --dry-run` and one current `ingest-injuries --dry-run`, both
+> persisting nothing and never creating their isolated database). No persisted NBA
+> ingestion or historical NBA backfill has been performed. D4–D5 not started.** D1
+> (schema v10) built the
 > typed provider-capability system, the four provider clients over a shared
 > GET-only base, the tightened `http_policy` allow-lists, and the evidence-backed
 > dependency-aware `provider-audit` + `ingest-venues` CLI. **D2 (migration
@@ -664,9 +668,31 @@ Model column = recommended driver.
 > matching, preserved exact injury return estimates, and made `pyarrow` a clean
 > optional dependency so the standard CI suite collects and runs without it. The
 > optional PDF injury cross-check and the SportsDataIO comparison stub were
-> deliberately **not** built (out of scope for this pass). **The live BALLDONTLIE
-> GOAT capability audit and bounded dry-run smoke test have not yet been performed;
-> no persisted NBA ingestion or historical backfill has been performed.**
+> deliberately **not** built (out of scope for this pass).
+>
+> **Controlled live gate (2026-07-24): PASSED.** The live BALLDONTLIE GOAT
+> capability audit and bounded Phase D3 dry-run smoke tests completed successfully.
+> The audit (`run_01KYB91H2DHG0SKJDMAV2SN88M`) exited 0 (`succeeded`, authenticated,
+> tier `goat`), issued 9 GET-only probes (all HTTP 200, endpoints sanitized, no
+> query string/secret stored), and recorded 11 observed capabilities — each with
+> exact raw-response evidence — plus 9 declared-only; `confirmed_pregame_starters`
+> and `substitutions` remained **not observed** (no over-inference from lineup/play
+> access), and it wrote no NBA observation rows. The NBA smoke test was restricted
+> to one completed provider game (id `874129`, official date 1946-11-01, NYK @ HUS,
+> Final) selected from the games-probe evidence, and exercised the results, box
+> score, and traditional player-statistics paths with live data (1 schedule, 1
+> result, 2 team-stat, 22 player-stat observations, 0 corrections, box matched by
+> its `(date, home, visitor)` key with 0 rejections). The advanced-statistics,
+> quarter, plays, and best-effort lineup paths executed but returned **zero rows**
+> because the only completed game in the games-probe evidence is the earliest game
+> in provider history (consistent with `historical_depth = provider_history_limited`),
+> which supplies no supported advanced/period/play/lineup structure — an honest
+> zero, not a normalization failure (0 rejections, 0 data-quality notes, 0 active
+> failures). A separate current-injury dry run normalized 151 live injuries (each
+> keeping its provider player identity, 0 rejections). Both dry runs persisted
+> nothing (`run_id` null, 0 rows), did not create their isolated database, and left
+> every corpus NBA table at 0. **No persisted NBA ingestion or historical NBA
+> backfill has been performed.**
 
 - **Provider:** **BALLDONTLIE GOAT** (`NBA_DATA_API_KEY`). **Required tier: GOAT.**
   **Offline supplement:** **hoopR** via a typed Parquet import boundary (historical
