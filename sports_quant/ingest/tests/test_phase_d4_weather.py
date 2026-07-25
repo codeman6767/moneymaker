@@ -1105,11 +1105,28 @@ async def test_normalization_notes_persisted_with_provenance(db: Database) -> No
 
 
 # --------------------------------------------------------------------------- #
-# REPAIR: per-response provider identity during fallback
+# NWS fallback classification -- ONLY a /points geographic 404 falls back
 # --------------------------------------------------------------------------- #
-async def test_nws_discovery_keeps_provider_after_fallback(db: Database) -> None:
-    # /points succeeds (nws); the returned hourly URL 404s (geographic) -> Open-Meteo
-    # fallback. The point response must stay `nws`; weather rows use `open_meteo`.
+async def test_points_geographic_404_falls_back(db: Database) -> None:
+    # A /points 404 genuinely proves the coordinate is outside NWS coverage.
+    seed_game(db, country="USA")
+    r = await _run(db, make_clients(nws_handler=default_nws_handler(point_status=404)),
+                   mode="forecast")
+    assert r.provider_fallbacks == 1 and r.active_failures == 0 and r.status == "succeeded"
+    with db.connection() as conn:
+        wx_provider = {x[0] for x in conn.execute(
+            "SELECT DISTINCT provider FROM weather_snapshots")}
+        # The /points 404 response is NOT stored (it raised before append); only the
+        # Open-Meteo fallback response is persisted, and the rows reference it.
+        wx_raw_provider = conn.execute(
+            "SELECT r.provider FROM weather_snapshots w JOIN raw_responses r "
+            "ON w.raw_response_id = r.raw_response_id LIMIT 1").fetchone()[0]
+    assert wx_provider == {"open_meteo"} and wx_raw_provider == "open_meteo"
+
+
+async def test_returned_forecast_url_404_is_active_failure_not_fallback(db: Database) -> None:
+    # /points succeeds; the returned hourly URL 404s. A returned-path 404 is NOT
+    # proof of geographic unavailability -> ACTIVE FAILURE, never a silent fallback.
     def handler(req: httpx.Request) -> httpx.Response:
         p = req.url.path
         if p.startswith("/points/"):
@@ -1119,21 +1136,85 @@ async def test_nws_discovery_keeps_provider_after_fallback(db: Database) -> None
             return httpx.Response(404, json={"detail": "not found"},
                                   headers={"content-type": "application/geo+json"})
         return httpx.Response(200, json={}, headers={"content-type": "application/geo+json"})
-    clients = make_clients(nws_handler=handler)
     seed_game(db, country="USA")
-    r = await _run(db, clients, mode="forecast")
-    assert r.provider_fallbacks == 1 and r.active_failures == 0
+    r = await _run(db, make_clients(nws_handler=handler), mode="forecast")
+    assert r.active_failures == 1 and r.provider_fallbacks == 0 and r.needs_failure_exit
+    assert _count(db, "weather_snapshots") == 0
     with db.connection() as conn:
+        # The successful /points response keeps its NWS provider identity.
         points = conn.execute(
             "SELECT provider FROM raw_responses WHERE endpoint LIKE '/points/%'").fetchall()
-        wx_provider = {x[0] for x in conn.execute(
-            "SELECT DISTINCT provider FROM weather_snapshots")}
-        wx_raw_provider = conn.execute(
-            "SELECT r.provider FROM weather_snapshots w JOIN raw_responses r "
-            "ON w.raw_response_id = r.raw_response_id LIMIT 1").fetchone()[0]
-    assert all(p[0] == "nws" for p in points)  # discovery response stays NWS
-    assert wx_provider == {"open_meteo"}       # weather rows are Open-Meteo
-    assert wx_raw_provider == "open_meteo"     # and reference the OM response
+    assert points and all(p[0] == "nws" for p in points)
+
+
+async def test_station_list_404_is_active_failure_not_fallback(db: Database) -> None:
+    def handler(req: httpx.Request) -> httpx.Response:
+        p = req.url.path
+        if p.startswith("/points/"):
+            return httpx.Response(200, json=nws_point(),
+                                  headers={"content-type": "application/geo+json"})
+        if p.endswith("/stations"):
+            return httpx.Response(404, json={"detail": "not found"},
+                                  headers={"content-type": "application/geo+json"})
+        return httpx.Response(200, json={}, headers={"content-type": "application/geo+json"})
+    seed_game(db, country="USA")
+    r = await _run(db, make_clients(nws_handler=handler), mode="actual")
+    assert r.active_failures == 1 and r.provider_fallbacks == 0
+    assert _count(db, "weather_snapshots") == 0
+
+
+async def test_station_observations_404_is_active_failure_not_fallback(db: Database) -> None:
+    def handler(req: httpx.Request) -> httpx.Response:
+        p = req.url.path
+        if p.startswith("/points/"):
+            return httpx.Response(200, json=nws_point(),
+                                  headers={"content-type": "application/geo+json"})
+        if p.endswith("/stations"):
+            return httpx.Response(200, json=nws_stations(),
+                                  headers={"content-type": "application/geo+json"})
+        if "/observations" in p:
+            return httpx.Response(404, json={"detail": "not found"},
+                                  headers={"content-type": "application/geo+json"})
+        return httpx.Response(200, json={}, headers={"content-type": "application/geo+json"})
+    seed_game(db, country="USA")
+    r = await _run(db, make_clients(nws_handler=handler), mode="actual")
+    assert r.active_failures == 1 and r.provider_fallbacks == 0
+    assert _count(db, "weather_snapshots") == 0
+
+
+async def test_disallowed_same_host_returned_path_is_active_failure(db: Database) -> None:
+    # /points returns a same-host but DISALLOWED path -> policy default-deny -> active
+    # failure (a returned path outside the allow-list is a contract/security failure).
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path.startswith("/points/"):
+            return httpx.Response(200, json={"properties": {
+                "forecastHourly": "https://api.weather.gov/alerts/active",  # disallowed path
+                "observationStations": "https://api.weather.gov/gridpoints/BOX/70,76/stations"}},
+                headers={"content-type": "application/geo+json"})
+        return httpx.Response(200, json={}, headers={"content-type": "application/geo+json"})
+    seed_game(db, country="USA")
+    r = await _run(db, make_clients(nws_handler=handler), mode="forecast")
+    assert r.active_failures == 1 and r.provider_fallbacks == 0
+    assert _count(db, "weather_snapshots") == 0
+
+
+async def test_nws_timeout_is_active_failure_not_fallback(db: Database) -> None:
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("simulated network timeout")
+    # A network timeout (retries exhausted) on /points is NOT geographic unavailability.
+    http = build_readonly_client(base_url="https://api.weather.gov",
+                                 policy=ReadOnlyHTTPPolicy.for_nws(),
+                                 inner_transport=httpx.MockTransport(handler))
+    nws = NwsClient(client=http, max_retries=0)  # no retry backoff -> fast, deterministic
+    seed_game(db, country="USA")
+    clients = WeatherClients(
+        nws=nws,
+        om_forecast=_om_client("https://api.open-meteo.com", om_hourly()),
+        om_historical=_om_client("https://historical-forecast-api.open-meteo.com", om_hourly()),
+        om_archive=_om_client("https://archive-api.open-meteo.com", om_hourly()))
+    r = await _run(db, clients, mode="forecast")
+    assert r.active_failures == 1 and r.provider_fallbacks == 0
+    assert _count(db, "weather_snapshots") == 0
 
 
 # --------------------------------------------------------------------------- #

@@ -836,14 +836,19 @@ Model column = recommended driver.
   NULL, preserves the exact value/unit in typed `extra`, and records a
   `DQ-WX-NORM-001` note (other valid fields kept). A wind RANGE (`"5 to 10 mph"`)
   is never collapsed to a scalar (NULL + `extra` + note). Each raw response keeps
-  ITS OWN provider identity, so an NWS discovery response stays `nws` after an
-  Open-Meteo geographic fallback while the derived rows reference the Open-Meteo
-  response. Request counters count actual GETs (`nws_requests`/`open_meteo_requests`/
-  `requests_made` identical in dry-run and persisted mode); `provider_fallbacks`
-  counts events. Missing-metadata skips emit distinct DQ codes
+  ITS OWN provider identity: any successfully-fetched NWS response stays `nws`,
+  while an Open-Meteo fallback response is `open_meteo` and the derived rows
+  reference it. Request counters count actual GETs (`nws_requests`/
+  `open_meteo_requests`/`requests_made` identical in dry-run and persisted mode);
+  `provider_fallbacks` counts events. Missing-metadata skips emit distinct DQ codes
   (`DQ-WX-VENUE/ROOF/COORD/TZ/SCHED-001`) with no provider request; an indoor skip
-  is intentional, not a DQ. Only a genuine NWS geographic 404 falls back; an
-  off-host/invalid returned URL or a 5xx/parse failure stays an active failure.
+  is intentional, not a DQ. **Fallback classification is narrow:** ONLY a
+  `/points/{lat},{lon}` 404 (the one response that genuinely proves the coordinate
+  is outside NWS coverage) triggers the Open-Meteo geographic fallback. A 404 from a
+  returned forecast URL, station list, or station observations, an off-host/
+  disallowed returned URL (SSRF-blocked), and any 5xx/timeout/parser failure are all
+  ACTIVE FAILURES — never silently reclassified as geographic unavailability (which
+  would hide an NWS/endpoint defect).
 - **Expected blockers:** venue coord/roof accuracy; NWS US-only (Toronto → Open-Meteo);
   Open-Meteo historical-forecast API shape.
 

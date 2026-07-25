@@ -25,7 +25,7 @@ accurate insert/update/dedup counters (including a new `ingestion_runs.records_u
 and a single validation path shared by persisted and dry-run ingestion. No
 Kalshi credential, private key, or signing is used anywhere; there is no
 account/balance/position/fill/order column in the schema. The suite passes under
-Ruff and mypy: 1028 passed / 1 skipped locally (optional PyArrow present); under
+Ruff and mypy: 1033 passed / 1 skipped locally (optional PyArrow present); under
 the standard `.[dev]` CI with PyArrow absent only the optional hoopR/PyArrow
 modules skip.
 
@@ -98,9 +98,11 @@ periods 1–4, both sides) where it was 0 before the repair, with 0 rejections a
 data-quality notes; that game was a regulation game (no overtime), so null OT fields
 correctly produced no rows (overtime→period-5 mapping and explicit-zero preservation
 remain covered by the offline unit tests). No persisted NBA ingestion or historical
-NBA backfill has been performed. D4–D5 have not started. The live MLB provider audit and bounded dry-run
-smoke test succeeded, but no persisted MLB ingestion or historical backfill has
-been performed.** D2 ingests the MLB StatsAPI schedule, box scores, line
+NBA backfill has been performed. D4 weather ingestion code + its offline correctness
+review are complete at schema v14 (mocked NWS/Open-Meteo; no live weather audit or
+persisted weather ingestion); D5 has not started. The live MLB provider audit and
+bounded dry-run smoke test succeeded, but no persisted MLB ingestion or historical
+backfill has been performed.** D2 ingests the MLB StatsAPI schedule, box scores, line
 scores, probable pitchers, posted lineups, and **date-aware rosters** into
 append-only, transition-aware official-observation tables (migration `d011`,
 schema v11), anchored on `provider_game_references` with provider player/team

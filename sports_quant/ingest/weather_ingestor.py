@@ -764,36 +764,63 @@ async def _fetch_group(
         fetched.weather_response = resp
         fetched.weather_model = "era5"
 
+    async def _geographic_fallback() -> None:
+        result.provider_fallbacks += 1
+        result.capability_gaps += 1
+        result.note(f"NWS does not cover game {game.provider_game_id} (/points 404); "
+                    "using Open-Meteo")
+        if mode == "forecast":
+            fetched.provider = PROVIDER_OPEN_METEO
+            fetched.weather_kind = "current_forecast"
+            fetched.forecast_mode = "open_meteo_forecast"
+            await _open_meteo_forecast()
+        else:  # actual -> reanalysis
+            fetched.provider = PROVIDER_OPEN_METEO
+            fetched.weather_kind = "reanalysis"
+            fetched.forecast_mode = "open_meteo_archive"
+            await _open_meteo_archive()
+
     try:
-        if surface == "nws_forecast":
+        if surface in ("nws_forecast", "nws_observations"):
+            # STEP 1 -- /points, in ISOLATION. A 404 here is the ONE piece of
+            # evidence that genuinely proves the coordinate is outside NWS coverage,
+            # so ONLY a /points 404 triggers the Open-Meteo geographic fallback.
             _count(PROVIDER_NWS)
-            point = await clients.nws.fetch_point(lat, lon)
+            try:
+                point = await clients.nws.fetch_point(lat, lon)
+            except ProviderError as exc:
+                if exc.kind is ProviderErrorKind.NOT_FOUND:
+                    await _geographic_fallback()
+                    return fetched
+                raise  # any other /points failure is an active failure
             fetched.responses.append((point, PROVIDER_NWS))
-            url = _as_dict(_as_dict(point.data).get("properties")).get("forecastHourly")
-            _count(PROVIDER_NWS)
-            hourly = await clients.nws.fetch_returned_url(url)
-            fetched.responses.append((hourly, PROVIDER_NWS))
-            fetched.weather_response = hourly
-        elif surface == "nws_observations":
-            _count(PROVIDER_NWS)
-            point = await clients.nws.fetch_point(lat, lon)
-            fetched.responses.append((point, PROVIDER_NWS))
-            stations_url = _as_dict(_as_dict(point.data).get("properties")).get(
-                "observationStations")
-            _count(PROVIDER_NWS)
-            stations = await clients.nws.fetch_returned_url(stations_url)
-            fetched.responses.append((stations, PROVIDER_NWS))
-            station_id = nws_station_id_from_list(stations.data)
-            if station_id is None:
-                result.note(f"no NWS observation station for game {game.provider_game_id}")
-                result.capability_gaps += 1
-                return fetched
-            fetched.source_station = station_id
-            _count(PROVIDER_NWS)
-            obs = await clients.nws.fetch_station_observations(
-                station_id, start=_iso_z(req_start), end=_iso_z(req_end))
-            fetched.responses.append((obs, PROVIDER_NWS))
-            fetched.weather_response = obs
+            # STEP 2+ -- returned-URL / station / observation reads. A failure here
+            # (404 on a returned path, off-host/disallowed URL, 5xx, timeout, parse)
+            # is an ACTIVE FAILURE -- never silently reclassified as "NWS does not
+            # cover this location", which would hide an NWS/endpoint defect.
+            if surface == "nws_forecast":
+                url = _as_dict(_as_dict(point.data).get("properties")).get("forecastHourly")
+                _count(PROVIDER_NWS)
+                hourly = await clients.nws.fetch_returned_url(url)
+                fetched.responses.append((hourly, PROVIDER_NWS))
+                fetched.weather_response = hourly
+            else:
+                stations_url = _as_dict(_as_dict(point.data).get("properties")).get(
+                    "observationStations")
+                _count(PROVIDER_NWS)
+                stations = await clients.nws.fetch_returned_url(stations_url)
+                fetched.responses.append((stations, PROVIDER_NWS))
+                station_id = nws_station_id_from_list(stations.data)
+                if station_id is None:
+                    result.note(f"no NWS observation station for game {game.provider_game_id}")
+                    result.capability_gaps += 1
+                    return fetched
+                fetched.source_station = station_id
+                _count(PROVIDER_NWS)
+                obs = await clients.nws.fetch_station_observations(
+                    station_id, start=_iso_z(req_start), end=_iso_z(req_end))
+                fetched.responses.append((obs, PROVIDER_NWS))
+                fetched.weather_response = obs
         elif surface == "om_forecast":
             await _open_meteo_forecast()
         elif surface == "om_archive":
@@ -806,38 +833,7 @@ async def _fetch_group(
             fetched.weather_response = resp
             fetched.weather_model = "best_match"
         return fetched
-    except ProviderError as exc:
-        # ONLY genuine NWS geographic unavailability (a 404, from `/points` or a
-        # returned NWS path NWS does not cover) falls back to Open-Meteo. An
-        # off-host/invalid returned URL is `UNSUPPORTED` and a 5xx/network/parser
-        # failure is its own kind -- both stay ACTIVE FAILURES, never a fallback.
-        # Any NWS discovery responses already collected keep their `nws` provider.
-        if provider == PROVIDER_NWS and exc.kind is ProviderErrorKind.NOT_FOUND:
-            result.provider_fallbacks += 1
-            result.capability_gaps += 1
-            result.note(f"NWS unavailable for game {game.provider_game_id}; using Open-Meteo")
-            try:
-                if mode == "forecast":
-                    fetched.provider = PROVIDER_OPEN_METEO
-                    fetched.weather_kind = "current_forecast"
-                    fetched.forecast_mode = "open_meteo_forecast"
-                    await _open_meteo_forecast()
-                else:  # actual -> reanalysis
-                    fetched.provider = PROVIDER_OPEN_METEO
-                    fetched.weather_kind = "reanalysis"
-                    fetched.forecast_mode = "open_meteo_archive"
-                    await _open_meteo_archive()
-                return fetched
-            except Exception as exc2:  # noqa: BLE001
-                et, msg = sanitize_error(exc2)
-                result.record_active_failure(et, f"fallback {game.provider_game_id}: {msg}")
-                fetched.active_failure = True
-                return fetched
-        et, msg = sanitize_error(exc)
-        result.record_active_failure(et, f"{surface} {game.provider_game_id}: {msg}")
-        fetched.active_failure = True
-        return fetched
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - every remaining failure is active
         et, msg = sanitize_error(exc)
         result.record_active_failure(et, f"{surface} {game.provider_game_id}: {msg}")
         fetched.active_failure = True
