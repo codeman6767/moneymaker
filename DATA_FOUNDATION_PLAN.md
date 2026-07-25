@@ -77,11 +77,14 @@ observed capabilities; one completed-game `ingest-nba --dry-run` and one current
 isolated database). A supplemental modern-game dry run (2026-06-13) live-row-verified
 advanced statistics and plays and confirmed an honest empty lineup response, but
 exposed a quarter-line contract defect (BALLDONTLIE `/v1/box_scores` supplies flat
-`home_qN`/`visitor_qN`/`*_otN` fields, not a nested `periods` array); the parser has
-been repaired to the flat-key contract in mocked/offline form, and the bounded live
-dry run must be re-run to live-verify quarter parsing (quarter parsing is NOT yet
-live-verified). No persisted NBA ingestion or historical NBA backfill has been
-performed. D4–D5 have not started. The live MLB provider audit and bounded dry-run
+`home_qN`/`visitor_qN`/`*_otN` fields, not a nested `periods` array); the parser was
+repaired to the flat-key contract and **live-verified on 2026-07-24** by a repeated
+bounded 2026-06-13 dry run — `quarter_observations` normalized to 8 (regulation
+periods 1–4, both sides) where it was 0 before the repair, with 0 rejections and 0
+data-quality notes; that game was a regulation game (no overtime), so null OT fields
+correctly produced no rows (overtime→period-5 mapping and explicit-zero preservation
+remain covered by the offline unit tests). No persisted NBA ingestion or historical
+NBA backfill has been performed. D4–D5 have not started. The live MLB provider audit and bounded dry-run
 smoke test succeeded, but no persisted MLB ingestion or historical backfill has
 been performed.** D2 ingests the MLB StatsAPI schedule, box scores, line
 scores, probable pitchers, posted lineups, and **date-aware rosters** into

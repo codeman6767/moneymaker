@@ -16,10 +16,14 @@ canonical matching.
 > statistics and plays and confirmed an honest empty lineup response, but exposed a
 > quarter-line contract defect: BALLDONTLIE `/v1/box_scores` supplies per-period
 > scores as flat `home_qN`/`visitor_qN` + `home_otN`/`visitor_otN` fields, not a
-> nested `periods` array — the parser has been repaired to the flat-key contract
-> (mocked/offline), and the bounded live dry run must be re-run to live-verify
-> quarter parsing. No persisted NBA ingestion or historical NBA backfill has been
-> performed. D4–D5 not started.** D1
+> nested `periods` array. The parser was repaired to the flat-key contract and
+> **live-verified on 2026-07-24** by a repeated bounded 2026-06-13 dry run:
+> `quarter_observations` normalized to 8 (regulation periods 1–4, both sides) where
+> it was 0 before the repair, with 0 rejections and 0 data-quality notes; that game
+> was a regulation game (no overtime), so null OT fields correctly produced no rows
+> (overtime→period-5 mapping and explicit-zero preservation remain covered by the
+> offline unit tests). No persisted NBA ingestion or historical NBA backfill has
+> been performed. D4–D5 not started.** D1
 > (schema v10) built the
 > typed provider-capability system, the four provider clients over a shared
 > GET-only base, the tightened `http_policy` allow-lists, and the evidence-backed
@@ -714,11 +718,19 @@ Model column = recommended driver.
 > 4+N`, `visitor → away`; explicit 0 preserved, null never coerced to 0, only
 > periods supplied on both sides normalized, one-sided periods rejected with a
 > `DQ-NBA-QTR-001` note, overtime discovered dynamically and ordered numerically
-> with no fabricated gaps), with the dry-run counter sharing the same parser. This
-> repair is verified against mocked/offline contract-shaped fixtures only. **The
-> bounded live dry run must be re-run in a separate task to live-verify quarter
-> parsing; quarter parsing is NOT yet live-verified.** No persisted NBA ingestion or
-> historical NBA backfill has been performed.
+> with no fabricated gaps), with the dry-run counter sharing the same parser.
+>
+> **Quarter-line repair live-verified (2026-07-24).** A repeated bounded 2026-06-13
+> dry run confirmed the fix on live data: `quarter_observations` normalized to **8**
+> (regulation periods 1–4, both sides) where it was **0** before the repair, with 0
+> rejections, 0 data-quality notes, 0 corrections, 0 rows persisted, and no database
+> created; advanced statistics (30) and plays (536) were re-confirmed and lineups
+> again returned an honest empty response. That specific game was a **regulation
+> game (no overtime)**, so the parser correctly emitted no overtime rows for the
+> null `*_otN` fields (no fabrication); the overtime→period-5 mapping and
+> explicit-zero preservation remain covered by the committed offline unit tests
+> (this live game exercised neither). Quarter parsing is now live-verified. **No
+> persisted NBA ingestion or historical NBA backfill has been performed.**
 
 - **Provider:** **BALLDONTLIE GOAT** (`NBA_DATA_API_KEY`). **Required tier: GOAT.**
   **Offline supplement:** **hoopR** via a typed Parquet import boundary (historical
