@@ -3,6 +3,16 @@
 Concrete, staged implementation design for official MLB/NBA data, weather, and
 canonical matching.
 
+> **D4 weather ingestion code is complete at schema version 14 against mocked NWS
+> and Open-Meteo contracts (migration `d014_weather`). NWS is primary for supported
+> US outdoor MLB venues; Open-Meteo covers non-US venues and the explicitly
+> selected historical products. Forecasts, station observations, historical
+> forecasts, and reanalysis are stored as DISTINCT data kinds; indoor/fixed-roof
+> games are skipped without network requests; retractable-roof games are
+> conditionally applicable unless roof-open status is known; historical rows are
+> not automatically point-in-time-safe. No live NWS/Open-Meteo audit, persisted
+> weather ingestion, or weather backfill has been performed. D5 has not started.**
+>
 > **Status: Phase D2 MLB ingestion code complete and its controlled live gate
 > passed on July 24, 2026. D3 NBA ingestion code is complete and correctness-
 > repaired against mocked BALLDONTLIE GOAT contracts and offline hoopR fixtures
@@ -41,7 +51,8 @@ canonical matching.
 > `data_quality_issues`. All tested against mocked, realistic StatsAPI fixtures
 > (no live provider call was made). D3 (NBA ingestion) code + its mocked/offline
 > correctness repair are now complete at schema v13 (see the D3 build note below);
-> D4–D5 (weather ingestion + canonical matching) remain unbuilt. This document is
+> D4 (weather ingestion) code is complete at schema v14 (see the D4 status note);
+> D5 (canonical matching) remains unbuilt. This document is
 > the build contract; providers are chosen in `PHASE_D_PROVIDER_DECISIONS.md`
 > (doc-review date 2026-07-23).
 
@@ -220,7 +231,7 @@ New immutable migrations, one global sequence continuing from `c008` (v8):
 | 011 | `d011_official_games_stats` *(built, D2)* | `game_schedule_snapshots`, `game_result_snapshots`, `mlb_inning_lines`, `team_game_statistics`, `player_game_statistics`, `roster_snapshots`, `probable_pitcher_snapshots`, `lineup_snapshots`, `lineup_players` — all append-only, transition-aware, anchored on `provider_game_references`/`provider_team_references` (no second canonical game/team/player table) |
 | 012 | `d012_nba_specifics` *(built, D3)* | `nba_quarter_lines`, `injury_snapshots`, `play_snapshots` — append-only, transition-aware; anchored on `provider_game_references` (no second canonical game system). GOAT plays / substitutions best-effort; also the offline hoopR play boundary |
 | 013 | `d013_nba_typed_repairs` *(built, D3 repair)* | `nba_game_results` (home/away **points** + **period**), `nba_team_statistics`, `nba_player_statistics` (`stat_group IN ('traditional','advanced')`) — sport-correct NBA storage replacing the earlier baseball-named d011 reuse; plus `injury_snapshots.return_estimate` (exact provider text). MLB tables untouched |
-| 014 | `d014_weather` *(planned)* | `weather_snapshots` |
+| 014 | `d014_weather` *(built, D4)* | `weather_snapshots` — append-only, transition-aware weather observations anchored on `provider_game_references` + the existing `venues`; `weather_kind ∈ {current_forecast, station_observation, historical_forecast, reanalysis}`, `applicability ∈ {applicable, conditional_roof_unknown}`, honest `pit_eligible` (1/0/NULL), canonical units (degC / m·s⁻¹ / mm / % / degrees) |
 
 ### 3.1 Universal columns (every time-sensitive table)
 
@@ -267,8 +278,12 @@ provenance** (`first_raw_response_id` immutable + `current_raw_response_id` /
   provider capability is a `data_quality_issues` record.
 - `play_snapshots` — append-only GOAT plays / substitution events (NBA), or MLB
   play events; supports lineup-stint reconstruction where available.
-- `weather_snapshots` — append-only `is_forecast` + `forecast_for`,
-  temp/wind/precip/humidity, `is_dome`; forecast-vs-actual kept distinct.
+- `weather_snapshots` — append-only observations with a `weather_kind`
+  discriminator (`current_forecast` / `station_observation` / `historical_forecast`
+  / `reanalysis`), canonical-unit temp/apparent/dew/humidity/wind/gust/direction/
+  precip fields, `valid_time` / `forecast_target_time` / `model_reference_time` /
+  `provider_available_at` / `lead_time_seconds`, and an honest `pit_eligible`
+  (1/0/NULL); forecast, observation, and reanalysis are kept strictly distinct.
 - `entity_match_decisions` — decision log (`ENTITY_MATCHING.md` §7); append-only
   except review columns.
 - `match_candidates` — **normalized child** of `entity_match_decisions` (one row
@@ -297,7 +312,7 @@ are stored but never regress current state (deterministic ULID tie-break).
 | Probable→confirmed→scratched pitcher | successive `probable_pitcher_snapshots` (`status`, `superseded_by`) | newest observation |
 | Lineup change / NBA late scratch | new `lineup_snapshots`/`injury_snapshots` observation; prior preserved | newest by `observed_at` |
 | Injury status change | new `injury_snapshots` (reuse `intel.PlayerStatus`); absence ≠ healthy | newest by `observed_at` |
-| Weather forecast change | new `weather_snapshots` (`is_forecast=1`, `forecast_for` fixed, `observed_at` advances) | as-of `observed_at ≤ cutoff` (never the actual) |
+| Weather forecast change | new `weather_snapshots` (`weather_kind=current_forecast`, `valid_time` fixed, `observed_at` advances) | as-of `observed_at ≤ cutoff` **and** `pit_eligible=1` (never a station observation / reanalysis / unproven historical forecast) |
 
 **Older backfill never regresses current metadata** — proven the Phase C c008 way.
 
@@ -777,17 +792,35 @@ Model column = recommended driver.
 
 ### D4 — Weather  ·  model: **Sonnet**
 
+> **Status: code complete at schema v14 (migration `d014_weather`) against mocked
+> NWS + Open-Meteo contracts.** Created `ingest/weather_ingestor.py`
+> (`ingest-weather --forecast|--actual|--historical-forecast`), `db/repositories/weather.py`
+> (append-only transition-aware `SqliteWeatherRepository`), extended the NWS client
+> (point → validated returned forecast/station URLs → station observations, with
+> explicit unit normalization) and the Open-Meteo client (three pinned hosts:
+> current forecast, Historical Forecast API, ERA5 archive), pinned the two new
+> hosts in `config` + `http_policy`, and added `tests/test_phase_d4_weather.py`.
+> **No live NWS/Open-Meteo audit, persisted weather ingestion, or weather backfill
+> has been performed. D5 has not started.**
+
 - **Provider:** **NWS** primary (US, no key); **Open-Meteo** secondary + the
-  leakage-free historical-forecast (no key). **No paid weather key at D1/D4.**
+  historical-forecast/archive (no key). **No paid weather key at D1/D4.** Open-Meteo
+  commercial use is a licensing limitation (documented note), never claimed.
 - **Capabilities:** forecast/actual `supported`; NWS non-US `unavailable` →
   Open-Meteo; commercial Open-Meteo `paid_tier_required` (documented, not used).
 - **Create:** `ingest/weather_ingestor.py`; weather repository; mocked NWS/Open-Meteo
   fixtures + tests.
 - **Modify:** `cli.py` (`ingest-weather`).
 - **Migration:** `d014` (v14). **Tables:** weather_snapshots (venues from d009).
-- **Completion:** forecast + actual persisted distinctly; outdoor-only gating by
-  `venues.roof_type`; leakage-free historical-forecast; dome/indoor skipped;
-  non-US → Open-Meteo; idempotent; append-only; `--dry-run` persists nothing.
+- **Completion (met, mocked/offline):** forecast + actual + historical-forecast +
+  reanalysis persisted as distinct kinds; outdoor-only gating by `venues.roof_type`
+  (dome/fixed/indoor skipped with no request; retractable conditional, never
+  assumed open); honest NWS→Open-Meteo geographic fallback (a 5xx/parse failure is
+  an active failure, not a fallback); missing venue metadata skipped, never
+  guessed; canonical units with explicit conversion (unknown unit → NULL + note);
+  historical rows carry `pit_eligible` = UNKNOWN with a `DQ-WX-PIT-001` note;
+  request dedup for same venue/date/mode; idempotent; append-only; exact
+  raw-response provenance; `--dry-run` creates no database and persists nothing.
 - **Expected blockers:** venue coord/roof accuracy; NWS US-only (Toronto → Open-Meteo);
   Open-Meteo historical-forecast API shape.
 

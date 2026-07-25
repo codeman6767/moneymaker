@@ -258,6 +258,30 @@ PHASE_D3_REPAIR_TABLES: Final[tuple[str, ...]] = (
     "nba_player_statistics",
 )
 
+#: Tables created by the D4 migration d014_weather. One append-only weather
+#: observation table anchored on `provider_game_references` + the existing `venues`
+#: (no second venue/game system).
+PHASE_D4_TABLES: Final[tuple[str, ...]] = (
+    "weather_snapshots",
+)
+
+#: Kinds of weather observation, kept strictly distinct (mirrors the CHECK in
+#: d014). A forecast is not an observation; reanalysis is not a pregame forecast.
+WEATHER_KINDS: Final[tuple[str, ...]] = (
+    "current_forecast",
+    "station_observation",
+    "historical_forecast",
+    "reanalysis",
+)
+
+#: Whether weather applies to a game's venue at decision time. Indoor/fixed/dome
+#: venues are skipped (never persisted); a retractable roof of unknown status is
+#: recorded conditionally, never assumed open.
+WEATHER_APPLICABILITIES: Final[tuple[str, ...]] = (
+    "applicable",
+    "conditional_roof_unknown",
+)
+
 #: Canonical game statuses an official schedule/result observation maps to. A
 #: superset of GAME_STATUSES with 'warmup' and an explicit 'unknown' -- an
 #: unmapped provider status is recorded as 'unknown' (never guessed final/
@@ -354,6 +378,8 @@ APPEND_ONLY_TABLES: Final[tuple[str, ...]] = (
     "nba_game_results",
     "nba_team_statistics",
     "nba_player_statistics",
+    # Phase D4 (d014): append-only weather observations.
+    "weather_snapshots",
 )
 
 

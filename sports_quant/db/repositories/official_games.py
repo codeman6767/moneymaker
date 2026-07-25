@@ -189,6 +189,57 @@ class SqliteScheduleRepository(Repository):
     def count(self) -> int:
         return self._count("SELECT COUNT(*) FROM game_schedule_snapshots")
 
+    # -- Read helpers (current-state schedule, newest observation per game) ---
+    def latest_for_game_ref(self, game_ref_id: str) -> Optional[sqlite3.Row]:
+        """The newest schedule observation for one game reference, or ``None``."""
+
+        return self._fetch_one(
+            "SELECT * FROM game_schedule_snapshots WHERE game_ref_id = ? "
+            "ORDER BY observed_at DESC, schedule_id DESC LIMIT 1",
+            (game_ref_id,),
+        )
+
+    def latest_for_provider_game(
+        self, provider: str, provider_game_id: str
+    ) -> Optional[sqlite3.Row]:
+        """The newest schedule observation for one provider game id, or ``None``."""
+
+        return self._fetch_one(
+            "SELECT * FROM game_schedule_snapshots WHERE provider = ? AND provider_game_id = ? "
+            "ORDER BY observed_at DESC, schedule_id DESC LIMIT 1",
+            (provider, provider_game_id),
+        )
+
+    def latest_games_in_date_range(
+        self, provider: str, from_date: str, to_date: str
+    ) -> list[sqlite3.Row]:
+        """Newest schedule observation per game whose official local date is in range.
+
+        The range is inclusive. Only the current-state (newest ``observed_at``) row
+        per ``game_ref_id`` is returned, so a rescheduled game contributes once with
+        its latest venue/time -- preserving postponed/rescheduled history in the
+        table while attaching weather to the correct current venue.
+        """
+
+        rows = self._fetch_all(
+            "SELECT s.* FROM game_schedule_snapshots s "
+            "JOIN (SELECT game_ref_id, MAX(observed_at) AS mx FROM game_schedule_snapshots "
+            "      WHERE provider = ? GROUP BY game_ref_id) latest "
+            "  ON s.game_ref_id = latest.game_ref_id AND s.observed_at = latest.mx "
+            "WHERE s.provider = ? AND s.game_date_local >= ? AND s.game_date_local <= ? "
+            "ORDER BY s.game_date_local, s.game_ref_id",
+            (provider, provider, from_date, to_date),
+        )
+        # Collapse any observed_at ties deterministically to one row per game.
+        seen: set[str] = set()
+        unique: list[sqlite3.Row] = []
+        for row in rows:
+            gid = str(row["game_ref_id"])
+            if gid not in seen:
+                seen.add(gid)
+                unique.append(row)
+        return unique
+
 
 class SqliteResultRepository(Repository):
     """Append-only official result observations (with ``is_correction``)."""

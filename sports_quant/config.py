@@ -56,6 +56,13 @@ PRODUCTION_ENVIRONMENT = "production"
 DEFAULT_MLB_STATS_API_BASE_URL = "https://statsapi.mlb.com/api/v1"
 DEFAULT_NWS_BASE_URL = "https://api.weather.gov"
 DEFAULT_OPEN_METEO_BASE_URL = "https://api.open-meteo.com/v1"
+# D4 uses THREE distinct Open-Meteo surfaces on THREE distinct hosts so the
+# product a weather row came from is unambiguous at the host boundary: the current
+# forecast (above), the stitched Historical Forecast API (previous model runs),
+# and the ERA5 reanalysis archive. Each is pinned + validated independently; a
+# reanalysis host can never be reached through the forecast client and vice versa.
+DEFAULT_OPEN_METEO_HISTORICAL_FORECAST_BASE_URL = "https://historical-forecast-api.open-meteo.com/v1"
+DEFAULT_OPEN_METEO_ARCHIVE_BASE_URL = "https://archive-api.open-meteo.com/v1"
 
 # (host, required-path-prefix) each pinned URL must exactly satisfy. The scheme
 # must be https and no port may be supplied (default 443).
@@ -63,6 +70,8 @@ _PINNED_URL_SPECS: dict[str, tuple[str, str]] = {
     "mlb_stats_api_base_url": ("statsapi.mlb.com", "/api/v1"),
     "nws_base_url": ("api.weather.gov", ""),
     "open_meteo_base_url": ("api.open-meteo.com", "/v1"),
+    "open_meteo_historical_forecast_base_url": ("historical-forecast-api.open-meteo.com", "/v1"),
+    "open_meteo_archive_base_url": ("archive-api.open-meteo.com", "/v1"),
 }
 
 # Accepted BALLDONTLIE tiers (mirrors providers.capabilities.BalldontlieTier).
@@ -163,6 +172,10 @@ class Settings(BaseSettings):
     mlb_stats_api_base_url: str = DEFAULT_MLB_STATS_API_BASE_URL
     nws_base_url: str = DEFAULT_NWS_BASE_URL
     open_meteo_base_url: str = DEFAULT_OPEN_METEO_BASE_URL
+    open_meteo_historical_forecast_base_url: str = DEFAULT_OPEN_METEO_HISTORICAL_FORECAST_BASE_URL
+    open_meteo_archive_base_url: str = DEFAULT_OPEN_METEO_ARCHIVE_BASE_URL
+    # A descriptive, contactable NWS User-Agent (a courtesy, not a credential).
+    nws_user_agent: str = "sports-quant/0.1 (read-only research; contact: local)"
 
     # Local historical corpus. Relative paths resolve against the repository
     # root so the value is portable across checkouts.
@@ -208,6 +221,9 @@ class Settings(BaseSettings):
             ("mlb_stats_api_base_url", self.mlb_stats_api_base_url),
             ("nws_base_url", self.nws_base_url),
             ("open_meteo_base_url", self.open_meteo_base_url),
+            ("open_meteo_historical_forecast_base_url",
+             self.open_meteo_historical_forecast_base_url),
+            ("open_meteo_archive_base_url", self.open_meteo_archive_base_url),
         ):
             violation = _pinned_url_violation(field, value)
             if violation is not None:

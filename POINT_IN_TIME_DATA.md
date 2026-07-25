@@ -191,7 +191,7 @@ Phase A landed the temporal foundations these rules rest on. What exists today:
 | Kalshi current-metadata provenance is explicit and traceable | ✅ **Phase C** `c008` — `first_raw_response_id` (creating) vs `current_raw_response_id`/`current_raw_response_hash` (supplied the current values); current pointers move only on a strictly-newer observation |
 | Official results/box/injuries/lineups/probables/weather as-of accessors | ◻ **Phase D (planned)** — every Phase D snapshot table carries `observed_at` (= `raw_responses.received_at`) as the sole cutoff; authoritative-time-per-category table in `PHASE_D_IMPLEMENTATION_PLAN.md` §6 |
 | Match decisions bounded by `decided_at` (DQ-PIT-010) | ◻ **Phase D (planned)** — `entity_match_decisions.decided_at`; historical joins use only `decided_at ≤ cutoff` |
-| Weather forecast-vs-actual kept distinct (leakage vector) | ◻ **Phase D (planned)** — `weather_snapshots.is_forecast` + `forecast_for`; only forecasts with `observed_at ≤ cutoff`, never the actual, in pregame features |
+| Weather forecast-vs-actual kept distinct (leakage vector) | ◧ **D4 built (schema v14)** — `weather_snapshots.weather_kind` separates `current_forecast` / `station_observation` / `historical_forecast` / `reanalysis`; `observed_at` is never backdated to a model-run time; an explicit `pit_eligible` (1/0/NULL) is set (a station observation / reanalysis is never PIT-eligible; a stitched historical forecast whose availability is unproven is `pit_eligible=NULL` + a `DQ-WX-PIT-001` note). Phase E must gate pregame weather features on `weather_kind='current_forecast' AND observed_at ≤ cutoff AND pit_eligible=1` — never on the endpoint of origin, and never a reanalysis/observation row |
 | Full `pit/asof.py`, `pit/dataset.py`, adversarial leak fixtures | ◻ Phase E |
 
 `GameRepository.status_as_of()` is the first working instance of the §3
@@ -382,6 +382,32 @@ decided later is invisible to earlier datasets.
 
 **Test.** Match a sportsbook event at T+1d; build a dataset as of T; assert the
 event is unlinked in that dataset.
+
+---
+
+### DQ-PIT-011 — Weather reanalysis / observation / unproven historical forecast as a pregame feature
+
+**Hazard.** A weather row's *endpoint of origin* does not make it point-in-time
+safe. An ERA5 **reanalysis** row and a **station observation** describe what
+actually happened — using either as a "pregame forecast" leaks the outcome. A
+**stitched historical forecast** retrieved today is not a single issued model run,
+and its availability before a given cutoff cannot be assumed. Backdating
+`observed_at` to a model-run time would silently make any of these look
+prediction-eligible.
+
+**Defence.** `weather_snapshots.weather_kind` keeps the four kinds distinct, and
+`observed_at` always records when *this project* received the response (never a
+provider model-run time). Each row carries an explicit `pit_eligible`:
+`station_observation` and `reanalysis` are always `0`; a `current_forecast` is `1`
+only when it was received at or before first pitch; a `historical_forecast` is
+`NULL` (unknown) with a `DQ-WX-PIT-001` note because availability is unproven.
+Phase E pregame features must select `weather_kind='current_forecast' AND
+observed_at <= cutoff AND pit_eligible=1` — never a reanalysis/observation row, and
+never a `pit_eligible IS NOT 1` forecast.
+
+**Test.** Ingest a reanalysis row and a historical-forecast row; assert
+`pit_eligible` is `0` and `NULL` respectively, and that a pregame-feature query
+filtered on `weather_kind='current_forecast' AND pit_eligible=1` returns neither.
 
 ---
 

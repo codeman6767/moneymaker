@@ -52,7 +52,8 @@ def test_first_run_creates_migrates_and_seeds(db_path: Path) -> None:
     assert "applied migration 011 d011_official_games_stats" in output
     assert "applied migration 012 d012_nba_specifics" in output
     assert "applied migration 013 d013_nba_typed_repairs" in output
-    assert "Schema version: 13" in output
+    assert "applied migration 014 d014_weather" in output
+    assert "Schema version: 14" in output
     assert "MLB: 30 teams (30 new)" in output
     assert "NBA: 30 teams (30 new)" in output
 

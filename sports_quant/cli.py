@@ -50,6 +50,7 @@ from .ingest.provider_audit import (
     declaration_for,
 )
 from .ingest.venues_ingestor import VenueIngestResult, ingest_venues
+from .ingest.weather_ingestor import WeatherClients, WeatherIngestResult, ingest_weather
 from .providers.balldontlie import BalldontlieClient
 from .providers.capabilities import (
     PROVIDER_BALLDONTLIE,
@@ -1306,6 +1307,127 @@ def run_import_hoopr(
     return EXIT_ACTIVE_FAILURE if result.failed else 0
 
 
+# --------------------------------------------------------------------------- #
+# Phase D4: ingest-weather
+# --------------------------------------------------------------------------- #
+def _weather_json(result: WeatherIngestResult) -> dict[str, Any]:
+    keys = (
+        "command", "mode", "dry_run", "status", "run_id", "requests_made",
+        "raw_responses_received", "games_considered", "games_eligible", "outdoor_games",
+        "retractable_conditional_games", "indoor_games_skipped", "games_skipped_missing_venue",
+        "nws_requests", "open_meteo_requests", "provider_fallbacks",
+        "request_groups_deduplicated", "forecast_observations", "station_observations",
+        "historical_forecast_observations", "reanalysis_observations", "observations_normalized",
+        "rows_persisted", "records_inserted", "records_changed", "records_unchanged",
+        "records_rejected", "records_truncated", "data_quality_issues", "capability_gaps",
+        "active_failures", "error_type", "error_message",
+    )
+    payload = {k: getattr(result, k) for k in keys}
+    payload["active_failure"] = result.has_active_failure
+    return payload
+
+
+def _report_weather(result: WeatherIngestResult, out: Printer, *, as_json: bool) -> None:
+    if as_json:
+        out(json.dumps(_weather_json(result), sort_keys=True))
+        return
+    prefix = "[DRY-RUN] " if result.dry_run else ""
+    label = "" if result.dry_run else f" (run {result.run_id})"
+    out(f"{prefix}{result.command} --{result.mode}{label}")
+    if result.status == "failed":
+        out(f"[FAILED ] {result.error_type}: {result.error_message}")
+        return
+    out(
+        f"  games: {result.games_considered} considered, {result.games_eligible} eligible "
+        f"(outdoor {result.outdoor_games}, retractable {result.retractable_conditional_games}, "
+        f"indoor-skipped {result.indoor_games_skipped}, "
+        f"missing-venue {result.games_skipped_missing_venue})"
+    )
+    out(
+        f"  requests: NWS {result.nws_requests}, Open-Meteo {result.open_meteo_requests}, "
+        f"fallbacks {result.provider_fallbacks}, deduped {result.request_groups_deduplicated}"
+    )
+    out(
+        f"  observations: forecast {result.forecast_observations}, station "
+        f"{result.station_observations}, historical-forecast "
+        f"{result.historical_forecast_observations}, reanalysis {result.reanalysis_observations}"
+    )
+    out(
+        f"  persisted {result.rows_persisted} (inserted {result.records_inserted}, changed "
+        f"{result.records_changed}, unchanged {result.records_unchanged}); rejected "
+        f"{result.records_rejected}, DQ {result.data_quality_issues}, capability-gaps "
+        f"{result.capability_gaps}, active-failures {result.active_failures}"
+    )
+    if result.status == "partially_failed":
+        out(f"[PARTIAL] partially_failed ({result.error_type}: {result.error_message})")
+    else:
+        out("[OK     ] succeeded")
+
+
+def _build_weather_clients(settings: Settings) -> WeatherClients:
+    return WeatherClients(
+        nws=NwsClient(base_url=settings.nws_base_url, user_agent=settings.nws_user_agent),
+        om_forecast=OpenMeteoClient(base_url=settings.open_meteo_base_url),
+        om_historical=OpenMeteoClient(
+            base_url=settings.open_meteo_historical_forecast_base_url),
+        om_archive=OpenMeteoClient(base_url=settings.open_meteo_archive_base_url),
+    )
+
+
+def run_ingest_weather(
+    settings: Optional[Settings] = None,
+    *,
+    mode: str,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    game_pk: Optional[int] = None,
+    database_path: Optional[Path] = None,
+    dry_run: bool = False,
+    as_json: bool = False,
+    out: Printer = print,
+    clients: Optional[WeatherClients] = None,
+) -> int:
+    """Ingest weather for MLB games (NWS/Open-Meteo). ``--dry-run`` persists nothing."""
+
+    if settings is None:
+        settings = load_settings()
+    else:
+        settings.enforce_read_only()
+
+    if game_pk is not None and (from_date is not None or to_date is not None):
+        out("[FAILED ] --game-pk cannot be combined with --from/--to")
+        return EXIT_ACTIVE_FAILURE
+    if game_pk is None and from_date is None:
+        out("[FAILED ] one of --from (with optional --to) or --game-pk is required")
+        return EXIT_ACTIVE_FAILURE
+    if from_date is not None and to_date is None:
+        to_date = from_date
+
+    path = database_path if database_path is not None else settings.resolved_database_path()
+    if not dry_run:
+        code = _db_ready_or_exit(path, "weather_snapshots", out)
+        if code is not None:
+            return code
+    database = Database(path)
+
+    owns_clients = clients is None
+
+    async def _run() -> WeatherIngestResult:
+        wx = clients if clients is not None else _build_weather_clients(settings)
+        try:
+            return await ingest_weather(
+                database=database, clients=wx, mode=mode, from_date=from_date,
+                to_date=to_date, game_pk=game_pk, dry_run=dry_run,
+            )
+        finally:
+            if owns_clients:
+                await wx.aclose()
+
+    result = asyncio.run(_run())
+    _report_weather(result, out, as_json=as_json)
+    return EXIT_ACTIVE_FAILURE if result.needs_failure_exit else 0
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     """CLI dispatch.
 
@@ -1502,6 +1624,26 @@ def main(argv: Optional[list[str]] = None) -> int:
     hoopr.add_argument("--dry-run", action="store_true", help="Read + normalize but persist nothing")
     hoopr.add_argument("--json", dest="as_json", action="store_true", help="Machine-readable output")
 
+    weather = sub.add_parser(
+        "ingest-weather", help="Ingest weather for MLB games (NWS primary, Open-Meteo; GET-only)"
+    )
+    weather.add_argument("--from", dest="from_date", default=None, metavar="YYYY-MM-DD")
+    weather.add_argument("--to", dest="to_date", default=None, metavar="YYYY-MM-DD")
+    weather.add_argument("--game-pk", dest="game_pk", type=int, default=None, metavar="PK")
+    wmode = weather.add_mutually_exclusive_group(required=True)
+    wmode.add_argument("--forecast", dest="mode", action="store_const", const="forecast",
+                       help="Current forecast (NWS US outdoor; Open-Meteo otherwise)")
+    wmode.add_argument("--actual", dest="mode", action="store_const", const="actual",
+                       help="Station observations (NWS US) / reanalysis (Open-Meteo)")
+    wmode.add_argument("--historical-forecast", dest="mode", action="store_const",
+                       const="historical-forecast",
+                       help="Open-Meteo stitched historical forecast (PIT eligibility unknown)")
+    weather.add_argument("--db", dest="database_path", type=Path, default=None, metavar="PATH")
+    weather.add_argument("--dry-run", action="store_true",
+                         help="Fetch + normalize but persist nothing")
+    weather.add_argument("--json", dest="as_json", action="store_true",
+                         help="Machine-readable output")
+
     args = parser.parse_args(argv)
 
     if args.command == "provider-audit":
@@ -1590,6 +1732,21 @@ def main(argv: Optional[list[str]] = None) -> int:
                 parquet_path=args.parquet_path,
                 schema=args.schema,
                 schema_version=args.schema_version,
+                database_path=args.database_path,
+                dry_run=args.dry_run,
+                as_json=args.as_json,
+            )
+        except ReadOnlyStartupError as exc:
+            print(str(exc))
+            return 2
+
+    if args.command == "ingest-weather":
+        try:
+            return run_ingest_weather(
+                mode=args.mode,
+                from_date=args.from_date,
+                to_date=args.to_date,
+                game_pk=args.game_pk,
                 database_path=args.database_path,
                 dry_run=args.dry_run,
                 as_json=args.as_json,

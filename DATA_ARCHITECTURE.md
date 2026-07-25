@@ -970,6 +970,14 @@ CREATE TABLE probable_pitchers (
     UNIQUE (game_id, team_id, content_hash)
 );
 
+-- NOTE (as built in migration d014, schema v14): the shipped weather table
+-- supersedes this early sketch. It is anchored on `provider_game_references` +
+-- the canonical `venues` (not `games` directly), and replaces the boolean
+-- `is_forecast`/`forecast_for` with a four-value `weather_kind`
+-- (`current_forecast`/`station_observation`/`historical_forecast`/`reanalysis`)
+-- plus an honest `pit_eligible` (1/0/NULL) and canonical-unit fields. See
+-- `PHASE_D_IMPLEMENTATION_PLAN.md` §3.2 and `POINT_IN_TIME_DATA.md` DQ-PIT-011.
+-- The sketch below is retained for historical design context only.
 CREATE TABLE weather_snapshots (
     snapshot_id      TEXT PRIMARY KEY,
     game_id          TEXT NOT NULL REFERENCES games(game_id),

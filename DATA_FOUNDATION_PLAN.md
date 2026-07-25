@@ -29,6 +29,16 @@ Ruff and mypy: 948 passed / 1 skipped locally (optional PyArrow present), and 94
 passed / 4 skipped under the standard `.[dev]` CI with PyArrow absent (only the
 optional hoopR/PyArrow modules skip).
 
+**D4 weather ingestion code is complete at schema v14 (migration `d014_weather`)
+against mocked NWS and Open-Meteo contracts: NWS is primary for supported US
+outdoor MLB venues, Open-Meteo covers non-US venues and the explicitly selected
+historical products, and forecasts / station observations / historical forecasts /
+reanalysis are stored as distinct kinds; indoor/fixed-roof games are skipped with
+no network request, retractable-roof games are conditionally applicable, and
+historical rows are not automatically point-in-time-safe. No live NWS/Open-Meteo
+audit, persisted weather ingestion, or weather backfill has been performed. D5 has
+not started.**
+
 **Phase D provider selection and implementation design are complete; D1 provider
 infrastructure and D2 MLB ingestion code are complete (schema v11, migration
 `d011_official_games_stats`), and the D2 controlled live gate passed on July 24,
@@ -38,7 +48,8 @@ BALLDONTLIE GOAT contracts and offline hoopR fixtures (schema v13, migrations
 points/period, not runs/innings; NBA stat groups, not batting/pitching); the live
 BALLDONTLIE GOAT capability audit and bounded dry-run smoke test have not yet been
 performed, and no persisted MLB or NBA ingestion or historical backfill has been
-performed. D4–D5 not started.** D2
+performed. D4 weather ingestion code is complete at schema v14 (see the status
+paragraph above); D5 has not started.** D2
 added append-only, transition-aware official-MLB observation tables
 (schedule/result/inning/team+player stats/roster/probable/lineup), the extended
 MLB StatsAPI client (date-ranged schedule with probable/lineup hydration, box
@@ -132,7 +143,7 @@ started.
 | A | Database engine, migrations, core entities, `db-init` | ✅ Complete (schema v3) |
 | B | Raw responses, ingestion runs, sportsbook odds | ✅ Complete (schema v6, incl. `b006` integrity repair) |
 | C | Kalshi public events, markets, books, trades | ✅ Complete (schema v8, incl. `c008` integrity repair) |
-| D | Official providers, weather, canonical matching | ◧ **D1 infra + D2 MLB ingestion complete (schema v11); D2 controlled live gate passed 2026-07-24 (no persisted ingestion/backfill); D3 NBA ingestion code complete + correctness-repaired against mocked BALLDONTLIE GOAT + offline hoopR fixtures (schema v13, `d012_nba_specifics` + `d013_nba_typed_repairs`), live audit/smoke-test not yet performed; D4–D5 not started** |
+| D | Official providers, weather, canonical matching | ◧ **D1 infra + D2 MLB ingestion complete (schema v11); D2 controlled live gate passed 2026-07-24 (no persisted ingestion/backfill); D3 NBA ingestion code complete + correctness-repaired against mocked BALLDONTLIE GOAT + offline hoopR fixtures (schema v13, `d012_nba_specifics` + `d013_nba_typed_repairs`); D4 weather ingestion code complete against mocked NWS + Open-Meteo (schema v14, `d014_weather`), no live weather audit/persisted ingestion; D5 not started** |
 | E | Point-in-time builder, quality rules, leakage tests | ◻ Not started |
 
 Companion documents:
@@ -703,7 +714,10 @@ tables), `d012_nba_specifics` (v12 — D3's `nba_quarter_lines` / `injury_snapsh
 repair: sport-correct `nba_game_results` (points/period), `nba_team_statistics`,
 `nba_player_statistics` (`stat_group`), and `injury_snapshots.return_estimate`;
 NBA data no longer reuses the baseball-named d011 result/box columns, and there is
-no second canonical game system) are applied. Planned next: `d014_weather` (v14).
+no second canonical game system), and `d014_weather` (v14 — D4's append-only
+`weather_snapshots`, anchored on `provider_game_references` + `venues`, with the
+distinct `weather_kind` discriminator and honest `pit_eligible`) are applied.
+Planned next: D5 canonical matching (no new migration required).
 Migration numbers are a single global
 forward-only sequence. No second canonical-game
 table: official ids attach to the existing

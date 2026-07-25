@@ -218,6 +218,8 @@ def nws_host_rule(host: str = "api.weather.gov") -> HostRule:
             re.compile(r"/gridpoints/[^/]+/[0-9]+,[0-9]+/?"),
             re.compile(r"/gridpoints/[^/]+/[0-9]+,[0-9]+/forecast/?"),
             re.compile(r"/gridpoints/[^/]+/[0-9]+,[0-9]+/forecast/hourly/?"),
+            # D4 station discovery for a gridpoint, then that station's observations.
+            re.compile(r"/gridpoints/[^/]+/[0-9]+,[0-9]+/stations/?"),
             re.compile(r"/stations/[^/]+/observations/?"),
             re.compile(r"/stations/[^/]+/observations/[^/]+/?"),
         ),
@@ -225,15 +227,34 @@ def nws_host_rule(host: str = "api.weather.gov") -> HostRule:
 
 
 def open_meteo_host_rule(host: str = "api.open-meteo.com") -> HostRule:
-    """Open-Meteo allow-list (forecast + archive + previous-runs)."""
+    """Open-Meteo current-forecast allow-list (api.open-meteo.com)."""
 
     return HostRule(
         host=host,
         forbidden_segments=FORBIDDEN_PROVIDER_SEGMENTS,
-        allowed_patterns=(
-            re.compile(r"/v1/forecast/?"),
-            re.compile(r"/v1/archive/?"),
-        ),
+        allowed_patterns=(re.compile(r"/v1/forecast/?"),),
+    )
+
+
+def open_meteo_historical_forecast_host_rule(
+    host: str = "historical-forecast-api.open-meteo.com",
+) -> HostRule:
+    """Open-Meteo Historical Forecast API allow-list (stitched previous runs)."""
+
+    return HostRule(
+        host=host,
+        forbidden_segments=FORBIDDEN_PROVIDER_SEGMENTS,
+        allowed_patterns=(re.compile(r"/v1/forecast/?"),),
+    )
+
+
+def open_meteo_archive_host_rule(host: str = "archive-api.open-meteo.com") -> HostRule:
+    """Open-Meteo ERA5 reanalysis archive allow-list (archive-api)."""
+
+    return HostRule(
+        host=host,
+        forbidden_segments=FORBIDDEN_PROVIDER_SEGMENTS,
+        allowed_patterns=(re.compile(r"/v1/archive/?"),),
     )
 
 
@@ -266,6 +287,23 @@ class ReadOnlyHTTPPolicy:
     @classmethod
     def for_open_meteo(cls, host: str = "api.open-meteo.com") -> "ReadOnlyHTTPPolicy":
         return cls([open_meteo_host_rule(host)])
+
+    @classmethod
+    def for_open_meteo_all(cls) -> "ReadOnlyHTTPPolicy":
+        """Policy covering all three pinned Open-Meteo surfaces/hosts.
+
+        A single client instance is still bound to one ``base_url`` (one host), so
+        it can only reach that host; this policy simply lets the same client class
+        back any of the three D4 surfaces (current forecast / historical forecast /
+        reanalysis archive) without a per-host branch, while every other host stays
+        default-denied.
+        """
+
+        return cls([
+            open_meteo_host_rule(),
+            open_meteo_historical_forecast_host_rule(),
+            open_meteo_archive_host_rule(),
+        ])
 
     def enforce(self, method: str, url: httpx.URL | str) -> None:
         """Raise :class:`ReadOnlyPolicyError` unless the request is permitted."""

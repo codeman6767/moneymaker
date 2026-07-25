@@ -92,6 +92,9 @@ NBA_RESULT_PREFIX: Final = "nbr_"
 NBA_TEAM_STAT_PREFIX: Final = "nts_"
 NBA_PLAYER_STAT_PREFIX: Final = "nps_"
 
+# Phase D4 (d014): weather observations.
+WEATHER_SNAPSHOT_PREFIX: Final = "wx_"
+
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
 
 
@@ -357,3 +360,8 @@ def new_nba_team_stat_id() -> str:
 
 def new_nba_player_stat_id() -> str:
     return prefixed_id(NBA_PLAYER_STAT_PREFIX)
+
+
+# Phase D4 factory.
+def new_weather_snapshot_id() -> str:
+    return prefixed_id(WEATHER_SNAPSHOT_PREFIX)

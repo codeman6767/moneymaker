@@ -35,6 +35,7 @@ EXPECTED_MIGRATIONS = (
     (11, "d011_official_games_stats"),
     (12, "d012_nba_specifics"),
     (13, "d013_nba_typed_repairs"),
+    (14, "d014_weather"),
 )
 
 
@@ -283,7 +284,7 @@ def test_migration_003_rebuild_preserves_existing_history_rows(tmp_path: Path) -
 
     # Now apply the rest: 003 (and b004, which both rebuild game_status_history).
     result = database.migrate()
-    assert [m.version for m in result.applied] == [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+    assert [m.version for m in result.applied] == [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
 
     with database.connection() as conn:
         rows = conn.execute(
@@ -392,7 +393,7 @@ def test_migration_b006_rebuild_preserves_every_price_snapshot(tmp_path: Path) -
     # Apply the remaining migrations (b006 rebuilds the snapshot table; c007
     # adds the Kalshi tables and touches nothing here).
     result = database.migrate()
-    assert [m.version for m in result.applied] == [6, 7, 8, 9, 10, 11, 12, 13]
+    assert [m.version for m in result.applied] == [6, 7, 8, 9, 10, 11, 12, 13, 14]
 
     with database.connection() as conn:
         after = conn.execute(

@@ -232,7 +232,8 @@ async def _run_injuries(db: Database, client: BalldontlieClient, **kwargs: Any) 
 # --------------------------------------------------------------------------- #
 def test_migration_v13_tables_exist(db: Database) -> None:
     with db.connection() as conn:
-        assert conn.execute("SELECT MAX(version) FROM schema_versions").fetchone()[0] == 13
+        # The D3 repair tables are present from v13 onward (schema may be higher).
+        assert conn.execute("SELECT MAX(version) FROM schema_versions").fetchone()[0] >= 13
         names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert {"nba_game_results", "nba_team_statistics", "nba_player_statistics"} <= names
         cols = {r[1] for r in conn.execute("PRAGMA table_info(injury_snapshots)")}

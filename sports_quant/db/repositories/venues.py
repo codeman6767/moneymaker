@@ -166,6 +166,24 @@ class SqliteVenueRepository(Repository):
         )
         return None if row is None else self._to_venue(row)
 
+    def get_by_provider_venue_id(self, provider: str, provider_venue_id: str) -> Optional[Venue]:
+        """Resolve the canonical venue a provider's venue id maps to, via aliases.
+
+        Returns ``None`` when the provider id is unknown **or ambiguous** (bound to
+        more than one canonical venue) -- ambiguity is never resolved to an
+        arbitrary venue, so a caller cannot silently attach weather to the wrong
+        park. Uses the existing ``venue_aliases`` crosswalk (no second system).
+        """
+
+        rows = self._fetch_all(
+            "SELECT DISTINCT venue_id FROM venue_aliases "
+            "WHERE provider = ? AND provider_venue_id = ?",
+            (provider, provider_venue_id),
+        )
+        if len(rows) != 1:
+            return None
+        return self.get(str(rows[0]["venue_id"]))
+
     def count(self) -> int:
         return self._count("SELECT COUNT(*) FROM venues")
 
