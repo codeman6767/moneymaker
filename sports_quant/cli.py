@@ -51,7 +51,7 @@ from .ingest.provider_audit import (
 )
 from .ingest.venues_ingestor import VenueIngestResult, ingest_venues
 from .ingest.weather_ingestor import WeatherClients, WeatherIngestResult, ingest_weather
-from .matching.runner import run_match_games, run_matching_review
+from .matching.runner import run_match_games, run_match_players, run_matching_review
 from .providers.balldontlie import BalldontlieClient
 from .providers.capabilities import (
     PROVIDER_BALLDONTLIE,
@@ -1661,6 +1661,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     matchg.add_argument("--dry-run", action="store_true", help="Compute decisions; persist nothing")
     matchg.add_argument("--json", dest="as_json", action="store_true", help="Machine-readable output")
 
+    matchp = sub.add_parser(
+        "match-players",
+        help="Resolve unresolved MLB/NBA provider-player references to canonical players (local)",
+    )
+    mpscope = matchp.add_mutually_exclusive_group()
+    mpscope.add_argument("--sport", choices=["mlb", "nba"], default=None,
+                         help="Select the official provider by sport")
+    mpscope.add_argument("--provider", choices=["mlb_statsapi", "balldontlie"], default=None,
+                         help="Provider whose player references to resolve")
+    matchp.add_argument("--provider-player-id", dest="provider_player_id", default=None, metavar="ID")
+    matchp.add_argument("--season", type=int, default=None, metavar="YEAR")
+    matchp.add_argument("--db", dest="database_path", type=Path, default=None, metavar="PATH")
+    matchp.add_argument("--dry-run", action="store_true", help="Compute decisions; persist nothing")
+    matchp.add_argument("--json", dest="as_json", action="store_true", help="Machine-readable output")
+
     review = sub.add_parser(
         "matching-review", help="List unresolved/ambiguous match decisions (read-only)"
     )
@@ -1789,6 +1804,21 @@ def main(argv: Optional[list[str]] = None) -> int:
                 from_date=args.from_date,
                 to_date=args.to_date,
                 provider_game_id=args.provider_game_id,
+                database_path=args.database_path,
+                dry_run=args.dry_run,
+                as_json=args.as_json,
+            )
+        except ReadOnlyStartupError as exc:
+            print(str(exc))
+            return 2
+
+    if args.command == "match-players":
+        try:
+            return run_match_players(
+                sport=args.sport,
+                provider=args.provider,
+                provider_player_id=args.provider_player_id,
+                season=args.season,
                 database_path=args.database_path,
                 dry_run=args.dry_run,
                 as_json=args.as_json,

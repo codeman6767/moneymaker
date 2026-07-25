@@ -886,9 +886,25 @@ Model column = recommended driver.
 > 0.85, `needs_manual_review` + `DQ-MATCH-007`). Every attempt records one
 > `entity_match_decisions` row + normalized `match_candidates` (losers kept);
 > provider references link only after acceptance and never regress. Threshold
-> 0.85; matcher version `d5a-1`. `match-games` + `matching-review` CLI are local
-> and network-free. Seasons (empty at ship) are ensured deterministically per
-> (league, year, phase) since `games.season_id` is `NOT NULL`. **D5B (sportsbook
+> 0.85; matcher version `d5a-1`. `match-games`, `match-players`, and
+> `matching-review` CLI are local and network-free. Seasons (empty at ship) are
+> ensured deterministically per (league, year, phase) since `games.season_id` is
+> `NOT NULL`.
+>
+> **D5A completeness repair.** Player matching is now *operational*:
+> `match-players` (+ `MatchPlayersService`) loads unresolved
+> `provider_player_references`, resolves each through `PlayerResolver`, records one
+> decision + candidates, and links `player_id` only on acceptance (dry-run persists
+> nothing; a canonical player is never created from a name). The venue-aware
+> local-date hierarchy now uses its **tier 3**: the canonical home team's ordinary
+> venue tz, derived from its prior non-neutral home games only when unambiguous
+> (never guessed, never replacing an actual/neutral venue; invalid tz refused, not
+> silent UTC). Exact provider-id links (team + player) are **league-scope
+> validated** — a wrong-league crosswalk is a blocking `DQ-MATCH-014`/`DQ-MATCH-015`
+> conflict, not a 1.00 match, and is never auto-repaired. **Schema limitation:**
+> provider player names are not stored structurally, so player resolution keys on
+> the provider id via provider-scoped `player_aliases` + roster-derived team;
+> league scope is provable from `players.league_id`. **D5B (sportsbook
 > `match-markets` + Kalshi market matching) is NOT built; Phase E has not started.**
 
 - **Provider:** none (pure compute over ingested data).

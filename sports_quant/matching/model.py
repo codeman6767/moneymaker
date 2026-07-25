@@ -96,6 +96,11 @@ class Resolution:
     #: True when the winning tier resolved through an ``is_ambiguous`` alias row
     #: (drives DQ-MATCH-006). Only meaningful on an AMBIGUOUS result.
     via_ambiguous_alias: bool = False
+    #: True when an EXISTING exact provider-id link points at a canonical entity
+    #: in the wrong league/sport. A blocking integrity conflict: the crosswalk is
+    #: not silently trusted at 1.00, nor silently repaired (drives DQ-MATCH-014 /
+    #: DQ-MATCH-015 and a ``rejected`` decision).
+    scope_conflict: bool = False
     season_scoped: bool = False
     season_validity_verified: bool = False
 

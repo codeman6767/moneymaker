@@ -25,6 +25,7 @@ from ..db.engine import Database, table_exists, transaction
 from ..db.repositories.ingestion_runs import SqliteIngestionRunRepository
 from ..db.repositories.matching import SqliteMatchingRepository
 from .model import MATCHER_VERSION
+from .players_service import MatchPlayersResult, MatchPlayersService
 from .service import MatchGamesResult, MatchGamesService, resolve_provider_for_sport
 
 Printer = Callable[[str], None]
@@ -167,6 +168,105 @@ def _report(result: MatchGamesResult, provider: str, out: Printer, *, as_json: b
     out(
         f"  canonical games created: {c.canonical_games_created}; "
         f"unchanged: {c.canonical_entities_unchanged}"
+    )
+    out(f"  data-quality: {c.dq_issues} issues ({c.blocking_issues} blocking)")
+    status = "BLOCKED" if result.needs_failure_exit else result.status.upper()
+    out(f"[{status}] {result.status}")
+
+
+def run_match_players(
+    settings: Optional[Settings] = None,
+    *,
+    sport: Optional[str] = None,
+    provider: Optional[str] = None,
+    provider_player_id: Optional[str] = None,
+    season: Optional[int] = None,
+    database_path: Optional[Path] = None,
+    dry_run: bool = False,
+    as_json: bool = False,
+    out: Printer = print,
+) -> int:
+    """Resolve unresolved provider-player references for a bounded local scope."""
+
+    if settings is None:
+        settings = load_settings()
+    else:
+        settings.enforce_read_only()
+
+    resolved_provider = provider or (resolve_provider_for_sport(sport) if sport else None)
+    if resolved_provider is None:
+        out("[FAILED ] one of --sport {mlb,nba} or --provider is required")
+        return EXIT_ACTIVE_FAILURE
+
+    path = database_path if database_path is not None else settings.resolved_database_path()
+    code = _db_ready(path, out)
+    if code is not None:
+        return code
+
+    database = Database(path)
+    with database.connection() as conn:
+        if dry_run:
+            result: MatchPlayersResult = MatchPlayersService(conn, dry_run=True).match_range(
+                provider=resolved_provider, provider_player_id=provider_player_id,
+                season_year=season,
+            )
+        else:
+            try:
+                result = _run_players_persisted(
+                    conn, resolved_provider, provider_player_id, season
+                )
+            except Exception as exc:  # noqa: BLE001 - surface as an active failure, roll back
+                out(f"[FAILED ] {type(exc).__name__}: {exc}")
+                return EXIT_ACTIVE_FAILURE
+
+    _report_players(result, resolved_provider, out, as_json=as_json)
+    return EXIT_ACTIVE_FAILURE if result.needs_failure_exit else 0
+
+
+def _run_players_persisted(
+    conn,  # type: ignore[no-untyped-def]
+    provider: str,
+    provider_player_id: Optional[str],
+    season: Optional[int],
+) -> MatchPlayersResult:
+    runs = SqliteIngestionRunRepository(conn)
+    started = time.monotonic_ns()
+    with transaction(conn):
+        run = runs.start(
+            command="match-players", provider=provider, operation="match",
+            args_json=json.dumps(
+                {"provider_player_id": provider_player_id, "season": season}, sort_keys=True),
+            started_monotonic_ns=started, tool_version=MATCHER_VERSION,
+        )
+        service = MatchPlayersService(conn, dry_run=False, run_id=run.run_id)
+        result = service.match_range(
+            provider=provider, provider_player_id=provider_player_id, season_year=season)
+        runs.complete(
+            run.run_id,
+            status="partially_succeeded" if result.needs_failure_exit else "succeeded",
+            duration_ns=time.monotonic_ns() - started,
+            records_updated=result.counters.provider_references_linked,
+        )
+        result.run_id = run.run_id
+    return result
+
+
+def _report_players(
+    result: MatchPlayersResult, provider: str, out: Printer, *, as_json: bool
+) -> None:
+    if as_json:
+        out(json.dumps({
+            "command": "match-players", "provider": provider, "dry_run": result.dry_run,
+            "status": result.status, "run_id": result.run_id,
+            "references_considered": result.references_considered, **result.counters.as_dict(),
+        }, sort_keys=True))
+        return
+    c = result.counters
+    prefix = "[DRY-RUN] " if result.dry_run else ""
+    out(f"{prefix}match-players [{provider}]: {result.references_considered} references considered")
+    out(
+        f"  decisions: {c.decisions_evaluated} (accepted {c.accepted}, ambiguous {c.ambiguous}, "
+        f"no-candidate {c.no_candidate}, rejected {c.rejected}); linked {c.provider_references_linked}"
     )
     out(f"  data-quality: {c.dq_issues} issues ({c.blocking_issues} blocking)")
     status = "BLOCKED" if result.needs_failure_exit else result.status.upper()

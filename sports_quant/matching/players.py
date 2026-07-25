@@ -71,15 +71,37 @@ class PlayerResolver:
 
         linked = self._linked_player(provider, provider_player_id)
         if linked is not None:
+            linked_id, linked_league = linked
+            if linked_league is not None and linked_league != league_id:
+                return Resolution(
+                    status=UNMATCHED,
+                    method=TIER_EXACT_PROVIDER_ID,
+                    score=0.0,
+                    tier=TIER_EXACT_PROVIDER_ID,
+                    candidates=(
+                        Candidate(
+                            entity_id=linked_id, score=0.0, tier=TIER_EXACT_PROVIDER_ID,
+                            method=TIER_EXACT_PROVIDER_ID,
+                            evidence=f"linked player is in league {linked_league}",
+                        ),
+                    ),
+                    reason=(
+                        f"exact provider link {provider}:{provider_player_id} resolves to player "
+                        f"{linked_id} in league {linked_league}, not requested {league_id}"
+                    ),
+                    needs_review=True,
+                    scope_conflict=True,
+                    season_scoped=season_year is not None,
+                )
             return Resolution(
                 status=MATCHED,
                 method=TIER_EXACT_PROVIDER_ID,
                 score=SCORE_EXACT_PROVIDER_ID,
                 tier=TIER_EXACT_PROVIDER_ID,
-                entity_id=linked,
+                entity_id=linked_id,
                 candidates=(
                     Candidate(
-                        entity_id=linked,
+                        entity_id=linked_id,
                         score=SCORE_EXACT_PROVIDER_ID,
                         tier=TIER_EXACT_PROVIDER_ID,
                         method=TIER_EXACT_PROVIDER_ID,
@@ -171,15 +193,26 @@ class PlayerResolver:
             via_ambiguous_alias=via_ambiguous,
         )
 
-    def _linked_player(self, provider: str, provider_player_id: str) -> Optional[str]:
+    def _linked_player(
+        self, provider: str, provider_player_id: str
+    ) -> Optional[tuple[str, Optional[str]]]:
+        """The linked ``(player_id, league_id)``, or ``None`` when unlinked.
+
+        ``players.league_id`` is the strongest reliable scope the schema proves
+        for a player, so it is what a crosswalk is validated against.
+        """
+
         row = self._conn.execute(
-            "SELECT player_id FROM provider_player_references "
-            "WHERE provider = ? AND provider_player_id = ?",
+            "SELECT ppr.player_id AS player_id, p.league_id AS league_id "
+            "FROM provider_player_references ppr "
+            "LEFT JOIN players p ON ppr.player_id = p.player_id "
+            "WHERE ppr.provider = ? AND ppr.provider_player_id = ?",
             (provider, provider_player_id),
         ).fetchone()
-        if row is None:
+        if row is None or row["player_id"] is None:
             return None
-        return None if row["player_id"] is None else str(row["player_id"])
+        league = None if row["league_id"] is None else str(row["league_id"])
+        return str(row["player_id"]), league
 
     def _name_rows(self, league_id: str, normalized: str) -> list[_PlayerRow]:
         rows = self._conn.execute(

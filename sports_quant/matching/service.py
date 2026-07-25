@@ -227,12 +227,21 @@ class MatchGamesService:
 
         venue = self._resolve_venue(provider, sched, result)
         actual_tz = venue.timezone if venue is not None else None
+        provider_local = _opt(sched, "game_date_local")
+        # Tier 3 (home venue tz) is only consulted -- and only computed -- when
+        # neither the actual event venue tz nor a provider local date is
+        # available, so an actual/neutral venue is never replaced by the home park.
+        home_tz = (
+            self._home_venue_tz(home.entity_id)
+            if actual_tz is None and not provider_local
+            else None
+        )
         try:
             local = resolve_local_date(
                 scheduled_start=_opt(sched, "scheduled_start"),
                 actual_venue_tz=actual_tz,
-                provider_local_date=_opt(sched, "game_date_local"),
-                home_venue_tz=None,
+                provider_local_date=provider_local,
+                home_venue_tz=home_tz,
             )
         except InvalidTimezoneError as exc:
             self._dq_issue(
@@ -295,6 +304,12 @@ class MatchGamesService:
                 result, severity="blocking", rule_code="DQ-MATCH-006", entity_type="team",
                 entity_id=provider_team_id, provider=provider,
                 description="team resolved through an is_ambiguous alias row",
+            )
+        if res.scope_conflict:
+            self._dq_issue(
+                result, severity="blocking", rule_code="DQ-MATCH-014", entity_type="team",
+                entity_id=provider_team_id, provider=provider,
+                description="exact provider team link resolves into the wrong league",
             )
         return res
 
@@ -557,6 +572,29 @@ class MatchGamesService:
             and g.official_provider != self._current_provider
         )
 
+    def _home_venue_tz(self, home_team_id: str) -> Optional[str]:
+        """The canonical home team's ordinary venue timezone, or ``None``.
+
+        Derived only from existing canonical data: the venues of this team's
+        prior NON-neutral home games. A timezone is returned only when those
+        games share exactly one venue timezone -- a team with an ambiguous home
+        history (a relocation) yields ``None`` rather than a guess. Never used to
+        replace an actual/neutral event venue (the caller consults it only when
+        no actual venue tz and no provider local date exist).
+        """
+
+        rows = self._conn.execute(
+            "SELECT DISTINCT venue FROM games "
+            "WHERE home_team_id = ? AND is_neutral_site = 0 AND venue IS NOT NULL",
+            (home_team_id,),
+        ).fetchall()
+        zones: set[str] = set()
+        for r in rows:
+            venue = self._venues.get(str(r["venue"]))
+            if venue is not None and venue.timezone:
+                zones.add(venue.timezone)
+        return next(iter(zones)) if len(zones) == 1 else None
+
     @staticmethod
     def _orientation(game: Game, home_team_id: str, away_team_id: str) -> str:
         if game.home_team_id == home_team_id and game.away_team_id == away_team_id:
@@ -648,9 +686,12 @@ class MatchGamesService:
         self, *, entity_type: str, source_provider: str, source_ref: str,
         resolution: Resolution, result: MatchGamesResult,
     ) -> Optional[str]:
+        # A scope conflict names a candidate but refuses it: a rejection, not a
+        # bare no-candidate.
+        outcome = "rejected" if resolution.scope_conflict else resolution.outcome()
         return self._persist_decision(
             entity_type=entity_type, source_provider=source_provider, source_ref=source_ref,
-            outcome=resolution.outcome(), method=resolution.method, score=resolution.score,
+            outcome=outcome, method=resolution.method, score=resolution.score,
             matched_entity_id=resolution.entity_id,
             candidates=[
                 CandidateInput(

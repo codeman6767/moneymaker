@@ -58,15 +58,39 @@ class TeamResolver:
         # Tier 1 -- the provider id is already linked to a canonical team.
         linked = self._linked_team(provider, provider_team_id)
         if linked is not None:
+            linked_id, linked_league = linked
+            if linked_league is not None and linked_league != league_id:
+                # A crosswalk that resolves into the wrong league is a blocking
+                # integrity conflict, never a confident 1.00 match.
+                return Resolution(
+                    status=UNMATCHED,
+                    method=TIER_EXACT_PROVIDER_ID,
+                    score=0.0,
+                    tier=TIER_EXACT_PROVIDER_ID,
+                    candidates=(
+                        Candidate(
+                            entity_id=linked_id, score=0.0, tier=TIER_EXACT_PROVIDER_ID,
+                            method=TIER_EXACT_PROVIDER_ID,
+                            evidence=f"linked team is in league {linked_league}",
+                        ),
+                    ),
+                    reason=(
+                        f"exact provider link {provider}:{provider_team_id} resolves to team "
+                        f"{linked_id} in league {linked_league}, not requested {league_id}"
+                    ),
+                    needs_review=True,
+                    scope_conflict=True,
+                    season_scoped=season_year is not None,
+                )
             return Resolution(
                 status=MATCHED,
                 method=TIER_EXACT_PROVIDER_ID,
                 score=SCORE_EXACT_PROVIDER_ID,
                 tier=TIER_EXACT_PROVIDER_ID,
-                entity_id=linked,
+                entity_id=linked_id,
                 candidates=(
                     Candidate(
-                        entity_id=linked,
+                        entity_id=linked_id,
                         score=SCORE_EXACT_PROVIDER_ID,
                         tier=TIER_EXACT_PROVIDER_ID,
                         method=TIER_EXACT_PROVIDER_ID,
@@ -132,15 +156,26 @@ class TeamResolver:
         )
 
     # -- internals ----------------------------------------------------------- #
-    def _linked_team(self, provider: str, provider_team_id: str) -> Optional[str]:
+    def _linked_team(
+        self, provider: str, provider_team_id: str
+    ) -> Optional[tuple[str, Optional[str]]]:
+        """The linked ``(team_id, league_id)``, or ``None`` when unlinked.
+
+        Joins ``teams`` so the caller can check the crosswalk stays within the
+        requested league rather than trusting it blindly at 1.00.
+        """
+
         row = self._conn.execute(
-            "SELECT team_id FROM provider_team_references "
-            "WHERE provider = ? AND provider_team_id = ?",
+            "SELECT ptr.team_id AS team_id, t.league_id AS league_id "
+            "FROM provider_team_references ptr "
+            "LEFT JOIN teams t ON ptr.team_id = t.team_id "
+            "WHERE ptr.provider = ? AND ptr.provider_team_id = ?",
             (provider, provider_team_id),
         ).fetchone()
-        if row is None:
+        if row is None or row["team_id"] is None:
             return None
-        return None if row["team_id"] is None else str(row["team_id"])
+        league = None if row["league_id"] is None else str(row["league_id"])
+        return str(row["team_id"]), league
 
     def _alias_rows(self, league_id: str, season_year: Optional[int]) -> list[AliasRow]:
         sql = (

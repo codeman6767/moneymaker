@@ -173,6 +173,37 @@ def seed_venue(
     return venue.venue_id
 
 
+def seed_player_ref(
+    conn: sqlite3.Connection,
+    *,
+    provider: str,
+    provider_player_id: str,
+    observed_at: str = T0,
+) -> str:
+    """Create an UNLINKED provider-player reference (player_id NULL); returns id."""
+
+    rid, rhash = raw_response(conn, marker=f"playerref:{provider}:{provider_player_id}")
+    with transaction(conn):
+        ref, _ = SqliteProviderReferenceRepository(conn).upsert(
+            kind="player", provider=provider, provider_entity_id=provider_player_id,
+            raw_response_id=rid, raw_response_hash=rhash, observed_at=observed_at,
+        )
+    return ref.reference_id
+
+
+def link_player_ref(
+    conn: sqlite3.Connection, *, provider: str, provider_player_id: str, player_id: str,
+) -> None:
+    """Directly link a provider-player reference (test setup for scope checks)."""
+
+    with transaction(conn):
+        conn.execute(
+            "UPDATE provider_player_references SET player_id = ? "
+            "WHERE provider = ? AND provider_player_id = ? AND player_id IS NULL",
+            (player_id, provider, provider_player_id),
+        )
+
+
 def seed_roster(
     conn: sqlite3.Connection,
     *,

@@ -25,7 +25,7 @@ accurate insert/update/dedup counters (including a new `ingestion_runs.records_u
 and a single validation path shared by persisted and dry-run ingestion. No
 Kalshi credential, private key, or signing is used anywhere; there is no
 account/balance/position/fill/order column in the schema. The suite passes under
-Ruff and mypy: 1087 passed / 1 skipped locally (optional PyArrow present); under
+Ruff and mypy: 1107 passed / 1 skipped locally (optional PyArrow present); under
 the standard `.[dev]` CI with PyArrow absent only the optional hoopR/PyArrow
 modules skip.
 
@@ -173,23 +173,34 @@ no persisted weather ingestion or backfill). D5A canonical team/player/venue/off
 | E | Point-in-time builder, quality rules, leakage tests | ◻ Not started |
 
 **D5A — deterministic canonical entity + official-game matching (complete,
-mocked/offline).** D5A canonical team, player, venue, and official-game matching
-is complete using deterministic alias and official-schedule evidence. Official
-MLB and NBA provider-game references can be resolved to the existing canonical
-`games` table with complete `entity_match_decisions` + normalized
-`match_candidates` evidence; there is exactly one canonical game system (no
-second table). Ambiguous or unknown entities are never guessed and require
-review; a canonical entity is never created from a provider name. Venue-aware
-local-date resolution, neutral sites, international games, reschedules,
-suspensions, and doubleheaders are covered by mocked/offline tests; matching uses
-no game score, winner, odds, price, or market probability. Decisions are
-append-only except their review columns and are bounded by `decided_at`
-(DQ-PIT-010) for point-in-time reads. New code: `sports_quant/matching/` (team /
+mocked/offline).** D5A team, player, venue, and official-game resolution is
+operational through bounded, network-free local commands/services. Official MLB
+and NBA provider-game references resolve to the existing canonical `games` table,
+and unresolved `provider_player_references` resolve to canonical `players`, each
+with complete `entity_match_decisions` + normalized `match_candidates` evidence
+and an accepted-only provider-reference link; there is exactly one canonical game
+system (no second table). The full venue-aware local-date hierarchy is actually
+used — actual event venue tz → reliable provider local date → **canonical home
+venue tz (derived from the team's prior non-neutral home games, only when it is
+unambiguous)** → UTC calendar date with `DQ-TZ-001` and reduced confidence; an
+actual/neutral/international venue is never replaced by the home park, and an
+invalid timezone is refused rather than silently treated as UTC. Exact
+provider-id links are **league-scope-validated**: a crosswalk resolving into the
+wrong league is a blocking conflict (`DQ-MATCH-014` team / `DQ-MATCH-015` player),
+never trusted at 1.00 nor silently repaired. Ambiguous or unknown entities are
+never guessed and require review; a canonical entity is never created from a
+provider name; matching uses no game score, winner, odds, price, or market
+probability. Decisions are append-only except their review columns and bounded by
+`decided_at` (DQ-PIT-010). **Schema limitation (not hidden):** provider player
+*names* are not stored in any structured Phase D table (only `provider_player_id`
+is), so player resolution matches the provider identifier through provider-scoped
+`player_aliases` plus roster-derived canonical team membership; league scope is
+provable from `players.league_id`. New code: `sports_quant/matching/` (team /
 player / venue resolvers, venue-aware local date, official-game canonicalizer,
-`match-games` + `matching-review` CLI). No sportsbook-event or Kalshi market
-matching has been implemented (that is **D5B**). No live provider request,
-persisted provider ingestion, or historical backfill was performed; Phase E has
-not started.
+player orchestration, `match-games` / `match-players` / `matching-review` CLI).
+No sportsbook-event or Kalshi market matching has been implemented (that is
+**D5B**). No live provider request, persisted provider ingestion, or historical
+backfill was performed; Phase E has not started.
 
 Companion documents:
 
