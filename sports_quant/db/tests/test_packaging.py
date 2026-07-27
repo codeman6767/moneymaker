@@ -65,11 +65,11 @@ def test_wheel_includes_every_migration_through_d015(built_wheel: tuple[list[str
         n.split("/")[-1] for n in names
         if "/db/migrations/" in n and n.endswith(".sql")
     )
-    assert len(migrations) == 15, migrations
+    assert len(migrations) == 16, migrations
     assert migrations[0] == "a001_core_entities.sql"
     # A representative intermediate migration and the latest one.
     assert "sports_quant/db/migrations/d009_provider_infra.sql" in names
-    assert migrations[-1] == "d015_sportsbook_matching.sql"
+    assert migrations[-1] == "d016_kalshi_matching.sql"
 
 
 def test_wheel_declares_console_entry_point(built_wheel: tuple[list[str], str]) -> None:

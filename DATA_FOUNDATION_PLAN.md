@@ -25,7 +25,7 @@ accurate insert/update/dedup counters (including a new `ingestion_runs.records_u
 and a single validation path shared by persisted and dry-run ingestion. No
 Kalshi credential, private key, or signing is used anywhere; there is no
 account/balance/position/fill/order column in the schema. The suite passes under
-Ruff and mypy: 1251 passed / 1 skipped locally (optional PyArrow present); under
+Ruff and mypy: 1281 passed / 1 skipped locally (optional PyArrow present); under
 the standard `.[dev]` CI with PyArrow absent only the optional hoopR/PyArrow
 modules skip.
 
@@ -36,7 +36,7 @@ exclude list, and declares `sports_quant.db` package-data `migrations/*.sql` so
 the engine loads all fifteen migrations (`a001`..`d015`) from an installed wheel.
 A dedicated CI `wheel-smoke` job builds the wheel, installs it into a clean
 **non-editable** environment, and proves `import sports_quant.matching`, the
-`sports-quant` console script, and `db-init` (twice, schema v15) all resolve from
+`sports-quant` console script, and `db-init` (twice, schema v16) all resolve from
 the wheel — a missing package or migration fails there even when the editable
 `checks` job would pass; a pytest wheel-content test enforces the same in-suite
 (it **fails, never skips**, on a broken build — surfacing the full build output —
@@ -55,7 +55,7 @@ corrupt supporting decision is a blocking rejection with no accepted decision
 new accepted decision. The official-game **create** path pre-checks the provider
 reference before creating any season/game row, so a conflict never leaves an
 orphan canonical game or an inflated `canonical_games_created` counter. Schema
-stays v15; **D5B2 (Kalshi) and Phase E have not started.**
+stays v16 (migration `d016_kalshi_matching`); **Phase E has not started.**
 
 **D4 weather ingestion code is complete at schema v14 (migration `d014_weather`)
 against mocked NWS and Open-Meteo contracts: NWS is primary for supported US
@@ -84,7 +84,7 @@ zero-persistence `--forecast` dry run (2 games, 3 GETs, 10 forecast observations
 0 rejections, 0 DQ notes, 0 active failures, 0 rows persisted; scratch database
 unchanged and removed) have passed; NWS station observations, Open-Meteo historical
 forecasts, and reanalysis remain mocked/offline verified; no persisted weather
-ingestion or weather backfill has occurred. D5A canonical team/player/venue/official-game matching is complete (deterministic alias + official-schedule evidence, mocked/offline); D5B1 sportsbook-event matching is complete (schema v15, migration `d015_sportsbook_matching`, mocked/offline); D5B2 Kalshi event/market matching has not started.** D2
+ingestion or weather backfill has occurred. D5A canonical team/player/venue/official-game matching is complete (deterministic alias + official-schedule evidence, mocked/offline); D5B1 sportsbook-event matching is complete (migration `d015_sportsbook_matching`, mocked/offline); D5B2 Kalshi event + game-winner market matching is complete (schema v16, migration `d016_kalshi_matching`, mocked/offline); Phase E has not started.** D2
 added append-only, transition-aware official-MLB observation tables
 (schedule/result/inning/team+player stats/roster/probable/lineup), the extended
 MLB StatsAPI client (date-ranged schedule with probable/lineup hydration, box
@@ -145,7 +145,7 @@ rows persisted; the scratch database was byte-for-byte unchanged by the dry run 
 was removed after verification. NWS station observations, Open-Meteo historical
 forecasts and Open-Meteo reanalysis remain mocked/offline verified rather than
 live-ingestor verified. No persisted weather ingestion or weather backfill has been
-performed; D5A canonical team/player/venue/official-game matching is complete (deterministic alias + official-schedule evidence, mocked/offline); D5B1 sportsbook-event matching is complete (schema v15, migration `d015_sportsbook_matching`, mocked/offline); D5B2 Kalshi event/market matching has not started. The live MLB provider audit and
+performed; D5A canonical team/player/venue/official-game matching is complete (deterministic alias + official-schedule evidence, mocked/offline); D5B1 sportsbook-event matching is complete (migration `d015_sportsbook_matching`, mocked/offline); D5B2 Kalshi event + game-winner market matching is complete (schema v16, migration `d016_kalshi_matching`, mocked/offline); Phase E has not started. The live MLB provider audit and
 bounded dry-run smoke test succeeded, but no persisted MLB ingestion or historical
 backfill has been performed.** D2 ingests the MLB StatsAPI schedule, box scores, line
 scores, probable pitchers, posted lineups, and **date-aware rosters** into
@@ -190,7 +190,7 @@ parser all passed, and no persisted NBA ingestion/backfill has occurred. D4 weat
 ingestion code is complete at schema v14, and its controlled live NWS/Open-Meteo
 current-forecast audits and bounded zero-persistence dry run passed (station
 observations, historical forecasts, and reanalysis remain mocked/offline verified;
-no persisted weather ingestion or backfill). D5A canonical team/player/venue/official-game matching is complete (deterministic alias + official-schedule evidence, mocked/offline); D5B1 sportsbook-event matching is complete (schema v15, migration `d015_sportsbook_matching`, mocked/offline); D5B2 Kalshi event/market matching has not started.
+no persisted weather ingestion or backfill). D5A canonical team/player/venue/official-game matching is complete (deterministic alias + official-schedule evidence, mocked/offline); D5B1 sportsbook-event matching is complete (migration `d015_sportsbook_matching`, mocked/offline); D5B2 Kalshi event + game-winner market matching is complete (schema v16, migration `d016_kalshi_matching`, mocked/offline); Phase E has not started.
 
 | Phase | Scope | Status |
 | --- | --- | --- |
@@ -247,7 +247,25 @@ spreads / totals outcomes are validated against the accepted orientation and
 unknown/malformed ones surfaced via `DQ-SB-OUTCOME-001` (never dropped or
 rewritten). Every attempt records one append-only decision + candidates;
 `match-games --source sportsbook` is local and network-free; dry-run persists
-nothing. **D5B2 (Kalshi) is not implemented.**
+nothing.
+
+**D5B2 — deterministic Kalshi event + game-winner market matching (complete,
+mocked/offline; migration `d016_kalshi_matching`, schema v16).** Already-ingested
+public MLB/NBA Kalshi events and supported binary game-winner markets resolve to
+canonical `games` via an exact series allowlist (`KXMLBGAME`/`KXNBAGAME`),
+versioned ticker parsing (`matching/kalshi_parse.py`), provider-scoped
+(`kalshi_public`) team aliases, explicit title/`rules_primary` team + Yes-subject
+agreement, and venue-aware canonical schedule evidence — never a price, order-book
+side, trade, volume, `result`, or settlement. d016 adds
+`kalshi_events.match_decision_id` and `kalshi_markets.match_decision_id` +
+`yes_team_id` + `matched_rules_hash` + typed `market_semantic`. Only game-winner
+markets are linked automatically; spreads/totals/props/period/combo markets are
+retained and reported as *unsupported semantics*, never mislabeled. A rules
+change invalidates readiness via a blocking `DQ-MATCH-004`;
+`is_kalshi_market_orientation_approved()` is fail-closed and as-of correct.
+`match-markets` is local/network-free and dry-run persists nothing. **No
+authenticated Kalshi access, account/order surface, live request, or Phase E work
+was performed. Phase E has not started.**
 
 *D5B1 correctness repair:* the resolver season is now league-specific
 (`season_year_for`; NBA Jan–June → previous start year; a naive commence yields
@@ -802,7 +820,7 @@ is never miscounted as a new insert.
 > ingestion is complete at schema v14 (`d014_weather`), and its controlled live
 > NWS/Open-Meteo current-forecast audits and bounded zero-persistence dry run passed
 > (station observations, historical forecasts, and reanalysis remain mocked/offline
-> verified; no persisted weather ingestion/backfill); D5A canonical team/player/venue/official-game matching is complete (deterministic alias + official-schedule evidence, mocked/offline); D5B1 sportsbook-event matching is complete (schema v15, migration `d015_sportsbook_matching`, mocked/offline); D5B2 Kalshi event/market matching has not started. The
+> verified; no persisted weather ingestion/backfill); D5A canonical team/player/venue/official-game matching is complete (deterministic alias + official-schedule evidence, mocked/offline); D5B1 sportsbook-event matching is complete (migration `d015_sportsbook_matching`, mocked/offline); D5B2 Kalshi event + game-winner market matching is complete (schema v16, migration `d016_kalshi_matching`, mocked/offline); Phase E has not started. The
 > controlled live MLB StatsAPI provider
 > audit and bounded dry-run smoke test succeeded, but no persisted MLB ingestion
 > or historical backfill has been performed.** The authoritative, up-to-date

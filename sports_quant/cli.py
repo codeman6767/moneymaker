@@ -51,7 +51,12 @@ from .ingest.provider_audit import (
 )
 from .ingest.venues_ingestor import VenueIngestResult, ingest_venues
 from .ingest.weather_ingestor import WeatherClients, WeatherIngestResult, ingest_weather
-from .matching.runner import run_match_games, run_match_players, run_matching_review
+from .matching.runner import (
+    run_match_games,
+    run_match_markets,
+    run_match_players,
+    run_matching_review,
+)
 from .providers.balldontlie import BalldontlieClient
 from .providers.capabilities import (
     PROVIDER_BALLDONTLIE,
@@ -1682,6 +1687,26 @@ def main(argv: Optional[list[str]] = None) -> int:
     matchp.add_argument("--dry-run", action="store_true", help="Compute decisions; persist nothing")
     matchp.add_argument("--json", dest="as_json", action="store_true", help="Machine-readable output")
 
+    matchm = sub.add_parser(
+        "match-markets",
+        help="Resolve public Kalshi events + game-winner markets to canonical games (local)",
+    )
+    matchm.add_argument("--provider", choices=["kalshi_public"], default="kalshi_public",
+                        help="Public provider whose markets to match")
+    matchm.add_argument("--sport", choices=["mlb", "nba"], default=None,
+                        help="Restrict to a league's supported game series")
+    matchm.add_argument("--series-ticker", dest="series_ticker", default=None, metavar="TICKER",
+                        help="Restrict to one supported series (e.g. KXMLBGAME)")
+    matchm.add_argument("--event-ticker", dest="event_ticker", default=None, metavar="TICKER")
+    matchm.add_argument("--market-ticker", dest="market_ticker", default=None, metavar="TICKER")
+    matchm.add_argument("--from", dest="from_date", default=None, metavar="YYYY-MM-DD")
+    matchm.add_argument("--to", dest="to_date", default=None, metavar="YYYY-MM-DD")
+    matchm.add_argument("--unmatched-only", dest="unmatched_only", action="store_true",
+                        help="Only events/markets not yet linked to a game")
+    matchm.add_argument("--db", dest="database_path", type=Path, default=None, metavar="PATH")
+    matchm.add_argument("--dry-run", action="store_true", help="Compute decisions; persist nothing")
+    matchm.add_argument("--json", dest="as_json", action="store_true", help="Machine-readable output")
+
     review = sub.add_parser(
         "matching-review", help="List unresolved/ambiguous match decisions (read-only)"
     )
@@ -1828,6 +1853,25 @@ def main(argv: Optional[list[str]] = None) -> int:
                 provider=args.provider,
                 provider_player_id=args.provider_player_id,
                 season=args.season,
+                database_path=args.database_path,
+                dry_run=args.dry_run,
+                as_json=args.as_json,
+            )
+        except ReadOnlyStartupError as exc:
+            print(str(exc))
+            return 2
+
+    if args.command == "match-markets":
+        try:
+            return run_match_markets(
+                provider=args.provider,
+                sport=args.sport,
+                series_ticker=args.series_ticker,
+                event_ticker=args.event_ticker,
+                market_ticker=args.market_ticker,
+                from_date=args.from_date,
+                to_date=args.to_date,
+                unmatched_only=args.unmatched_only,
                 database_path=args.database_path,
                 dry_run=args.dry_run,
                 as_json=args.as_json,

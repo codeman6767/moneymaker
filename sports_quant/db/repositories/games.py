@@ -247,6 +247,32 @@ class SqliteGameRepository(Repository):
             )
         ]
 
+    def find_on_local_date(
+        self,
+        *,
+        league_id: str,
+        home_team_id: str,
+        away_team_id: str,
+        game_date_local: str,
+    ) -> list[Game]:
+        """Games with the same orientation on one venue-local slate.
+
+        Date-only canonical evidence (D5B2 Kalshi date matching): the venue-local
+        ``game_date_local`` IS the slate, so this needs no timezone conversion.
+        Deterministically ordered so a caller sees the same first candidate on
+        every rebuild.
+        """
+
+        return [
+            self._to_model(r)
+            for r in self._fetch_all(
+                f"SELECT {self._COLUMNS} FROM games WHERE league_id = ? "
+                "AND home_team_id = ? AND away_team_id = ? AND game_date_local = ? "
+                "ORDER BY scheduled_start, game_number, game_id",
+                (league_id, home_team_id, away_team_id, game_date_local),
+            )
+        ]
+
     # -- Status transitions --------------------------------------------------
     def record_status(
         self,

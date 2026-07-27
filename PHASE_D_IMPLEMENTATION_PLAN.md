@@ -986,8 +986,35 @@ Model column = recommended driver.
 > `DQ-SB-OUTCOME-001` (retained, never dropped). `SqliteSportsbookRepository`
 > gains `link_game`, `list_events_for_matching`, `events_linked_to_game`,
 > `event_link`, `is_orientation_approved` (PIT-aware). CLI: `match-games --source
-> sportsbook`. **D5B2 (Kalshi `match-markets`, ticker/title/rules parsing,
-> `rules_hash`, Yes/No orientation) is NOT built; Phase E has not started.**
+> sportsbook`.
+>
+> **D5B2 — Kalshi event + game-winner market matching (built, mocked/offline;
+> migration `d016_kalshi_matching`, schema v16).** `sports_quant/matching/kalshi.py`
+> + pure versioned parsers in `matching/kalshi_parse.py` resolve public MLB/NBA
+> Kalshi events and supported binary game-winner markets to canonical `games` via
+> an exact series allowlist (`KXMLBGAME`/`KXNBAGAME`), versioned ticker parsing
+> (team codes split against curated `kalshi_public` aliases), explicit
+> title/`rules_primary` team + Yes-subject agreement, and venue-aware canonical
+> schedule tiers (`kalshi_ticker_time` 0.97 with a rules-supplied instant +
+> venue-local slate; `kalshi_date` 0.92 date-only; threshold 0.85). d016 adds
+> `kalshi_events.match_decision_id`; `kalshi_markets.match_decision_id` +
+> `yes_team_id` + `matched_rules_hash` + typed `market_semantic` (only
+> `game_winner`), with link-integrity triggers (set-together; game/Yes-team/
+> matched-hash immutable once set). The Yes team is verified transactionally to be
+> a participant in the linked game. Only game-winner markets link; spreads,
+> totals, props, period, team-total, and combo markets are retained and reported
+> as unsupported semantics (never mislabeled as moneylines). A current
+> `rules_hash` differing from the matched hash raises a blocking `DQ-MATCH-004`,
+> flags the decision for review, and never rewrites the matched hash;
+> `is_kalshi_market_orientation_approved(as_of=…)` is fail-closed and as-of
+> correct. Event/market links are atomic via `matching/linkatomic.py`. Order
+> books, trades, prices, `result`, and settlement are never evidence (SQL-trace
+> tested). New DQ codes: `DQ-KAL-SERIES-001` (supported-series ticker malformed),
+> `DQ-KAL-TITLE-001` (ticker/title disagreement), `DQ-KAL-RULES-001` (ticker/title/
+> rules or Yes-subject disagreement), `DQ-KAL-YES-001` (Yes team not a
+> participant); reuses `DQ-MATCH-003/004/006` and `DQ-TZ-001`. CLI: `match-markets`.
+> **No authenticated Kalshi access or account/order surface. Phase E has not
+> started.**
 >
 > **D5B1 correctness repair (season / local-slate / conflict / outcome / DQ).**
 > Team resolution now uses the league-specific season (`season_year_for`): an NBA

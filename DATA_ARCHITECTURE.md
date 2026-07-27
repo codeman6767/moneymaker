@@ -219,6 +219,7 @@ version 1 and collide. Applied so far:
 | 013 | `d013_nba_typed_repairs` *(Phase D3 — built)* | nba_game_results, nba_team_statistics, nba_player_statistics; injury return-estimate columns |
 | 014 | `d014_weather` *(Phase D4 — built)* | weather_snapshots (schema v14) |
 | 015 | `d015_sportsbook_matching` *(Phase D5B1 — built)* | adds `sportsbook_events.match_decision_id` + typed `orientation` (`direct`/`swapped`) with a link-integrity trigger (set-together, immutable-once-set) — schema v15; no price-history or Kalshi structures touched |
+| 016 | `d016_kalshi_matching` *(Phase D5B2 — built)* | adds `kalshi_events.match_decision_id`; `kalshi_markets.match_decision_id` + `yes_team_id` + `matched_rules_hash` + typed `market_semantic` (`game_winner`); link-integrity triggers (set-together, game/Yes-team/matched-hash immutable-once-set) — schema v16; no Kalshi price/book/trade or authenticated/account structures added |
 
 The authoritative
 Phase D schema design is `PHASE_D_IMPLEMENTATION_PLAN.md` §2, and the earlier

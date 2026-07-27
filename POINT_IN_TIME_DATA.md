@@ -221,8 +221,23 @@ a historical event snapshot: the decision/DQ `raw_response_id` is the event's
 immutable **first-observation** response, and schema v15 records no per-field
 current-supplying observation, so it must not be read as the exact source of the
 current commence/team metadata used for matching; Phase E must read from the
-decision and DQ timelines and respect that limitation. Kalshi match decisions
-remain D5B2 |
+decision and DQ timelines and respect that limitation. **D5B2 (Kalshi events +
+game-winner markets) built (schema v16):** event and market
+`entity_match_decisions` rows are bounded by `decided_at` the same way; a current
+`kalshi_events.game_id` / `kalshi_markets.game_id` link is not itself PIT-safe;
+`SqliteKalshiRepository.is_kalshi_market_orientation_approved(kalshi_market_id,
+as_of=cutoff)` is fail-closed and as-of correct — it requires an accepted,
+non-review market decision `decided_at ≤ cutoff` that names this market and game,
+a Yes team participating in the game, the **current** `rules_hash` still equal to
+the decision's `matched_rules_hash` (a later rules change invalidates it
+immediately via a blocking `DQ-MATCH-004`), and no blocking identity/orientation/
+rules DQ active at the cutoff (DQ `detected_at`/`resolved_at` evaluated against
+`as_of`). The decision/DQ provenance uses the Kalshi row's
+`current_raw_response_id` (the response that supplied the matched metadata), never
+the immutable `first_raw_response_id`. Current mutable Kalshi metadata is not a
+complete historical snapshot; c008 retains only current + first provenance, so
+Phase E must read from the decision/DQ timelines and must not claim to reconstruct
+prior rules text/hash observations beyond that boundary |
 | Weather forecast-vs-actual kept distinct (leakage vector) | ◧ **D4 built (schema v14)** — `weather_snapshots.weather_kind` separates `current_forecast` / `station_observation` / `historical_forecast` / `reanalysis`; `observed_at` is never backdated to a model-run time; an explicit `pit_eligible` (1/0/NULL) is set (a station observation / reanalysis is never PIT-eligible; a stitched historical forecast whose availability is unproven is `pit_eligible=NULL` + a `DQ-WX-PIT-001` note). Phase E must gate pregame weather features on `weather_kind='current_forecast' AND observed_at ≤ cutoff AND pit_eligible=1` — never on the endpoint of origin, and never a reanalysis/observation row |
 | Full `pit/asof.py`, `pit/dataset.py`, adversarial leak fixtures | ◻ Phase E |
 

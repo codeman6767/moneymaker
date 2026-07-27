@@ -312,6 +312,8 @@ class KalshiEvent:
     status: Optional[str] = None
     mutually_exclusive: Optional[bool] = None
     game_id: Optional[str] = None
+    #: Exact accepted ``entity_match_decisions.match_id`` for the game link (d016).
+    match_decision_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -350,6 +352,12 @@ class KalshiMarket:
     rules_secondary: Optional[str] = None
     rules_hash: Optional[str] = None
     game_id: Optional[str] = None
+    #: D5B2 semantic link (d016), all set together with ``game_id`` on an
+    #: accepted supported game-winner market.
+    match_decision_id: Optional[str] = None
+    yes_team_id: Optional[str] = None
+    matched_rules_hash: Optional[str] = None
+    market_semantic: Optional[str] = None
 
 
 @dataclass(frozen=True)

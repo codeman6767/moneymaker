@@ -27,7 +27,10 @@ from __future__ import annotations
 import enum
 import hashlib
 import sqlite3
-from typing import Any, Optional, Protocol
+from typing import TYPE_CHECKING, Any, Optional, Protocol
+
+if TYPE_CHECKING:  # annotations only; the runtime import is local to avoid a cycle
+    from .references import LinkOutcome
 
 from streaming.event_envelope import canonical_json
 
@@ -47,6 +50,12 @@ from ..models import (
 )
 from ..schema import KALSHI_PRICE_COMPLEMENT, utc_now_iso
 from .base import Repository, to_db_bool
+
+#: Blocking DQ rule codes whose active presence must fail Kalshi orientation
+#: readiness (mirrors the sportsbook fail-closed set, plus the rules-hash code).
+_KALSHI_READINESS_BLOCKING_RULES = (
+    "DQ-MATCH-003", "DQ-MATCH-004", "DQ-MATCH-006", "DQ-KAL-YES-001", "DQ-KAL-SERIES-001",
+)
 
 Level = tuple[int, int]  # (price_cents, quantity)
 
@@ -152,13 +161,15 @@ class SqliteKalshiRepository(Repository):
 
     _EVENT_COLUMNS = (
         "kalshi_event_id, event_ticker, series_ticker, title, sub_title, category, status, "
-        "mutually_exclusive, game_id, first_raw_response_id, current_raw_response_id, "
-        "current_raw_response_hash, first_observed_at, last_observed_at, created_at, updated_at"
+        "mutually_exclusive, game_id, match_decision_id, first_raw_response_id, "
+        "current_raw_response_id, current_raw_response_hash, first_observed_at, last_observed_at, "
+        "created_at, updated_at"
     )
     _MARKET_COLUMNS = (
         "kalshi_market_id, market_ticker, event_ticker, kalshi_event_id, series_ticker, title, "
         "subtitle, yes_sub_title, no_sub_title, status, open_time, close_time, expiration_time, "
         "settlement_time, result, rules_primary, rules_secondary, rules_hash, game_id, "
+        "match_decision_id, yes_team_id, matched_rules_hash, market_semantic, "
         "first_raw_response_id, current_raw_response_id, current_raw_response_hash, "
         "first_observed_at, last_observed_at, created_at, updated_at"
     )
@@ -366,6 +377,224 @@ class SqliteKalshiRepository(Repository):
 
     def count_markets(self) -> int:
         return self._count("SELECT COUNT(*) FROM kalshi_markets")
+
+    # -- D5B2 matching reads / writes ---------------------------------------
+    def list_events_for_matching(
+        self,
+        *,
+        series_ticker: Optional[str] = None,
+        event_ticker: Optional[str] = None,
+        unmatched_only: bool = False,
+    ) -> list[KalshiEvent]:
+        """Bounded, deterministic list of events for a matching run.
+
+        Filters are ANDed; ordered by ``(event_ticker,)`` so a run is
+        reproducible regardless of physical row order. Kalshi events carry no
+        commence timestamp, so date bounding lives on markets, not events."""
+
+        sql = f"SELECT {self._EVENT_COLUMNS} FROM kalshi_events WHERE 1 = 1"  # noqa: S608
+        params: list[object] = []
+        if series_ticker is not None:
+            sql += " AND series_ticker = ?"
+            params.append(series_ticker)
+        if event_ticker is not None:
+            sql += " AND event_ticker = ?"
+            params.append(event_ticker)
+        if unmatched_only:
+            sql += " AND game_id IS NULL"
+        sql += " ORDER BY event_ticker"
+        return [self._to_event(r) for r in self._fetch_all(sql, tuple(params))]
+
+    def list_markets_for_matching(
+        self,
+        *,
+        series_ticker: Optional[str] = None,
+        event_ticker: Optional[str] = None,
+        market_ticker: Optional[str] = None,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        unmatched_only: bool = False,
+    ) -> list[KalshiMarket]:
+        """Bounded, deterministic list of markets for a matching run.
+
+        ``from_date``/``to_date`` bound the ``close_time`` calendar date
+        inclusively -- a scope hint only, never treated as the game start.
+        Ordered by ``market_ticker``."""
+
+        sql = f"SELECT {self._MARKET_COLUMNS} FROM kalshi_markets WHERE 1 = 1"  # noqa: S608
+        params: list[object] = []
+        if series_ticker is not None:
+            sql += " AND series_ticker = ?"
+            params.append(series_ticker)
+        if event_ticker is not None:
+            sql += " AND event_ticker = ?"
+            params.append(event_ticker)
+        if market_ticker is not None:
+            sql += " AND market_ticker = ?"
+            params.append(market_ticker)
+        if from_date is not None:
+            sql += " AND close_time IS NOT NULL AND substr(close_time, 1, 10) >= ?"
+            params.append(from_date)
+        if to_date is not None:
+            sql += " AND close_time IS NOT NULL AND substr(close_time, 1, 10) <= ?"
+            params.append(to_date)
+        if unmatched_only:
+            sql += " AND game_id IS NULL"
+        sql += " ORDER BY market_ticker"
+        return [self._to_market(r) for r in self._fetch_all(sql, tuple(params))]
+
+    def event_link(self, kalshi_event_id: str) -> tuple[Optional[str], Optional[str]]:
+        """``(game_id, match_decision_id)`` for an event; either may be None."""
+
+        row = self._fetch_one(
+            "SELECT game_id, match_decision_id FROM kalshi_events WHERE kalshi_event_id = ?",
+            (kalshi_event_id,),
+        )
+        if row is None:
+            return (None, None)
+        return (self._opt_str(row, "game_id"), self._opt_str(row, "match_decision_id"))
+
+    def market_link(
+        self, kalshi_market_id: str
+    ) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
+        """``(game_id, match_decision_id, yes_team_id, matched_rules_hash, market_semantic)``."""
+
+        row = self._fetch_one(
+            "SELECT game_id, match_decision_id, yes_team_id, matched_rules_hash, market_semantic "
+            "FROM kalshi_markets WHERE kalshi_market_id = ?",
+            (kalshi_market_id,),
+        )
+        if row is None:
+            return (None, None, None, None, None)
+        return (
+            self._opt_str(row, "game_id"), self._opt_str(row, "match_decision_id"),
+            self._opt_str(row, "yes_team_id"), self._opt_str(row, "matched_rules_hash"),
+            self._opt_str(row, "market_semantic"),
+        )
+
+    def link_event_game(
+        self, *, kalshi_event_id: str, game_id: str, match_decision_id: str
+    ) -> LinkOutcome:
+        """Link an event to its canonical game with the exact decision.
+
+        NULL -> value once (``LINKED``); identical re-link is idempotent
+        (``ALREADY_LINKED``); a different game is a ``CONFLICT`` left untouched
+        (the d016 trigger enforces the same immutability at the database)."""
+
+        from .references import LinkOutcome  # local: avoid a references<->kalshi cycle
+
+        current_game, _dec = self.event_link(kalshi_event_id)
+        if current_game is None:
+            self._conn.execute(
+                "UPDATE kalshi_events SET game_id = ?, match_decision_id = ?, updated_at = ? "
+                "WHERE kalshi_event_id = ?",
+                (game_id, match_decision_id, utc_now_iso(), kalshi_event_id),
+            )
+            return LinkOutcome.LINKED
+        if current_game == game_id:
+            return LinkOutcome.ALREADY_LINKED
+        return LinkOutcome.CONFLICT
+
+    def link_market_game(
+        self, *, kalshi_market_id: str, game_id: str, match_decision_id: str,
+        yes_team_id: str, matched_rules_hash: str, market_semantic: str,
+    ) -> LinkOutcome:
+        """Link a supported game-winner market with its full semantic set.
+
+        Verifies transactionally the cross-table rule SQLite cannot express: the
+        Yes team must be one of the linked game's two teams. NULL -> value once
+        (``LINKED``); an identical re-link is ``ALREADY_LINKED``; a different
+        game / Yes team / rules hash is a ``CONFLICT`` left untouched."""
+
+        from .references import LinkOutcome  # local: avoid a references<->kalshi cycle
+
+        current = self.market_link(kalshi_market_id)
+        cur_game, _cd, cur_yes, cur_hash, cur_sem = current
+        if cur_game is None:
+            game = self._fetch_one(
+                "SELECT home_team_id, away_team_id FROM games WHERE game_id = ?", (game_id,)
+            )
+            if game is None or yes_team_id not in (
+                str(game["home_team_id"]), str(game["away_team_id"])
+            ):
+                # The Yes team must participate in the linked game. Refuse rather
+                # than persist an orientation that names a non-participant.
+                return LinkOutcome.CONFLICT
+            self._conn.execute(
+                "UPDATE kalshi_markets SET game_id = ?, match_decision_id = ?, yes_team_id = ?, "
+                "matched_rules_hash = ?, market_semantic = ?, updated_at = ? "
+                "WHERE kalshi_market_id = ?",
+                (game_id, match_decision_id, yes_team_id, matched_rules_hash, market_semantic,
+                 utc_now_iso(), kalshi_market_id),
+            )
+            return LinkOutcome.LINKED
+        if (cur_game == game_id and cur_yes == yes_team_id and cur_hash == matched_rules_hash
+                and cur_sem == market_semantic):
+            return LinkOutcome.ALREADY_LINKED
+        return LinkOutcome.CONFLICT
+
+    def is_kalshi_market_orientation_approved(
+        self, kalshi_market_id: str, *, as_of: Optional[str] = None
+    ) -> bool:
+        """Fail-closed readiness of a market's Yes-side orientation.
+
+        True ONLY when: the market is linked with a ``game_winner`` semantic, a
+        Yes team, a matched rules hash, and an accepted market decision that is
+        not review-gated, decided by ``as_of``, owned by this market, and naming
+        this game; the Yes team is one of the game's teams; the **current**
+        ``rules_hash`` still equals the matched hash (a rules change invalidates
+        immediately); and no blocking identity/orientation/rules DQ was active on
+        this market at ``as_of``. As-of temporal rules mirror the sportsbook
+        readiness check (DQ ``detected_at``/``resolved_at`` vs cutoff)."""
+
+        row = self._fetch_one(
+            "SELECT m.game_id AS game_id, m.yes_team_id AS yes_team_id, "
+            "m.matched_rules_hash AS matched_rules_hash, m.rules_hash AS rules_hash, "
+            "m.market_semantic AS market_semantic, d.matched_entity_id AS matched_entity_id, "
+            "d.entity_type AS entity_type, d.source_provider AS source_provider, "
+            "d.source_ref AS source_ref, d.outcome AS outcome, "
+            "d.needs_manual_review AS review, d.decided_at AS decided_at, "
+            "g.home_team_id AS home_team_id, g.away_team_id AS away_team_id "
+            "FROM kalshi_markets m JOIN entity_match_decisions d ON m.match_decision_id = d.match_id "
+            "LEFT JOIN games g ON m.game_id = g.game_id WHERE m.kalshi_market_id = ?",
+            (kalshi_market_id,),
+        )
+        if row is None:
+            return False
+        if as_of is not None and str(row["decided_at"]) > as_of:
+            return False
+        game_id = self._opt_str(row, "game_id")
+        yes_team = self._opt_str(row, "yes_team_id")
+        if not (
+            self._opt_str(row, "market_semantic") == "game_winner"
+            and game_id is not None
+            and yes_team is not None
+            and str(row["entity_type"]) == "kalshi_market"
+            and str(row["source_provider"]) == "kalshi_public"
+            and str(row["source_ref"]) == kalshi_market_id
+            and str(row["outcome"]) == "accepted"
+            and int(row["review"]) == 0
+            and self._opt_str(row, "matched_entity_id") == game_id
+            and yes_team in (self._opt_str(row, "home_team_id"), self._opt_str(row, "away_team_id"))
+        ):
+            return False
+        # A rules change invalidates orientation immediately: the matched hash the
+        # decision was bound to must still be the current hash.
+        if self._opt_str(row, "matched_rules_hash") != self._opt_str(row, "rules_hash"):
+            return False
+        placeholders = ", ".join("?" for _ in _KALSHI_READINESS_BLOCKING_RULES)
+        dq_sql = (
+            "SELECT 1 FROM data_quality_issues WHERE severity = 'blocking' "
+            "AND entity_type = 'kalshi_market' AND entity_id = ? "
+            f"AND rule_code IN ({placeholders})"  # noqa: S608 - fixed rule tuple
+        )
+        dq_params: list[object] = [kalshi_market_id, *_KALSHI_READINESS_BLOCKING_RULES]
+        if as_of is None:
+            dq_sql += " AND resolved_at IS NULL"
+        else:
+            dq_sql += " AND detected_at <= ? AND (resolved_at IS NULL OR resolved_at > ?)"
+            dq_params += [as_of, as_of]
+        return self._fetch_one(dq_sql + " LIMIT 1", tuple(dq_params)) is None
 
     # -- Order books ---------------------------------------------------------
     def append_orderbook_snapshot(
@@ -592,6 +821,7 @@ class SqliteKalshiRepository(Repository):
             status=self._opt_str(row, "status"),
             mutually_exclusive=None if me is None else bool(me),
             game_id=self._opt_str(row, "game_id"),
+            match_decision_id=self._opt_str(row, "match_decision_id"),
         )
 
     def _to_market(self, row: sqlite3.Row) -> KalshiMarket:
@@ -622,6 +852,10 @@ class SqliteKalshiRepository(Repository):
             rules_secondary=self._opt_str(row, "rules_secondary"),
             rules_hash=self._opt_str(row, "rules_hash"),
             game_id=self._opt_str(row, "game_id"),
+            match_decision_id=self._opt_str(row, "match_decision_id"),
+            yes_team_id=self._opt_str(row, "yes_team_id"),
+            matched_rules_hash=self._opt_str(row, "matched_rules_hash"),
+            market_semantic=self._opt_str(row, "market_semantic"),
         )
 
     def _to_book(self, row: sqlite3.Row) -> KalshiOrderbookSnapshot:

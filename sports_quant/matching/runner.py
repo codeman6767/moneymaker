@@ -24,6 +24,7 @@ from ..config import Settings, load_settings
 from ..db.engine import Database, table_exists, transaction
 from ..db.repositories.ingestion_runs import SqliteIngestionRunRepository
 from ..db.repositories.matching import SqliteMatchingRepository
+from .kalshi import MatchKalshiResult, MatchKalshiService, series_ticker_for_sport
 from .model import MATCHER_VERSION
 from .players_service import MatchPlayersResult, MatchPlayersService
 from .service import MatchGamesResult, MatchGamesService, resolve_provider_for_sport
@@ -386,6 +387,115 @@ def _report_players(
         f"  decisions: {c.decisions_evaluated} (accepted {c.accepted}, ambiguous {c.ambiguous}, "
         f"no-candidate {c.no_candidate}, rejected {c.rejected}); linked {c.provider_references_linked}"
     )
+    out(f"  data-quality: {c.dq_issues} issues ({c.blocking_issues} blocking)")
+    status = "BLOCKED" if result.needs_failure_exit else result.status.upper()
+    out(f"[{status}] {result.status}")
+
+
+def run_match_markets(
+    settings: Optional[Settings] = None,
+    *,
+    provider: str = "kalshi_public",
+    sport: Optional[str] = None,
+    series_ticker: Optional[str] = None,
+    event_ticker: Optional[str] = None,
+    market_ticker: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    unmatched_only: bool = False,
+    database_path: Optional[Path] = None,
+    dry_run: bool = False,
+    as_json: bool = False,
+    out: Printer = print,
+) -> int:
+    """Resolve public Kalshi events + game-winner markets to canonical games (local)."""
+
+    if settings is None:
+        settings = load_settings()
+    else:
+        settings.enforce_read_only()
+
+    if provider != "kalshi_public":
+        out(f"[FAILED ] unsupported --provider {provider!r} for match-markets")
+        return EXIT_ACTIVE_FAILURE
+    resolved_series = series_ticker or (series_ticker_for_sport(sport) if sport else None)
+
+    path = database_path if database_path is not None else settings.resolved_database_path()
+    code = _db_ready(path, out)
+    if code is not None:
+        return code
+
+    with Database(path).connection() as conn:
+        if dry_run:
+            result: MatchKalshiResult = MatchKalshiService(conn, dry_run=True).match_range(
+                series_ticker=resolved_series, event_ticker=event_ticker,
+                market_ticker=market_ticker, from_date=from_date, to_date=to_date,
+                unmatched_only=unmatched_only,
+            )
+        else:
+            try:
+                result = _run_kalshi_persisted(
+                    conn, resolved_series, event_ticker, market_ticker, from_date, to_date,
+                    unmatched_only)
+            except Exception as exc:  # noqa: BLE001 - surface as an active failure, roll back
+                out(f"[FAILED ] {type(exc).__name__}: {exc}")
+                return EXIT_ACTIVE_FAILURE
+
+    _report_kalshi(result, out, as_json=as_json)
+    return EXIT_ACTIVE_FAILURE if result.needs_failure_exit else 0
+
+
+def _run_kalshi_persisted(
+    conn,  # type: ignore[no-untyped-def]
+    series_ticker: Optional[str],
+    event_ticker: Optional[str],
+    market_ticker: Optional[str],
+    from_date: Optional[str],
+    to_date: Optional[str],
+    unmatched_only: bool,
+) -> MatchKalshiResult:
+    runs = SqliteIngestionRunRepository(conn)
+    started = time.monotonic_ns()
+    with transaction(conn):
+        run = runs.start(
+            command="match-markets", provider="kalshi_public", operation="match_kalshi",
+            args_json=json.dumps(
+                {"series_ticker": series_ticker, "event_ticker": event_ticker,
+                 "market_ticker": market_ticker, "from": from_date, "to": to_date,
+                 "unmatched_only": unmatched_only}, sort_keys=True),
+            started_monotonic_ns=started, tool_version=MATCHER_VERSION,
+        )
+        result = MatchKalshiService(conn, dry_run=False, run_id=run.run_id).match_range(
+            series_ticker=series_ticker, event_ticker=event_ticker, market_ticker=market_ticker,
+            from_date=from_date, to_date=to_date, unmatched_only=unmatched_only)
+        runs.complete(
+            run.run_id,
+            status="partially_succeeded" if result.needs_failure_exit else "succeeded",
+            duration_ns=time.monotonic_ns() - started,
+            records_updated=result.counters.events_linked + result.counters.markets_linked)
+        result.run_id = run.run_id
+    return result
+
+
+def _report_kalshi(result: MatchKalshiResult, out: Printer, *, as_json: bool) -> None:
+    if as_json:
+        out(json.dumps({
+            "command": "match-markets", "provider": "kalshi_public", "dry_run": result.dry_run,
+            "status": result.status, "run_id": result.run_id, **result.counters.as_dict(),
+        }, sort_keys=True))
+        return
+    c = result.counters
+    prefix = "[DRY-RUN] " if result.dry_run else ""
+    out(f"{prefix}match-markets [kalshi_public]: {c.events_considered} events, "
+        f"{c.markets_considered} markets considered")
+    out(f"  events: accepted {c.events_accepted}, linked {c.events_linked}, already-linked "
+        f"{c.events_already_linked}, ambiguous {c.events_ambiguous}, no-candidate "
+        f"{c.events_no_candidate}, rejected {c.events_rejected}")
+    out(f"  markets: accepted {c.markets_accepted}, linked {c.markets_linked}, yes-teams "
+        f"{c.yes_teams_resolved}, ambiguous {c.markets_ambiguous}, no-candidate "
+        f"{c.markets_no_candidate}, rejected {c.markets_rejected}")
+    out(f"  unsupported: series {c.unsupported_series}, semantics {c.unsupported_semantics}; "
+        f"rules-hash conflicts {c.rules_hash_conflicts}")
     out(f"  data-quality: {c.dq_issues} issues ({c.blocking_issues} blocking)")
     status = "BLOCKED" if result.needs_failure_exit else result.status.upper()
     out(f"[{status}] {result.status}")

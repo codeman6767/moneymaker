@@ -306,6 +306,85 @@ def seed_sb_price(
         )
 
 
+def seed_kalshi_event(
+    conn: sqlite3.Connection,
+    *,
+    event_ticker: str,
+    series_ticker: str,
+    title: str,
+    sub_title: Optional[str] = None,
+    category: str = "Sports",
+    observed_at: str = T0,
+) -> str:
+    """Create a public Kalshi event; returns kalshi_event_id."""
+
+    from sports_quant.db.repositories.kalshi import SqliteKalshiRepository
+
+    rid, rhash = raw_response(conn, marker=f"kev:{event_ticker}:{observed_at}")
+    with transaction(conn):
+        event, _ = SqliteKalshiRepository(conn).upsert_event(
+            event_ticker=event_ticker, raw_response_id=rid, raw_response_hash=rhash,
+            observed_at=observed_at, series_ticker=series_ticker, title=title,
+            sub_title=sub_title, category=category, status="active",
+        )
+    return event.kalshi_event_id
+
+
+def seed_kalshi_market(
+    conn: sqlite3.Connection,
+    *,
+    market_ticker: str,
+    event_ticker: str,
+    series_ticker: str,
+    title: str,
+    yes_sub_title: Optional[str] = None,
+    subtitle: Optional[str] = None,
+    rules_primary: Optional[str] = None,
+    close_time: Optional[str] = None,
+    result: Optional[str] = None,
+    kalshi_event_id: Optional[str] = None,
+    observed_at: str = T0,
+) -> str:
+    """Create a public Kalshi market; returns kalshi_market_id."""
+
+    from sports_quant.db.repositories.kalshi import SqliteKalshiRepository
+    from sports_quant.ingest.kalshi_ingestor import _rules_hash
+
+    rid, rhash = raw_response(conn, marker=f"kmk:{market_ticker}:{observed_at}")
+    with transaction(conn):
+        market, _ = SqliteKalshiRepository(conn).upsert_market(
+            market_ticker=market_ticker, raw_response_id=rid, raw_response_hash=rhash,
+            observed_at=observed_at, event_ticker=event_ticker, kalshi_event_id=kalshi_event_id,
+            series_ticker=series_ticker, title=title, yes_sub_title=yes_sub_title,
+            subtitle=subtitle, status="active", close_time=close_time, result=result,
+            rules_primary=rules_primary, rules_hash=_rules_hash(rules_primary, None),
+        )
+    return market.kalshi_market_id
+
+
+def set_kalshi_market_rules(
+    conn: sqlite3.Connection, *, market_ticker: str, rules_primary: str, observed_at: str,
+) -> None:
+    """Refresh a market's current rules (a strictly-newer observation), updating rules_hash."""
+
+    from sports_quant.db.repositories.kalshi import SqliteKalshiRepository
+    from sports_quant.ingest.kalshi_ingestor import _rules_hash
+
+    repo = SqliteKalshiRepository(conn)
+    existing = repo.get_market_by_ticker(market_ticker)
+    assert existing is not None  # noqa: S101
+    rid, rhash = raw_response(conn, marker=f"kmk-rules:{market_ticker}:{observed_at}")
+    with transaction(conn):
+        repo.upsert_market(
+            market_ticker=market_ticker, raw_response_id=rid, raw_response_hash=rhash,
+            observed_at=observed_at, event_ticker=existing.event_ticker,
+            kalshi_event_id=existing.kalshi_event_id, series_ticker=existing.series_ticker,
+            title=existing.title, yes_sub_title=existing.yes_sub_title, status="active",
+            close_time=existing.close_time, rules_primary=rules_primary,
+            rules_hash=_rules_hash(rules_primary, None),
+        )
+
+
 def seed_roster(
     conn: sqlite3.Connection,
     *,

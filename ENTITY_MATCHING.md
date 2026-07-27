@@ -383,8 +383,8 @@ never a new game.
 > review note below on the absence of an approval workflow). Existing
 > `market_key`/`outcome_role` are validated against the
 > accepted orientation; unknown/malformed outcomes are retained and surfaced via
-> `DQ-SB-OUTCOME-001`, never dropped or rewritten. Kalshi event/market matching
-> (§6) remains **unimplemented (D5B2)**.
+> `DQ-SB-OUTCOME-001`, never dropped or rewritten. Kalshi event/game-winner
+> market matching is now built (§6, D5B2).
 >
 > **D5B1 correctness repairs.** The season passed to the team resolver now uses
 > the league-specific convention (`matching/season.py::season_year_for`): an NBA
@@ -490,14 +490,34 @@ missing data nobody notices.
 
 ## 6. Kalshi market matching
 
-> **Phase C status.** Kalshi public events, markets, order books, and trades are
-> now **ingested** (migration `c007_kalshi`), but matching is **not** performed —
-> Phase C deliberately does no fuzzy game matching and infers no sports meaning
-> from market text. `kalshi_events`/`kalshi_markets` store the provider's
-> `event_ticker` / `market_ticker` as the stable identity with `game_id` left
-> NULL, and `rules_hash` is stored but not yet acted upon. The procedure below —
-> series filtering, ticker parsing, title/rules cross-check, and writing an
-> `entity_match_decisions` row — is **Phase D**, when that table exists.
+> **D5B2 status — built (mocked/offline).** Deterministic Kalshi event and
+> supported **game-winner** market matching is implemented in
+> `sports_quant/matching/kalshi.py` with pure, versioned parsers in
+> `matching/kalshi_parse.py`. Already-ingested public MLB/NBA Kalshi events are
+> matched through an **exact series allowlist** (`KXMLBGAME`/`KXNBAGAME`; no
+> prefix guessing, no `category=Sports` catch-all), versioned ticker parsing
+> (event `{SERIES}-{YYMONDD}{AWAY}{HOME}`, split against curated `kalshi_public`
+> alias codes; market `{EVENT}-{SUBJECT}`), provider-scoped team aliases, explicit
+> title/sub-title and `rules_primary` team/Yes agreement, and venue-aware
+> canonical schedule evidence. Migration **d016** (schema v16) adds
+> `kalshi_events.match_decision_id` and `kalshi_markets.match_decision_id` +
+> `yes_team_id` + `matched_rules_hash` + typed `market_semantic` (`game_winner`),
+> paired with `game_id` and non-regressing. **Only binary game-winner markets are
+> linked automatically**; spreads, totals, player props, team totals, period, and
+> multivariate markets are retained and reported as *unsupported semantics*, never
+> mislabeled. Every accepted market stores its exact game, exact decision,
+> canonical Yes team, semantic, and matched `rules_hash`; a later rules change
+> invalidates readiness through a blocking `DQ-MATCH-004` and never silently
+> retains approval (`is_kalshi_market_orientation_approved()` is fail-closed and
+> as-of correct). Kalshi order books, trades, prices, `result`, and settlement are
+> never game-match or Yes-team evidence (an SQL-trace test proves matching never
+> queries the book/level/trade tables). `match-markets` is local and network-free;
+> dry-run persists nothing. Event/market links are atomic via
+> `matching/linkatomic.py`. **No authenticated Kalshi access, account/order
+> surface, live request, or Phase E work is performed.**
+>
+> The Phase-C ingestion note still holds for the price/book/trade tables: those
+> remain append-only public data, untouched by matching.
 
 Hardest of the three, because Kalshi identifies markets by ticker and prose
 rather than by structured team fields.
