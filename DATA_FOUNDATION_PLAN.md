@@ -25,7 +25,7 @@ accurate insert/update/dedup counters (including a new `ingestion_runs.records_u
 and a single validation path shared by persisted and dry-run ingestion. No
 Kalshi credential, private key, or signing is used anywhere; there is no
 account/balance/position/fill/order column in the schema. The suite passes under
-Ruff and mypy: 1249 passed / 1 skipped locally (optional PyArrow present); under
+Ruff and mypy: 1251 passed / 1 skipped locally (optional PyArrow present); under
 the standard `.[dev]` CI with PyArrow absent only the optional hoopR/PyArrow
 modules skip.
 
@@ -38,7 +38,9 @@ A dedicated CI `wheel-smoke` job builds the wheel, installs it into a clean
 **non-editable** environment, and proves `import sports_quant.matching`, the
 `sports-quant` console script, and `db-init` (twice, schema v15) all resolve from
 the wheel — a missing package or migration fails there even when the editable
-`checks` job would pass; a pytest wheel-content test enforces the same in-suite.
+`checks` job would pass; a pytest wheel-content test enforces the same in-suite
+(it **fails, never skips**, on a broken build — surfacing the full build output —
+and also asserts the `sports-quant` console entry point is declared).
 The MLB/NBA **season-year contract is unified**: the integer is always the
 season START year (MLB `2026` = the 2026 season; NBA `2025` = the 2025-26 season),
 so `schema.season_label` (corrected here), `season.season_year_for`, and
@@ -50,8 +52,10 @@ provider-player accepts now share the D5B1 **atomic decision-and-link** invarian
 and applies + verifies the link together; an existing link to another entity or a
 corrupt supporting decision is a blocking rejection with no accepted decision
 (exit 1); a link failure rolls the whole run back; an idempotent replay records no
-new accepted decision. Schema stays v15; **D5B2 (Kalshi) and Phase E have not
-started.**
+new accepted decision. The official-game **create** path pre-checks the provider
+reference before creating any season/game row, so a conflict never leaves an
+orphan canonical game or an inflated `canonical_games_created` counter. Schema
+stays v15; **D5B2 (Kalshi) and Phase E have not started.**
 
 **D4 weather ingestion code is complete at schema v14 (migration `d014_weather`)
 against mocked NWS and Open-Meteo contracts: NWS is primary for supported US

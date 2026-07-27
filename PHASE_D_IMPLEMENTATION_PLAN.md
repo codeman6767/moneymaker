@@ -955,10 +955,14 @@ Model column = recommended driver.
 > `DQ-MATCH-016` player) that records no accepted decision; only a clean reference
 > records the accepted decision and then applies + verifies the link, and a
 > non-`LINKED` result raises `MatchLinkError` so the whole run rolls back (exit 1)
-> rather than commit an accepted decision without its link. Team/venue resolution
-> decisions remain input-resolution audit records (recorded per run); their
-> crosswalk conflicts stay blocking. The player entry point only processes
-> `player_id IS NULL` references, so replay/conflict there are defensive.
+> rather than commit an accepted decision without its link. The official-game
+> **create** path additionally pre-checks the provider reference *before* creating
+> any season/game row, so a conflict never leaves an orphan canonical game or an
+> inflated `canonical_games_created` counter. Team/venue resolution decisions
+> remain input-resolution audit records (recorded per run); their crosswalk
+> conflicts stay blocking (`DQ-MATCH-016`), and venues are not auto-linked via a
+> crosswalk (no provider_venue_reference link path). The player entry point only
+> processes `player_id IS NULL` references, so replay/conflict there are defensive.
 >
 > **Packaging / season contract (pre-D5B2).** `pyproject.toml` uses automatic
 > package discovery (ships `sports_quant.matching`; excludes tests/venv/build/data)

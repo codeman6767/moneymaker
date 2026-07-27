@@ -112,6 +112,30 @@ def test_game_link_conflict_leaves_no_accepted_decision(conn: sqlite3.Connection
     assert "DQ-MATCH-003" in codes
 
 
+def test_create_conflict_leaves_no_orphan_game(conn: sqlite3.Connection) -> None:
+    # End-to-end: a provider game reference corruptly linked to an UNRELATED game
+    # (different official key, far date, so nothing matches by key or schedule)
+    # must NOT spawn an orphan canonical game when the create path is reached.
+    from sports_quant.db.repositories.games import SqliteGameRepository
+
+    home, away = _mlb_setup(conn)
+    ga = _create_canonical(conn, league_code="MLB", home_team_id=home, away_team_id=away,
+                           scheduled_start="2026-01-01T23:05:00Z", game_date_local="2026-01-01",
+                           official_provider=MLB, official_game_key="GA")
+    seed_schedule(conn, provider=MLB, provider_game_id="G1", home_provider_team_id="101",
+                  away_provider_team_id="102", scheduled_start="2026-07-25T23:05:00Z",
+                  season=2026, game_date_local="2026-07-25", venue_provider_id="V1", game_type="R")
+    _prelink_game(conn, provider=MLB, provider_game_id="G1", game_id=ga)  # corrupt prior link
+    before = SqliteGameRepository(conn).count()
+    r = _match(conn, from_date="2026-07-25", to_date="2026-07-25")
+    assert r.counters.canonical_games_created == 0 and r.needs_failure_exit
+    assert SqliteGameRepository(conn).count() == before  # no orphan game created
+    ref = SqliteProviderReferenceRepository(conn).get("game", MLB, "G1")
+    assert ref is not None and ref.canonical_id == ga  # existing link unchanged
+    codes = {row[0] for row in conn.execute("SELECT rule_code FROM data_quality_issues")}
+    assert "DQ-MATCH-003" in codes
+
+
 def test_game_replay_decision_belongs_to_other_ref_is_blocking(conn: sqlite3.Connection) -> None:
     home, away = _two_mlb_teams(conn)
     ga = _create_canonical(conn, league_code="MLB", home_team_id=home, away_team_id=away,

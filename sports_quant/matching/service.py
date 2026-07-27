@@ -511,6 +511,27 @@ class MatchGamesService:
             )
             return
 
+        # Atomic-link pre-check BEFORE creating any season/game row (task §5).
+        # Reaching creation means no official-key or schedule match was found, so
+        # a provider game reference that is nonetheless already linked is a
+        # conflict -- creating a new game would orphan one. Refuse it as blocking
+        # and create nothing, rather than leave an orphan canonical game and an
+        # inflated created counter behind a committed rejected decision.
+        if not self._dry_run:
+            linked_ref = self._refs.get("game", provider, provider_game_id)
+            if linked_ref is not None and linked_ref.canonical_id is not None:
+                self._dq_issue(
+                    result, severity="blocking", rule_code="DQ-MATCH-003", entity_type="game",
+                    entity_id=provider_game_id, provider=provider,
+                    description="provider game already linked to a different canonical game",
+                )
+                self._record_game_reject(
+                    provider, provider_game_id, result,
+                    "provider game already linked to a different canonical entity",
+                    candidate=linked_ref.canonical_id,
+                )
+                return
+
         phase = _season_phase(game_type)
         if not self._dry_run:
             # ``season_year`` is the season START year in both leagues (the one
