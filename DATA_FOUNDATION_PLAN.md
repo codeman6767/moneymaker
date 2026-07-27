@@ -25,7 +25,7 @@ accurate insert/update/dedup counters (including a new `ingestion_runs.records_u
 and a single validation path shared by persisted and dry-run ingestion. No
 Kalshi credential, private key, or signing is used anywhere; there is no
 account/balance/position/fill/order column in the schema. The suite passes under
-Ruff and mypy: 1177 passed / 1 skipped locally (optional PyArrow present); under
+Ruff and mypy: 1205 passed / 1 skipped locally (optional PyArrow present); under
 the standard `.[dev]` CI with PyArrow absent only the optional hoopR/PyArrow
 modules skip.
 
@@ -220,6 +220,19 @@ unknown/malformed ones surfaced via `DQ-SB-OUTCOME-001` (never dropped or
 rewritten). Every attempt records one append-only decision + candidates;
 `match-games --source sportsbook` is local and network-free; dry-run persists
 nothing. **D5B2 (Kalshi) is not implemented.**
+
+*D5B1 correctness repair:* the resolver season is now league-specific
+(`season_year_for`; NBA Jan–June → previous start year; a naive commence yields
+no guessed season); local-slate agreement is a real candidate requirement
+(candidate excluded when its `game_date_local` contradicts the event's
+venue-derived local date, unresolvable timezones surfaced not forced to UTC); a
+blocking orientation conflict now prevents linking entirely (no accepted
+decision, no link, exit 1); `is_orientation_approved()` is fail-closed
+(decision↔link agreement, no conflicting linked event, no unresolved blocking
+identity/orientation DQ); outcome roles are recomputed provider-side and
+disagreements surfaced (never trusting or rewriting the stored role); DQ issues
+are scoped to event / market / outcome and idempotent per
+`(rule, entity, provider, description)`. **D5B1 is not yet independently reviewed.**
 
 Companion documents:
 

@@ -42,3 +42,26 @@ def in_season(league_code: str, season_year: int, date_iso: str) -> bool:
 
     lo, hi = season_bounds(league_code, season_year)
     return lo <= date_iso <= hi
+
+
+def season_year_for(league_code: str, date_iso: str) -> int:
+    """The league season *start year* an ISO ``YYYY-MM-DD[...]`` date belongs to.
+
+    MLB numbers a season by its calendar year, so the season year is simply the
+    year of the date. An NBA season is numbered by its **start** year and runs
+    July -> June (see :func:`season_bounds`): a July-December date belongs to
+    that calendar year's season, and a January-June date belongs to the
+    *previous* calendar year's season (``2026-04`` is the ``2025``-26 season).
+
+    This is the exact inverse of the July split in :func:`season_bounds`; the
+    boundary is defined here once so no caller re-derives it. ``date_iso`` must
+    begin with ``YYYY-MM``; callers validate the timestamp before calling, so a
+    naive/malformed instant never reaches this function and never produces a
+    guessed season.
+    """
+
+    year = int(date_iso[:4])
+    if league_code.upper() == "NBA":
+        month = int(date_iso[5:7])
+        return year if month >= 7 else year - 1
+    return year

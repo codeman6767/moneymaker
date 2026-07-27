@@ -200,7 +200,17 @@ event's `entity_match_decisions` row is bounded the same way; a current
 `SqliteSportsbookRepository.is_orientation_approved(sb_event_id, as_of=cutoff)`
 returns False for a decision not yet decided (or a neutral swapped match not yet
 reviewed) as of the cutoff, so a pricing consumer never treats an unapproved or
-future orientation as historical truth. Kalshi match decisions remain D5B2 |
+future orientation as historical truth. That readiness check is now
+**fail-closed**: beyond `direct` + accepted + not-review-gated + `decided_at ≤
+cutoff`, it also requires the decision and the link to name the same game, no
+other sportsbook event linked to that game under a different orientation, and no
+unresolved blocking identity/orientation data-quality issue on the event — a
+`direct` orientation string alone is never sufficient. A current
+`sportsbook_events` row is mutable current-state, not a historical event snapshot:
+the matcher uses the event's linked `raw_response_id` provenance and never treats
+a newer mutable event row as a reconstruction of earlier provider metadata; Phase
+E must read from the decision and review timelines and respect that limitation.
+Kalshi match decisions remain D5B2 |
 | Weather forecast-vs-actual kept distinct (leakage vector) | ◧ **D4 built (schema v14)** — `weather_snapshots.weather_kind` separates `current_forecast` / `station_observation` / `historical_forecast` / `reanalysis`; `observed_at` is never backdated to a model-run time; an explicit `pit_eligible` (1/0/NULL) is set (a station observation / reanalysis is never PIT-eligible; a stitched historical forecast whose availability is unproven is `pit_eligible=NULL` + a `DQ-WX-PIT-001` note). Phase E must gate pregame weather features on `weather_kind='current_forecast' AND observed_at ≤ cutoff AND pit_eligible=1` — never on the endpoint of origin, and never a reanalysis/observation row |
 | Full `pit/asof.py`, `pit/dataset.py`, adversarial leak fixtures | ◻ Phase E |
 

@@ -154,12 +154,37 @@ def seed_venue(
     latitude: Optional[float] = None,
     longitude: Optional[float] = None,
     roof_type: Optional[str] = None,
+    observed_at: str = T0,
+    validate: bool = True,
 ) -> str:
     rid, rhash = raw_response(conn, marker=f"venue:{name}")
     with transaction(conn):
         venues = SqliteVenueRepository(conn)
+        if not validate:
+            # Bypass the application-level IANA sanity check to seed a
+            # well-formed-but-unresolvable zone for honest-failure tests.
+            from sports_quant.db.ids import new_venue_id
+            from sports_quant.db.normalize import normalized_key
+            from sports_quant.db.schema import utc_now_iso
+
+            vid = new_venue_id()
+            now = utc_now_iso()
+            conn.execute(
+                "INSERT INTO venues (venue_id, name, normalized_name, timezone, "
+                " first_raw_response_id, current_raw_response_id, current_raw_response_hash, "
+                " first_observed_at, last_observed_at, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (vid, name, normalized_key(name), timezone, rid, rid, rhash,
+                 observed_at, observed_at, now, now),
+            )
+            if provider_venue_id is not None:
+                venues.add_alias(
+                    venue_id=vid, alias=name, provider=provider,
+                    provider_venue_id=provider_venue_id,
+                )
+            return vid
         venue, _ = venues.upsert(
-            name=name, raw_response_id=rid, raw_response_hash=rhash, observed_at=T0,
+            name=name, raw_response_id=rid, raw_response_hash=rhash, observed_at=observed_at,
             timezone=timezone, country=country, latitude=latitude, longitude=longitude,
             roof_type=roof_type,
         )

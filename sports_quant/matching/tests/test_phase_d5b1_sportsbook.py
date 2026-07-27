@@ -65,6 +65,38 @@ def _game(conn: sqlite3.Connection, *, home: str, away: str, key: str,
         is_neutral_site=neutral, game_number=gn, decided_at="2026-07-05T00:00:00.000000Z")
 
 
+def _pacific_home_venue(conn: sqlite3.Connection, home: str, away: str) -> str:
+    """Establish an America/Los_Angeles ordinary home venue for ``home``."""
+
+    venue = seed_venue(conn, name="Pac Park", provider="mlb_statsapi", provider_venue_id="VP",
+                       timezone="America/Los_Angeles")
+    prior = _create_canonical(
+        conn, league_code="MLB", home_team_id=home, away_team_id=away,
+        scheduled_start="2026-07-01T23:00:00Z", game_date_local="2026-07-01",
+        official_provider="mlb_statsapi", official_game_key="PACPRIOR",
+        decided_at="2026-07-05T00:00:00.000000Z")
+    conn.execute("UPDATE games SET venue = ? WHERE game_id = ?", (venue, prior))
+    conn.commit()
+    return venue
+
+
+def _game_at_venue(conn: sqlite3.Connection, *, home: str, away: str, key: str, start: str,
+                   date: str, tz: str, vid: str, neutral: bool = True,
+                   observed_at: str = "2026-07-24T18:00:00.000000Z",
+                   validate: bool = True) -> str:
+    """A canonical game whose actual event venue carries timezone ``tz``."""
+
+    venue = seed_venue(conn, name=f"Venue {key}", provider="mlb_statsapi", provider_venue_id=vid,
+                       timezone=tz, observed_at=observed_at, validate=validate)
+    gid = _create_canonical(
+        conn, league_code="MLB", home_team_id=home, away_team_id=away, scheduled_start=start,
+        game_date_local=date, official_provider="mlb_statsapi", official_game_key=key,
+        is_neutral_site=neutral, decided_at="2026-07-05T00:00:00.000000Z")
+    conn.execute("UPDATE games SET venue = ? WHERE game_id = ?", (venue, gid))
+    conn.commit()
+    return gid
+
+
 def _event_link(conn: sqlite3.Connection, sb_id: str):  # type: ignore[no-untyped-def]
     return SqliteSportsbookRepository(conn).event_link(sb_id)
 
@@ -211,14 +243,22 @@ def test_utc_fallback_lowers_confidence(conn: sqlite3.Connection) -> None:
 
 
 def test_cross_midnight_pacific(conn: sqlite3.Connection) -> None:
+    # A 7pm Pacific game -> 02:00 UTC next day; the venue-local slate is the 25th.
+    # With a real Pacific home-venue timezone the slate is validated for real
+    # (not merely by UTC instant) and the match lands at the full exact score.
     home, away = _two_mlb_teams(conn)
-    # A 7pm Pacific game -> 03:00 UTC next day, canonical local date is the 25th.
+    _pacific_home_venue(conn, home, away)
     _game(conn, home=home, away=away, key="G1", start="2026-07-26T02:00:00Z", date="2026-07-25")
     seed_sb_event(conn, provider_event_id="E1", sport_key=MLB_KEY,
                   commence_time="2026-07-26T02:00:00Z", home_team_raw="Test Home",
                   away_team_raw="Test Away")
-    r = _sb(conn, provider_event_id="E1")  # matches by UTC instant, not calendar date
+    r = _sb(conn, provider_event_id="E1")
     assert r.counters.events_accepted == 1
+    d = SqliteMatchingRepository(conn).decisions_for_source(
+        source_provider=ODDS, source_ref=_only_event(conn), entity_type="sportsbook_event")[0]
+    assert d.method == "schedule_key_exact" and d.score == 0.95  # real venue-local slate
+    assert "DQ-TZ-001" not in {r[0] for r in conn.execute(
+        "SELECT rule_code FROM data_quality_issues")}
 
 
 def test_non_neutral_reversed_is_blocking(conn: sqlite3.Connection) -> None:
@@ -581,6 +621,471 @@ def test_cli_json_and_exit(conn: sqlite3.Connection, db_path) -> None:  # type: 
     assert code == 0
     payload = _json.loads(out[-1])
     assert payload["source"] == "sportsbook" and payload["events_accepted"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# §2 League-specific season mapping
+# --------------------------------------------------------------------------- #
+def test_season_year_for_mlb_calendar_year() -> None:
+    from sports_quant.matching.season import in_season, season_year_for
+
+    assert season_year_for("MLB", "2026-07-24T18:00:00Z") == 2026
+    assert season_year_for("MLB", "2026-03-30") == 2026
+    assert in_season("MLB", 2026, "2026-07-24")
+
+
+def test_season_year_for_nba_boundary() -> None:
+    from sports_quant.matching.season import in_season, season_year_for
+
+    assert season_year_for("NBA", "2025-10-20") == 2025  # tip-off -> 2025-26
+    assert season_year_for("NBA", "2026-01-15") == 2025  # Jan of 2025-26
+    assert season_year_for("NBA", "2026-04-10") == 2025  # playoffs of 2025-26
+    assert season_year_for("NBA", "2026-07-05") == 2026  # next season starts
+    assert in_season("NBA", 2025, "2026-04-10") and not in_season("NBA", 2026, "2026-04-10")
+
+
+def _nba_teams_windowed(conn: sqlite3.Connection, *, valid_from: int, valid_to: int) -> tuple[str, str]:
+    from .conftest import seed_team_alias
+
+    home = seed_team(conn, league_code="NBA", abbreviation="TNH", canonical_name="NBA Home",
+                     city="NH", nickname="NHs", aliases=[("Perm Home", "full", "")])
+    away = seed_team(conn, league_code="NBA", abbreviation="TNA", canonical_name="NBA Away",
+                     city="NA", nickname="NAs", aliases=[("Perm Away", "full", "")])
+    seed_team_alias(conn, team_id=home, league_code="NBA", alias="Win Home", provider=ODDS,
+                    valid_from=valid_from, valid_to=valid_to)
+    seed_team_alias(conn, team_id=away, league_code="NBA", alias="Win Away", provider=ODDS,
+                    valid_from=valid_from, valid_to=valid_to)
+    return home, away
+
+
+def test_nba_alias_valid_for_2025_resolves_april_event(conn: sqlite3.Connection) -> None:
+    # An alias valid only for the 2025-26 season resolves an April-2026 event,
+    # because April 2026 maps to NBA season 2025.
+    home, away = _nba_teams_windowed(conn, valid_from=2025, valid_to=2025)
+    _create_canonical(conn, league_code="NBA", home_team_id=home, away_team_id=away,
+                      scheduled_start="2026-04-10T23:30:00Z", game_date_local="2026-04-10",
+                      official_provider="balldontlie", official_game_key="NG1")
+    seed_sb_event(conn, provider_event_id="NE1", sport_key=NBA_KEY,
+                  commence_time="2026-04-10T23:30:00Z", home_team_raw="Win Home",
+                  away_team_raw="Win Away", league_code="NBA")
+    r = _sb(conn, sport_key=NBA_KEY, provider_event_id="NE1")
+    assert r.counters.events_accepted == 1
+
+
+def test_nba_alias_valid_for_2026_does_not_resolve_april_event(conn: sqlite3.Connection) -> None:
+    # An alias valid only for the 2026-27 season must NOT resolve an April-2026
+    # event (which is season 2025) -- the previous buggy int(year) would have.
+    home, away = _nba_teams_windowed(conn, valid_from=2026, valid_to=2026)
+    _create_canonical(conn, league_code="NBA", home_team_id=home, away_team_id=away,
+                      scheduled_start="2026-04-10T23:30:00Z", game_date_local="2026-04-10",
+                      official_provider="balldontlie", official_game_key="NG1")
+    seed_sb_event(conn, provider_event_id="NE1", sport_key=NBA_KEY,
+                  commence_time="2026-04-10T23:30:00Z", home_team_raw="Win Home",
+                  away_team_raw="Win Away", league_code="NBA")
+    r = _sb(conn, sport_key=NBA_KEY, provider_event_id="NE1")
+    assert r.counters.events_accepted == 0 and r.counters.events_no_candidate == 1
+
+
+def test_naive_commence_time_produces_no_season_guess(conn: sqlite3.Connection) -> None:
+    import dataclasses
+
+    home, away = _setup_mlb(conn)
+    _game(conn, home=home, away=away, key="G1")
+    sb = seed_sb_event(conn, provider_event_id="E1", sport_key=MLB_KEY,
+                       commence_time="2026-07-25T23:05:00Z", home_team_raw="Test Home",
+                       away_team_raw="Test Away")
+    # The schema forbids storing an offset-free commence, so exercise the matcher
+    # guard directly with a doctored (naive) event: it must not guess a season or
+    # a match, and must surface the unusable timestamp.
+    svc = MatchSportsbookService(conn)
+    real = SqliteSportsbookRepository(conn).get_event(sb)
+    assert real is not None
+    naive = dataclasses.replace(real, commence_time="2026-07-25T23:05:00")
+    svc._sb.list_events_for_matching = lambda **_kw: [naive]  # type: ignore[method-assign]
+    with transaction(conn):
+        r = svc.match_range(provider_event_id="E1")
+    assert r.counters.events_accepted == 0 and r.counters.events_no_candidate == 1
+    assert "DQ-TZ-001" in {row[0] for row in conn.execute(
+        "SELECT rule_code FROM data_quality_issues")}
+
+
+# --------------------------------------------------------------------------- #
+# §3 Local slate as a real candidate requirement
+# --------------------------------------------------------------------------- #
+def test_home_venue_slate_match_full_score(conn: sqlite3.Connection) -> None:
+    home, away = _setup_mlb(conn)  # NY ordinary home venue established
+    _game(conn, home=home, away=away, key="G1", start="2026-07-25T23:05:00Z", date="2026-07-25")
+    seed_sb_event(conn, provider_event_id="E1", sport_key=MLB_KEY,
+                  commence_time="2026-07-25T23:05:00Z", home_team_raw="Test Home",
+                  away_team_raw="Test Away")
+    _sb(conn, provider_event_id="E1")
+    d = SqliteMatchingRepository(conn).decisions_for_source(
+        source_provider=ODDS, source_ref=_only_event(conn), entity_type="sportsbook_event")[0]
+    assert d.score == 0.95  # home-venue tz validated the slate; no UTC cap
+
+
+def test_wrong_local_date_candidate_excluded(conn: sqlite3.Connection) -> None:
+    home, away = _setup_mlb(conn)  # NY home tz
+    # Event's NY slate is 2026-07-25, but the only same-teams game claims 07-26.
+    _game(conn, home=home, away=away, key="G1", start="2026-07-26T02:00:00Z", date="2026-07-26")
+    seed_sb_event(conn, provider_event_id="E1", sport_key=MLB_KEY,
+                  commence_time="2026-07-26T02:00:00Z", home_team_raw="Test Home",
+                  away_team_raw="Test Away")
+    r = _sb(conn, provider_event_id="E1")
+    assert r.counters.events_accepted == 0 and r.counters.events_no_candidate == 1
+
+
+def test_two_wide_candidates_different_slates_one_survives(conn: sqlite3.Connection) -> None:
+    home, away = _setup_mlb(conn)  # NY home tz; event NY slate = 07-25
+    # Both within +/-12h of the event and both OUTSIDE +/-90 min, so the wide
+    # tier sees two raw candidates; local-slate validation keeps only the 07-25 one.
+    _game(conn, home=home, away=away, key="GA", start="2026-07-25T18:00:00Z", date="2026-07-25")
+    _game(conn, home=home, away=away, key="GB", start="2026-07-26T06:00:00Z", date="2026-07-26",
+          gn=2)
+    sb = seed_sb_event(conn, provider_event_id="E1", sport_key=MLB_KEY,
+                       commence_time="2026-07-26T02:00:00Z", home_team_raw="Test Home",
+                       away_team_raw="Test Away")
+    r = _sb(conn, provider_event_id="E1")
+    assert r.counters.events_accepted == 1 and r.counters.events_ambiguous == 0
+    ga = conn.execute("SELECT game_id FROM games WHERE official_game_key='GA'").fetchone()[0]
+    assert _event_link(conn, sb)[0] == ga
+
+
+def test_neutral_venue_actual_tz_validates_slate(conn: sqlite3.Connection) -> None:
+    home, away = _setup_mlb(conn)  # NY ordinary home venue
+    # A neutral game in Tokyo; event instant is 07-26 in Tokyo but 07-25 in NY.
+    _game_at_venue(conn, home=home, away=away, key="TOK", start="2026-07-25T16:00:00Z",
+                   date="2026-07-26", tz="Asia/Tokyo", vid="VT")
+    sb = seed_sb_event(conn, provider_event_id="E1", sport_key=MLB_KEY,
+                       commence_time="2026-07-25T16:00:00Z", home_team_raw="Test Home",
+                       away_team_raw="Test Away")
+    r = _sb(conn, provider_event_id="E1")
+    assert r.counters.events_accepted == 1  # Tokyo venue tz confirms the 07-26 slate
+    assert _event_link(conn, sb)[2] == "direct"
+
+
+def test_future_known_venue_evidence_excluded(conn: sqlite3.Connection) -> None:
+    home, away = _setup_mlb(conn)  # NY ordinary home venue (event NY slate = 07-25)
+    # Same Tokyo neutral game, but the venue was first observed AFTER the event's
+    # last_observed_at, so its tz must not be used; the home-venue fallback puts
+    # the event on 07-25, contradicting the game's 07-26 slate -> excluded.
+    _game_at_venue(conn, home=home, away=away, key="TOK", start="2026-07-25T16:00:00Z",
+                   date="2026-07-26", tz="Asia/Tokyo", vid="VT",
+                   observed_at="2027-01-01T00:00:00.000000Z")
+    seed_sb_event(conn, provider_event_id="E1", sport_key=MLB_KEY,
+                  commence_time="2026-07-25T16:00:00Z", home_team_raw="Test Home",
+                  away_team_raw="Test Away")
+    r = _sb(conn, provider_event_id="E1")
+    assert r.counters.events_accepted == 0 and r.counters.events_no_candidate == 1
+
+
+def test_invalid_venue_timezone_surfaced_not_utc(conn: sqlite3.Connection) -> None:
+    home, away = _setup_mlb(conn)
+    # A well-formed but unresolvable IANA zone must be surfaced, never forced to UTC.
+    _game_at_venue(conn, home=home, away=away, key="BAD", start="2026-07-25T23:05:00Z",
+                   date="2026-07-25", tz="Mars/Phobos", vid="VX", validate=False)
+    seed_sb_event(conn, provider_event_id="E1", sport_key=MLB_KEY,
+                  commence_time="2026-07-25T23:05:00Z", home_team_raw="Test Home",
+                  away_team_raw="Test Away")
+    r = _sb(conn, provider_event_id="E1")
+    assert r.counters.events_accepted == 0 and r.counters.events_no_candidate == 1
+    assert "DQ-TZ-001" in {row[0] for row in conn.execute(
+        "SELECT rule_code FROM data_quality_issues")}
+
+
+def test_doubleheader_candidates_stay_on_slate(conn: sqlite3.Connection) -> None:
+    home, away = _setup_mlb(conn)
+    # Two same-day games (same slate); event near game 2 links game 2 only.
+    _game(conn, home=home, away=away, key="G1", start="2026-07-25T17:00:00Z", date="2026-07-25",
+          gn=1)
+    _game(conn, home=home, away=away, key="G2", start="2026-07-25T23:00:00Z", date="2026-07-25",
+          gn=2)
+    sb = seed_sb_event(conn, provider_event_id="E1", sport_key=MLB_KEY,
+                       commence_time="2026-07-25T23:05:00Z", home_team_raw="Test Home",
+                       away_team_raw="Test Away")
+    r = _sb(conn, provider_event_id="E1")
+    assert r.counters.events_accepted == 1
+    g2 = conn.execute("SELECT game_id FROM games WHERE official_game_key='G2'").fetchone()[0]
+    assert _event_link(conn, sb)[0] == g2
+
+
+# --------------------------------------------------------------------------- #
+# §5/§6 Orientation-conflict link prevention + fail-closed readiness
+# --------------------------------------------------------------------------- #
+def _neutral_setup_two_events(conn: sqlite3.Connection, first: str, second: str) -> None:
+    home, away = _setup_mlb(conn)
+    _game(conn, home=home, away=away, key="G1", neutral=True)
+    # ``first`` is created (and therefore processed) before ``second``.
+    seed_sb_event(conn, provider_event_id=first, sport_key=MLB_KEY,
+                  commence_time="2026-07-25T23:05:00Z", home_team_raw="Test Home",
+                  away_team_raw="Test Away")
+    seed_sb_event(conn, provider_event_id=second, sport_key=MLB_KEY,
+                  commence_time="2026-07-25T23:05:00Z", home_team_raw="Test Away",
+                  away_team_raw="Test Home")
+
+
+def test_direct_then_swapped_conflict_blocks_second(conn: sqlite3.Connection) -> None:
+    _neutral_setup_two_events(conn, "EA-direct", "EB-swapped")
+    r = _sb(conn)
+    assert r.needs_failure_exit and r.counters.blocking_orientation_conflicts >= 1
+    # First (direct) linked; second (swapped) received NO link and is not accepted.
+    a = SqliteSportsbookRepository(conn).get_event_by_provider(ODDS, "EA-direct")
+    b = SqliteSportsbookRepository(conn).get_event_by_provider(ODDS, "EB-swapped")
+    assert a is not None and a.game_id is not None
+    assert b is not None and b.game_id is None
+    codes = {row[0] for row in conn.execute("SELECT rule_code FROM data_quality_issues")}
+    assert "DQ-MATCH-003" in codes
+
+
+def test_swapped_then_direct_conflict_blocks_second(conn: sqlite3.Connection) -> None:
+    # Reverse processing order: the neutral swapped event (created first) links
+    # first; the conflicting direct event (created second) is blocked.
+    home, away = _setup_mlb(conn)
+    _game(conn, home=home, away=away, key="G1", neutral=True)
+    seed_sb_event(conn, provider_event_id="EA", sport_key=MLB_KEY,
+                  commence_time="2026-07-25T23:05:00Z", home_team_raw="Test Away",
+                  away_team_raw="Test Home")  # swapped vs the neutral game
+    seed_sb_event(conn, provider_event_id="EB", sport_key=MLB_KEY,
+                  commence_time="2026-07-25T23:05:00Z", home_team_raw="Test Home",
+                  away_team_raw="Test Away")  # direct, conflicts
+    r = _sb(conn)
+    assert r.needs_failure_exit and r.counters.blocking_orientation_conflicts >= 1
+    a = SqliteSportsbookRepository(conn).get_event_by_provider(ODDS, "EA")
+    b = SqliteSportsbookRepository(conn).get_event_by_provider(ODDS, "EB")
+    assert a is not None and b is not None
+    assert _event_link(conn, a.sb_event_id)[0] is not None
+    assert _event_link(conn, a.sb_event_id)[2] == "swapped"
+    assert b.game_id is None  # conflicting direct event not linked
+
+
+def test_blocking_conflict_skips_outcome_validation(conn: sqlite3.Connection) -> None:
+    home, away = _setup_mlb(conn)
+    _game(conn, home=home, away=away, key="G1", neutral=True)
+    a = seed_sb_event(conn, provider_event_id="EA", sport_key=MLB_KEY,
+                      commence_time="2026-07-25T23:05:00Z", home_team_raw="Test Home",
+                      away_team_raw="Test Away")
+    b = seed_sb_event(conn, provider_event_id="EB", sport_key=MLB_KEY,
+                      commence_time="2026-07-25T23:05:00Z", home_team_raw="Test Away",
+                      away_team_raw="Test Home")
+    # Give the conflicting (second) event a market; its outcomes must NOT be checked.
+    m = seed_sb_market(conn, sb_event_id=b, market_key="h2h")
+    seed_sb_outcome(conn, sb_market_id=m, provider_outcome_name="Test Away", outcome_role="home")
+    r = _sb(conn)
+    _ = a
+    assert r.needs_failure_exit
+    # The only outcomes checked belong to EA (which had none), never EB's market.
+    assert r.counters.outcome_rows_checked == 0
+
+
+def test_readiness_rejects_event_with_unresolved_blocking_dq(conn: sqlite3.Connection) -> None:
+    home, away = _setup_mlb(conn)
+    _game(conn, home=home, away=away, key="G1")
+    sb = seed_sb_event(conn, provider_event_id="E1", sport_key=MLB_KEY,
+                       commence_time="2026-07-25T23:05:00Z", home_team_raw="Test Home",
+                       away_team_raw="Test Away")
+    _sb(conn, provider_event_id="E1")
+    repo = SqliteSportsbookRepository(conn)
+    assert repo.is_orientation_approved(sb)  # direct, clean -> approved
+    # Inject an unresolved blocking identity issue scoped to this event.
+    from sports_quant.db.repositories.data_quality import SqliteDataQualityRepository
+    with transaction(conn):
+        SqliteDataQualityRepository(conn).record(
+            severity="blocking", rule_code="DQ-MATCH-003", entity_type="sportsbook_event",
+            description="injected conflict", entity_id=sb, provider=ODDS)
+    assert not repo.is_orientation_approved(sb)  # now fails closed
+
+
+# --------------------------------------------------------------------------- #
+# §7 Independent outcome-role revalidation
+# --------------------------------------------------------------------------- #
+def test_stored_home_role_with_away_name_detected(conn: sqlite3.Connection) -> None:
+    sb = _accepted_event_with_markets(conn)
+    m = seed_sb_market(conn, sb_event_id=sb, market_key="h2h")
+    # Stored 'home' but the provider name is the AWAY team -> mismatch.
+    seed_sb_outcome(conn, sb_market_id=m, provider_outcome_name="Test Away", outcome_role="home")
+    seed_sb_outcome(conn, sb_market_id=m, provider_outcome_name="Test Home", outcome_role="away")
+    r = _sb(conn, provider_event_id="E1")
+    assert r.counters.outcome_roles_approved == 0  # neither stored role matches provider side
+    codes = {row[0] for row in conn.execute("SELECT rule_code FROM data_quality_issues")}
+    assert "DQ-SB-OUTCOME-001" in codes
+    scoped = conn.execute(
+        "SELECT COUNT(*) FROM data_quality_issues WHERE entity_type='sportsbook_outcome'"
+    ).fetchone()[0]
+    assert scoped >= 2  # both role mismatches scoped to their outcomes
+
+
+def test_stored_away_role_with_home_name_detected(conn: sqlite3.Connection) -> None:
+    sb = _accepted_event_with_markets(conn)
+    m = seed_sb_market(conn, sb_event_id=sb, market_key="h2h")
+    seed_sb_outcome(conn, sb_market_id=m, provider_outcome_name="Test Home", outcome_role="away")
+    seed_sb_outcome(conn, sb_market_id=m, provider_outcome_name="Test Away", outcome_role="home")
+    _sb(conn, provider_event_id="E1")
+    outcome_dq = conn.execute(
+        "SELECT COUNT(*) FROM data_quality_issues WHERE entity_type='sportsbook_outcome' "
+        "AND rule_code='DQ-SB-OUTCOME-001'").fetchone()[0]
+    assert outcome_dq == 2
+
+
+def test_h2h_missing_side_flagged(conn: sqlite3.Connection) -> None:
+    sb = _accepted_event_with_markets(conn)
+    m = seed_sb_market(conn, sb_event_id=sb, market_key="h2h")
+    seed_sb_outcome(conn, sb_market_id=m, provider_outcome_name="Test Home", outcome_role="home")
+    _sb(conn, provider_event_id="E1")
+    market_dq = conn.execute(
+        "SELECT COUNT(*) FROM data_quality_issues WHERE entity_type='sportsbook_market' "
+        "AND rule_code='DQ-SB-OUTCOME-001'").fetchone()[0]
+    assert market_dq == 1
+
+
+def test_h2h_duplicate_side_flagged(conn: sqlite3.Connection) -> None:
+    sb = _accepted_event_with_markets(conn)
+    m = seed_sb_market(conn, sb_event_id=sb, market_key="h2h")
+    # Two 'home' provider names (same team twice) -> duplicate side. Distinct points
+    # keep the two outcome identities separate.
+    seed_sb_outcome(conn, sb_market_id=m, provider_outcome_name="Test Home", outcome_role="home",
+                    point=1.0)
+    seed_sb_outcome(conn, sb_market_id=m, provider_outcome_name="Test Home", outcome_role="home",
+                    point=2.0)
+    _sb(conn, provider_event_id="E1")
+    codes = {row[0] for row in conn.execute("SELECT rule_code FROM data_quality_issues")}
+    assert "DQ-SB-OUTCOME-001" in codes
+
+
+def test_swapped_team_outcomes_remain_unapproved(conn: sqlite3.Connection) -> None:
+    home, away = _setup_mlb(conn)
+    _game(conn, home=home, away=away, key="G1", neutral=True)
+    sb = seed_sb_event(conn, provider_event_id="E1", sport_key=MLB_KEY,
+                       commence_time="2026-07-25T23:05:00Z", home_team_raw="Test Away",
+                       away_team_raw="Test Home")  # neutral swapped
+    m = seed_sb_market(conn, sb_event_id=sb, market_key="h2h")
+    seed_sb_outcome(conn, sb_market_id=m, provider_outcome_name="Test Away", outcome_role="home")
+    seed_sb_outcome(conn, sb_market_id=m, provider_outcome_name="Test Home", outcome_role="away")
+    r = _sb(conn, provider_event_id="E1")
+    assert r.counters.swapped_review_gated == 1
+    assert r.counters.outcome_roles_approved == 0  # swapped approves no canonical team role
+    assert not SqliteSportsbookRepository(conn).is_orientation_approved(sb)
+
+
+def test_provider_names_and_prices_unchanged(conn: sqlite3.Connection) -> None:
+    sb = _accepted_event_with_markets(conn)
+    m = seed_sb_market(conn, sb_event_id=sb, market_key="h2h")
+    o = seed_sb_outcome(conn, sb_market_id=m, provider_outcome_name="Test Home",
+                        outcome_role="home")
+    seed_sb_outcome(conn, sb_market_id=m, provider_outcome_name="Test Away", outcome_role="away")
+    seed_sb_price(conn, sb_outcome_id=o, price_american=-150)
+    names_before = {r[0] for r in conn.execute(
+        "SELECT provider_outcome_name FROM sportsbook_outcomes")}
+    prices_before = conn.execute("SELECT COUNT(*) FROM sportsbook_price_snapshots").fetchone()[0]
+    _sb(conn, provider_event_id="E1")
+    names_after = {r[0] for r in conn.execute(
+        "SELECT provider_outcome_name FROM sportsbook_outcomes")}
+    prices_after = conn.execute("SELECT COUNT(*) FROM sportsbook_price_snapshots").fetchone()[0]
+    assert names_before == names_after and prices_before == prices_after
+
+
+# --------------------------------------------------------------------------- #
+# §8 DQ scoping + idempotency
+# --------------------------------------------------------------------------- #
+def test_two_malformed_markets_two_scoped_rows(conn: sqlite3.Connection) -> None:
+    sb = _accepted_event_with_markets(conn)
+    m1 = seed_sb_market(conn, sb_event_id=sb, market_key="h2h", bookmaker_key="draftkings")
+    seed_sb_outcome(conn, sb_market_id=m1, provider_outcome_name="Test Home", outcome_role="home")
+    m2 = seed_sb_market(conn, sb_event_id=sb, market_key="totals", bookmaker_key="fanduel")
+    seed_sb_outcome(conn, sb_market_id=m2, provider_outcome_name="Over", outcome_role="over",
+                    point=8.5)  # missing 'under'
+    _sb(conn, provider_event_id="E1")
+    rows = conn.execute(
+        "SELECT DISTINCT entity_id FROM data_quality_issues WHERE entity_type='sportsbook_market'"
+    ).fetchall()
+    assert {r[0] for r in rows} == {m1, m2}
+
+
+def test_two_malformed_outcomes_separate_rows(conn: sqlite3.Connection) -> None:
+    sb = _accepted_event_with_markets(conn)
+    m = seed_sb_market(conn, sb_event_id=sb, market_key="h2h")
+    o1 = seed_sb_outcome(conn, sb_market_id=m, provider_outcome_name="Test Away",
+                         outcome_role="home")  # mismatch
+    o2 = seed_sb_outcome(conn, sb_market_id=m, provider_outcome_name="Test Home",
+                         outcome_role="away")  # mismatch
+    _sb(conn, provider_event_id="E1")
+    ids = {r[0] for r in conn.execute(
+        "SELECT entity_id FROM data_quality_issues WHERE entity_type='sportsbook_outcome'")}
+    assert ids == {o1, o2}
+
+
+def test_identical_rerun_is_idempotent(conn: sqlite3.Connection) -> None:
+    sb = _accepted_event_with_markets(conn)
+    m = seed_sb_market(conn, sb_event_id=sb, market_key="h2h")
+    seed_sb_outcome(conn, sb_market_id=m, provider_outcome_name="Test Home", outcome_role="home")
+    _sb(conn, provider_event_id="E1")
+    dq_after_first = conn.execute(
+        "SELECT COUNT(*) FROM data_quality_issues WHERE rule_code='DQ-SB-OUTCOME-001'"
+    ).fetchone()[0]
+    _sb(conn, provider_event_id="E1")
+    dq_after_second = conn.execute(
+        "SELECT COUNT(*) FROM data_quality_issues WHERE rule_code='DQ-SB-OUTCOME-001'"
+    ).fetchone()[0]
+    assert dq_after_first == dq_after_second  # no duplicate rows on identical replay
+
+
+def test_materially_different_later_issue_visible(conn: sqlite3.Connection) -> None:
+    sb = _accepted_event_with_markets(conn)
+    m = seed_sb_market(conn, sb_event_id=sb, market_key="h2h")
+    o = seed_sb_outcome(conn, sb_market_id=m, provider_outcome_name="Test Home",
+                        outcome_role="home")
+    _sb(conn, provider_event_id="E1")  # h2h missing away -> one market DQ
+    first = conn.execute(
+        "SELECT COUNT(*) FROM data_quality_issues WHERE entity_id=?", (m,)).fetchone()[0]
+    # A materially different later defect on the same market (a duplicate home side).
+    seed_sb_outcome(conn, sb_market_id=m, provider_outcome_name="Test Home",
+                    outcome_role="home", point=3.0)
+    _ = o
+    _sb(conn, provider_event_id="E1")
+    second = conn.execute(
+        "SELECT COUNT(*) FROM data_quality_issues WHERE entity_id=?", (m,)).fetchone()[0]
+    assert second > first  # the new, materially different defect is not hidden
+
+
+def test_randomized_prices_do_not_change_match(tmp_path: Path) -> None:
+    rng = random.Random(11)
+    links: set[tuple] = set()  # type: ignore[type-arg]
+    for i in range(8):
+        db = tmp_path / f"pr{i}.db"
+        initialize_database(db)
+        with Database(db).connection() as c:
+            home, away = _setup_mlb(c)
+            _game(c, home=home, away=away, key="G1")
+            sb = seed_sb_event(c, provider_event_id="E1", sport_key=MLB_KEY,
+                               commence_time="2026-07-25T23:05:00Z", home_team_raw="Test Home",
+                               away_team_raw="Test Away")
+            m = seed_sb_market(c, sb_event_id=sb, market_key="h2h")
+            o = seed_sb_outcome(c, sb_market_id=m, provider_outcome_name="Test Home",
+                                outcome_role="home")
+            for _ in range(rng.randint(0, 5)):
+                seed_sb_price(c, sb_outcome_id=o, price_american=rng.choice([-200, -110, 150, 320]))
+            with transaction(c):
+                MatchSportsbookService(c).match_range(provider_event_id="E1")
+            links.add(SqliteSportsbookRepository(c).event_link(sb)[1:])  # (decision?, orient)
+    # The orientation is identical regardless of the random price history.
+    assert {orient for _dec, orient in links} == {"direct"}
+
+
+def test_dry_run_hash_and_counts_unchanged(conn: sqlite3.Connection) -> None:
+    import hashlib
+
+    home, away = _setup_mlb(conn)
+    _game(conn, home=home, away=away, key="G1")
+    seed_sb_event(conn, provider_event_id="E1", sport_key=MLB_KEY,
+                  commence_time="2026-07-25T23:05:00Z", home_team_raw="Test Home",
+                  away_team_raw="Test Away")
+
+    def _dump_hash() -> str:
+        return hashlib.sha256("\n".join(conn.iterdump()).encode("utf-8")).hexdigest()
+
+    before = _dump_hash()
+    r = _sb(conn, dry_run=True, provider_event_id="E1")
+    assert r.counters.rows_persisted == 0
+    assert _dump_hash() == before  # dry-run changed no logical database state
 
 
 def _only_event(conn: sqlite3.Connection) -> str:

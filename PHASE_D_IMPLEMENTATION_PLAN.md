@@ -960,6 +960,25 @@ Model column = recommended driver.
 > `event_link`, `is_orientation_approved` (PIT-aware). CLI: `match-games --source
 > sportsbook`. **D5B2 (Kalshi `match-markets`, ticker/title/rules parsing,
 > `rules_hash`, Yes/No orientation) is NOT built; Phase E has not started.**
+>
+> **D5B1 correctness repair (season / local-slate / conflict / outcome / DQ).**
+> Team resolution now uses the league-specific season (`season_year_for`): an NBA
+> Jan–June date maps to the previous start year, and a naive/unparseable commence
+> produces no guessed season and no match. Local-slate agreement is enforced as a
+> real candidate requirement — each league/team/UTC-window candidate must share
+> the event's venue-derived local date (candidate actual-venue tz known by
+> `last_observed_at` → home-venue tz → UTC last resort, capped 0.88); a
+> contradictory candidate is excluded and an unresolvable timezone is surfaced
+> (`DQ-TZ-001`), never forced to UTC. A blocking orientation conflict now prevents
+> linking entirely (no accepted decision, no `game_id`/`match_decision_id`/
+> `orientation`, no outcome validation, exit 1). `is_orientation_approved()` is
+> fail-closed (also requires decision↔link agreement, no conflicting linked event,
+> no unresolved blocking identity/orientation DQ on the event). Outcome roles are
+> recomputed provider-side from immutable names + market and disagreements
+> surfaced scoped to the outcome, never trusting or rewriting the stored role. DQ
+> issues are scoped to event / `sportsbook_market` / `sportsbook_outcome` and
+> idempotent per `(rule, entity, provider, description)`. No new migration (schema
+> stays v15). **D5B1 is not yet independently reviewed.**
 
 - **Provider:** none (pure compute over ingested data).
 - **Create:** `matching/{__init__,normalize,teams,players,games,markets,decisions,

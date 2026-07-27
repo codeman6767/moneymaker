@@ -372,6 +372,30 @@ never a new game.
 > accepted orientation; unknown/malformed outcomes are retained and surfaced via
 > `DQ-SB-OUTCOME-001`, never dropped or rewritten. Kalshi event/market matching
 > (§6) remains **unimplemented (D5B2)**.
+>
+> **D5B1 correctness repairs.** The season passed to the team resolver now uses
+> the league-specific convention (`matching/season.py::season_year_for`): an NBA
+> January–June date maps to the *previous* start year, so 2025-26 aliases resolve
+> an April-2026 event; a naive/unparseable commence never produces a guessed
+> season. Local-slate agreement is a **real candidate requirement**, not just a
+> confidence hint: for each league/team/UTC-window candidate the event's
+> candidate-relative local date is derived (candidate's actual event-venue tz when
+> that venue evidence was known by `last_observed_at` → knowledge-time-valid home
+> venue tz → UTC last resort) and must equal the candidate's `game_date_local`;
+> contradictory candidates are excluded, an unresolvable timezone is surfaced
+> (`DQ-TZ-001`) rather than forced to UTC, and only a genuine UTC fallback keeps a
+> candidate (capped 0.88). A blocking orientation conflict now **prevents linking
+> entirely** — no accepted decision, no `game_id`/`match_decision_id`/`orientation`,
+> no outcome validation, exit 1 — instead of linking first and discovering the
+> conflict after. `is_orientation_approved()` is fail-closed: it also requires
+> decision↔link agreement, no other event linked to the game under a different
+> orientation, and no unresolved blocking identity/orientation DQ on the event.
+> Outcome roles are recomputed provider-side from the immutable names + market
+> (never trusting the stored `outcome_role`); disagreements are surfaced scoped to
+> the outcome and never approved or rewritten. DQ issues are scoped to the
+> narrowest entity — event / `sportsbook_market` / `sportsbook_outcome` — and are
+> idempotent per `(rule, entity, provider, description)`, so two distinct defects
+> stay independently visible.
 
 Inputs from The Odds API (already normalized by the existing
 `sports_quant/providers/odds_api.py`): `id`, `sport_key`, `commence_time`,
@@ -382,17 +406,25 @@ Procedure:
 1. `sport_key` → `league_id` (static map: `baseball_mlb` → `lg_mlb`,
    `basketball_nba` → `lg_nba`).
 2. `home_team` / `away_team` → `team_id` via §3, scoped
-   `provider = 'the_odds_api'`. Unresolved team ⇒ stop, `no_candidate`.
-3. `commence_time` → `game_date_local` via the **venue-aware timezone hierarchy**
-   (`PHASE_D_IMPLEMENTATION_PLAN.md` §5.1): actual event venue tz → official
-   provider-supplied local date/tz → canonical home venue tz → UTC date (last
-   resort, which lowers confidence and writes `DQ-TZ-001`). Never the runner's
-   local zone — a 7pm PT game is 03:00 UTC the following day, so a UTC date would
-   place it on the wrong slate; that is exactly why UTC is only the last-resort
-   fallback and is flagged when used.
-4. Apply game tiers §4.2.
-5. Persist the decision; on acceptance set `sportsbook_events.game_id` and
-   `match_decision_id`.
+   `provider = 'the_odds_api'`, under the **league-specific season** for the
+   commence date (`season_year_for`; NBA Jan–June → previous start year). A
+   naive/unparseable commence stops the attempt (`no_candidate`) — no guessed
+   season. Unresolved team ⇒ stop, `no_candidate`.
+3. Generate candidates by league + team + bounded UTC window, then require each
+   candidate to share the event's **resolved local slate**. The event's
+   candidate-relative local date comes from the venue-aware timezone hierarchy
+   (`PHASE_D_IMPLEMENTATION_PLAN.md` §5.1): the candidate's actual event venue tz
+   (only when that venue evidence was known by `last_observed_at`) → canonical
+   home venue tz → UTC date (last resort, which caps confidence at 0.88 and writes
+   `DQ-TZ-001`). A candidate whose `game_date_local` contradicts the derived date
+   is excluded; an unresolvable timezone is surfaced honestly, never forced to
+   UTC. A 7pm PT game is 02:00 UTC the following day, so the slate is validated by
+   venue, not by the UTC calendar date.
+4. Apply game tiers §4.2 to the slate-consistent candidates.
+5. Before recording an accepted decision, reject a blocking orientation conflict
+   with an event already linked to the candidate game (no link, exit 1). Otherwise
+   persist the decision; on acceptance set `sportsbook_events.game_id`,
+   `match_decision_id`, and `orientation`, then revalidate outcome roles.
 
 The Odds API's `home_team` field is authoritative for orientation except at
 neutral sites, where §4.3 applies.

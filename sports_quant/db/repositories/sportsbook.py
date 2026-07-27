@@ -375,18 +375,34 @@ class SqliteSportsbookRepository(Repository):
             return LinkOutcome.ALREADY_LINKED
         return LinkOutcome.CONFLICT
 
+    #: Blocking rule codes whose unresolved presence must fail orientation readiness.
+    _READINESS_BLOCKING_RULES = ("DQ-MATCH-003", "DQ-MATCH-006", "DQ-SB-LEAGUE-001")
+
     def is_orientation_approved(self, sb_event_id: str, *, as_of: Optional[str] = None) -> bool:
         """Whether an event's team-outcome orientation is canonically approved.
 
-        True only when the event is linked with ``orientation = 'direct'`` and its
-        supporting decision is ``accepted`` and not review-gated -- and, when
-        ``as_of`` is given, was ``decided_at <= as_of``. A neutral-site swapped
-        match (review-gated) is never approved. A pricing consumer uses this to
-        exclude unapproved or blocking orientation before interpreting any price.
+        Fail-closed. True ONLY when every one of these holds:
+
+        * the event is linked with ``orientation = 'direct'``;
+        * its supporting decision is ``accepted`` and not review-gated -- and,
+          when ``as_of`` is given, was ``decided_at <= as_of``;
+        * the decision and the link agree on the game (``matched_entity_id ==
+          game_id``) -- no link-integrity conflict;
+        * no OTHER sportsbook event is linked to the same game with a different
+          typed orientation (an unresolved cross-event orientation conflict);
+        * no unresolved blocking identity/orientation data-quality issue
+          (``DQ-MATCH-003``/``DQ-MATCH-006``/``DQ-SB-LEAGUE-001``) is scoped to
+          this event.
+
+        A neutral-site swapped match (review-gated) is never approved. A direct
+        orientation string alone is not enough when any of the above is violated.
+        A pricing consumer uses this to exclude unapproved or blocking
+        orientation before interpreting any price.
         """
 
         row = self._fetch_one(
-            "SELECT e.orientation AS orientation, d.outcome AS outcome, "
+            "SELECT e.orientation AS orientation, e.game_id AS game_id, "
+            "d.matched_entity_id AS matched_entity_id, d.outcome AS outcome, "
             "d.needs_manual_review AS review, d.decided_at AS decided_at "
             "FROM sportsbook_events e JOIN entity_match_decisions d "
             "ON e.match_decision_id = d.match_id WHERE e.sb_event_id = ?",
@@ -396,11 +412,29 @@ class SqliteSportsbookRepository(Repository):
             return False
         if as_of is not None and str(row["decided_at"]) > as_of:
             return False
-        return (
+        game_id = self._opt_str(row, "game_id")
+        if not (
             str(row["orientation"]) == "direct"
             and str(row["outcome"]) == "accepted"
             and int(row["review"]) == 0
+            and game_id is not None
+            and self._opt_str(row, "matched_entity_id") == game_id
+        ):
+            return False
+        # A different event linked to the same game with an incompatible
+        # orientation makes this game's orientation contested -> not safe.
+        for other_id, other_orient, _dec in self.events_linked_to_game(game_id):
+            if other_id != sb_event_id and other_orient is not None and other_orient != "direct":
+                return False
+        # Any unresolved blocking identity/orientation issue on this event fails closed.
+        placeholders = ", ".join("?" for _ in self._READINESS_BLOCKING_RULES)
+        blocking = self._fetch_one(
+            "SELECT 1 FROM data_quality_issues WHERE severity = 'blocking' "
+            "AND resolved_at IS NULL AND entity_type = 'sportsbook_event' AND entity_id = ? "
+            f"AND rule_code IN ({placeholders}) LIMIT 1",  # noqa: S608 - fixed rule tuple
+            (sb_event_id, *self._READINESS_BLOCKING_RULES),
         )
+        return blocking is None
 
     # -- Markets -------------------------------------------------------------
     def upsert_market(
