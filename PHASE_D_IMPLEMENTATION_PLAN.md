@@ -1016,6 +1016,24 @@ Model column = recommended driver.
 > **No authenticated Kalshi access or account/order surface. Phase E has not
 > started.**
 >
+> **D5B2 repair (service atomicity / replay / historical readiness / title / No
+> side / review-state).** Event and market accepts wrap the decision + link in one
+> service-owned transaction (a direct persisted `KalshiMatchingService` call is
+> atomic by itself; a link failure rolls back the decision + candidates + semantic
+> fields; accepted/linked counters increment only after commit). `ALREADY_LINKED`
+> replay verifies the full existing link (same game/Yes/hash/semantic, exact
+> decision owned by this event/market, accepted, not review-gated) — a corrupt
+> pairing is blocking, never idempotent. `is_kalshi_market_orientation_approved`
+> separates current (today's hash + review flag, fail-closed) from historical
+> (`as_of` uses only decision-existence + DQ `detected_at`/`resolved_at`, never
+> today's mutable hash/flag). Ordered `A at B` titles are validated for
+> away/home orientation (reversed rejected); `A vs B` stays unordered.
+> `no_sub_title`, when present, must name the opposing participant. Automated
+> rules-hash invalidation uses `flag_for_review` (sets `needs_manual_review=1`,
+> leaves `reviewed_by`/`reviewed_at` NULL) so it is never mistaken for a completed
+> human review; `mark_reviewed` stays reserved for an audited reviewer. Schema
+> remains v16; no d017.
+>
 > **D5B1 correctness repair (season / local-slate / conflict / outcome / DQ).**
 > Team resolution now uses the league-specific season (`season_year_for`): an NBA
 > Jan–June date maps to the previous start year, and a naive/unparseable commence

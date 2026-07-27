@@ -26,6 +26,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from typing import Optional
 
+from ..db.engine import transaction
 from ..db.repositories.data_quality import SqliteDataQualityRepository
 from ..db.repositories.games import SqliteGameRepository
 from ..db.repositories.kalshi import SqliteKalshiRepository
@@ -232,9 +233,10 @@ class MatchKalshiService:
         if teams is None:
             return
 
-        # Title cross-check: the ticker and title team sets must agree.
-        if not self._title_agrees(event.title, event.sub_title, teams, league_id, season,
-                                   "kalshi_event", kev, event, result):
+        # Title cross-check: the ticker and title teams (and 'at' orientation) agree.
+        title_kind = self._title_agrees(event.title, event.sub_title, teams, league_id, season,
+                                        "kalshi_event", kev, event, result)
+        if title_kind is None:
             return
 
         game = self._match_game(
@@ -245,9 +247,9 @@ class MatchKalshiService:
         if game is None:
             return
         cand, tier, score = game
-        self._accept_event(event, cand, tier, score, [cand], result)
+        self._accept_event(event, cand, tier, score, [cand], title_kind, result)
 
-    def _accept_event(self, event, game, tier, score, candidate_games, result):  # type: ignore[no-untyped-def]
+    def _accept_event(self, event, game, tier, score, candidate_games, title_kind, result):  # type: ignore[no-untyped-def]
         kev = event.kalshi_event_id
         current_game, current_dec = self._kal.event_link(kev)
         if current_game is not None and not self._dry_run:
@@ -255,30 +257,46 @@ class MatchKalshiService:
                                                                            game.game_id):
                 result.counters.events_already_linked += 1
                 return
+            # Different game, or same game with a corrupt/review-gated decision:
+            # blocking, never an idempotent replay (task §4).
             self._dq(result, "blocking", "DQ-MATCH-003", "kalshi_event", kev, event,
-                     f"event already linked to game {current_game}; attempt proposes "
-                     f"{game.game_id}")
+                     f"event already linked to game {current_game} via an invalid/mismatched "
+                     f"decision; attempt proposes {game.game_id}")
             self._record(result, "kalshi_event", kev, "rejected", tier, 0.0, None,
-                         [game.game_id], reason="event already linked to a different game",
+                         [game.game_id],
+                         reason="event already linked to a different game or corrupt decision",
                          review=True)
             return
         evidence = json.dumps({"away": game.away_team_id, "home": game.home_team_id,
-                               "tier": tier, "game_date_local": game.game_date_local},
-                              sort_keys=True)
+                               "tier": tier, "game_date_local": game.game_date_local,
+                               "title": title_kind}, sort_keys=True)
         candidates = [CandidateInput(score=score, tier=tier, candidate_entity_id=g.game_id,
                                      method=tier, evidence=evidence if g.game_id == game.game_id
                                      else None) for g in candidate_games]
-        decision_id = self._record(result, "kalshi_event", kev, "accepted", tier, score,
-                                   game.game_id, candidates)
-        if decision_id is not None and not self._dry_run:
+        if self._dry_run:
+            result.counters.events_accepted += 1
+            result.counters.candidates_recorded += len(candidates)
+            return
+        # Record the accepted decision and apply + verify the link as ONE atomic
+        # unit, safe even for a direct persisted service call with no outer
+        # transaction (task §2). A non-LINKED result raises, rolling the decision
+        # and candidates back; committed counters increment only afterwards.
+        with transaction(self._conn):
+            decision = self._match.record_decision(
+                entity_type="kalshi_event", source_provider=KALSHI_PUBLIC_PROVIDER,
+                source_ref=kev, outcome="accepted", method=tier, score=score,
+                threshold=_THRESHOLD, matcher_version=self._version, candidates=candidates,
+                matched_entity_id=game.game_id, needs_manual_review=False, run_id=self._run_id,
+                raw_response_id=self._current_raw)
             outcome = self._kal.link_event_game(kalshi_event_id=kev, game_id=game.game_id,
-                                                match_decision_id=decision_id)
-            if outcome == LinkOutcome.LINKED:
-                result.counters.events_linked += 1
-                result.counters.rows_persisted += 1
-            elif outcome != LinkOutcome.ALREADY_LINKED:
+                                                match_decision_id=decision.match_id)
+            if outcome != LinkOutcome.LINKED:
                 raise MatchLinkError(
                     f"kalshi event link {kev} -> {game.game_id} returned {outcome.value}")
+        result.counters.events_accepted += 1
+        result.counters.candidates_recorded += len(candidates)
+        result.counters.events_linked += 1
+        result.counters.rows_persisted += 2
 
     # -- market matching ----------------------------------------------------- #
     def _resolve_market(self, market, result: MatchKalshiResult) -> None:  # type: ignore[no-untyped-def]
@@ -341,11 +359,13 @@ class MatchKalshiService:
                                    result)
         if teams is None:
             return
-        if not self._title_agrees(market.title, market.subtitle, teams, league_id, season,
-                                  "kalshi_market", kmk, market, result):
+        title_kind = self._title_agrees(market.title, market.subtitle, teams, league_id, season,
+                                        "kalshi_market", kmk, market, result)
+        if title_kind is None:
             return
 
-        # Rules are authoritative for the settlement subject (task §9).
+        # Rules are authoritative for the settlement subject (task §9); no_sub_title
+        # (when present) must name the opposing participant (task §7).
         yes_team, scheduled_time = self._resolve_yes_and_rules(
             market, pmk, teams, league_id, season, result)
         if yes_team is None:
@@ -360,7 +380,8 @@ class MatchKalshiService:
         if game is None:
             return
         cand, tier, score = game
-        self._accept_market(market, cand, tier, score, [cand], yes_team, series, result)
+        self._accept_market(market, cand, tier, score, [cand], yes_team, series, title_kind,
+                            result)
 
     def _resolve_yes_and_rules(self, market, pmk, teams, league_id, season, result):  # type: ignore[no-untyped-def]
         """Resolve the canonical Yes team from ticker/yes_sub_title/rules agreement.
@@ -416,9 +437,24 @@ class MatchKalshiService:
             self._record(result, "kalshi_market", kmk, "rejected", "conflict", 0.0, None, [],
                          reason="rules/ticker Yes disagreement", review=True)
             return None, None
+        # The No side, for this supported binary game-winner semantic, is the
+        # opposing game participant. When `no_sub_title` is supplied it must
+        # resolve to exactly that team -- never the Yes team, never an unrelated
+        # team; when absent, the authoritative ticker+rules already prove both
+        # binary participants, so absence alone is acceptable (task §7).
+        other_team = teams.away_id if yes_from_ticker == teams.home_id else teams.home_id
+        if market.no_sub_title:
+            no_id = self._resolve_name(market.no_sub_title, league_id, season)
+            if no_id is None or no_id == yes_from_ticker or no_id != other_team:
+                self._dq(result, "issue", "DQ-KAL-RULES-001", "kalshi_market", kmk, market,
+                         "no_sub_title does not name the opposing game participant")
+                self._record(result, "kalshi_market", kmk, "rejected", "conflict", 0.0, None, [],
+                             reason="no_sub_title/opponent disagreement", review=True)
+                return None, None
         return yes_from_ticker, rules.scheduled_time
 
-    def _accept_market(self, market, game, tier, score, candidate_games, yes_team, series, result):  # type: ignore[no-untyped-def]
+    def _accept_market(self, market, game, tier, score, candidate_games, yes_team, series,
+                       title_kind, result):  # type: ignore[no-untyped-def]
         kmk = market.kalshi_market_id
         rules_hash = market.rules_hash
         if rules_hash is None:
@@ -434,7 +470,7 @@ class MatchKalshiService:
                 self._record(result, "kalshi_market", kmk, "rejected", "conflict", 0.0, None,
                              [game.game_id], reason="event/market game disagreement", review=True)
                 return
-        # Atomic pre-check of the market's own current link.
+        # Pre-check the market's own current link (replay / rules-change / conflict).
         cur = self._kal.market_link(kmk)
         cur_game, cur_dec, cur_yes, cur_hash, cur_sem = cur
         if cur_game is not None and not self._dry_run:
@@ -446,16 +482,16 @@ class MatchKalshiService:
                 return
             if same_link and cur_hash != rules_hash:
                 # Rules changed since the accepted decision was bound (task §15):
-                # invalidate readiness with a blocking DQ-MATCH-004, flag the
-                # existing decision for review, and NEVER silently rewrite the
-                # matched hash or record a fresh accepted decision.
+                # invalidate readiness with a blocking DQ-MATCH-004 and FLAG the
+                # existing decision for review WITHOUT recording a human reviewer
+                # (task §8). Never rewrite the matched hash or record a fresh
+                # accepted decision.
                 result.counters.rules_hash_conflicts += 1
                 self._dq(result, "blocking", "DQ-MATCH-004", "kalshi_market", kmk, market,
                          "market rules_hash changed since the accepted decision; "
                          "orientation invalidated")
                 if cur_dec is not None:
-                    self._match.mark_reviewed(cur_dec, reviewed_by="d5b2-rules-change",
-                                              needs_manual_review=True)
+                    self._match.flag_for_review(cur_dec)
                 return
             self._dq(result, "blocking", "DQ-MATCH-003", "kalshi_market", kmk, market,
                      f"market already linked (game {cur_game}, yes {cur_yes}) incompatibly")
@@ -463,24 +499,38 @@ class MatchKalshiService:
                          [game.game_id], reason="market already linked incompatibly", review=True)
             return
         evidence = json.dumps({"yes_team_id": yes_team, "semantic": series.semantic,
-                               "tier": tier, "game_date_local": game.game_date_local},
-                              sort_keys=True)
+                               "tier": tier, "game_date_local": game.game_date_local,
+                               "title": title_kind}, sort_keys=True)
         candidates = [CandidateInput(score=score, tier=tier, candidate_entity_id=g.game_id,
                                      method=tier, evidence=evidence if g.game_id == game.game_id
                                      else None) for g in candidate_games]
-        decision_id = self._record(result, "kalshi_market", kmk, "accepted", tier, score,
-                                   game.game_id, candidates)
-        if decision_id is not None and not self._dry_run:
+        if self._dry_run:
+            result.counters.markets_accepted += 1
+            result.counters.candidates_recorded += len(candidates)
+            return
+        # Record the accepted decision and apply + verify the full semantic link
+        # (game, decision, Yes team, matched hash, semantic) as ONE atomic unit,
+        # safe for a direct persisted call (task §3). `link_market_game` also
+        # verifies the Yes team participates in the game; any non-LINKED result
+        # raises and rolls the decision, candidates and semantic fields back.
+        with transaction(self._conn):
+            decision = self._match.record_decision(
+                entity_type="kalshi_market", source_provider=KALSHI_PUBLIC_PROVIDER,
+                source_ref=kmk, outcome="accepted", method=tier, score=score,
+                threshold=_THRESHOLD, matcher_version=self._version, candidates=candidates,
+                matched_entity_id=game.game_id, needs_manual_review=False, run_id=self._run_id,
+                raw_response_id=self._current_raw)
             outcome = self._kal.link_market_game(
-                kalshi_market_id=kmk, game_id=game.game_id, match_decision_id=decision_id,
+                kalshi_market_id=kmk, game_id=game.game_id, match_decision_id=decision.match_id,
                 yes_team_id=yes_team, matched_rules_hash=rules_hash,
                 market_semantic=series.semantic)
-            if outcome == LinkOutcome.LINKED:
-                result.counters.markets_linked += 1
-                result.counters.rows_persisted += 1
-            elif outcome != LinkOutcome.ALREADY_LINKED:
+            if outcome != LinkOutcome.LINKED:
                 raise MatchLinkError(
                     f"kalshi market link {kmk} -> {game.game_id} returned {outcome.value}")
+        result.counters.markets_accepted += 1
+        result.counters.candidates_recorded += len(candidates)
+        result.counters.markets_linked += 1
+        result.counters.rows_persisted += 2
 
     # -- team pair + title helpers ------------------------------------------ #
     def _resolve_pair(self, away_code, home_code, league_id, season, entity_id, event, result):  # type: ignore[no-untyped-def]
@@ -511,24 +561,46 @@ class MatchKalshiService:
 
     def _title_agrees(self, title, subtitle, teams, league_id, season, etype, entity_id, event,
                       result):  # type: ignore[no-untyped-def]
+        """Cross-check the ticker teams against the title, honouring orientation.
+
+        Returns ``'ordered'`` (an ``A at B`` title whose away/home agree with the
+        ticker), ``'unordered'`` (a valid ``A vs B`` set match), or ``None`` when
+        the title is absent/one-sided/reversed/mismatched (rejected + review). An
+        ``at`` title with reversed away/home is a real orientation error and is
+        rejected, never silently reduced to an unordered set."""
+
         parsed = kp.parse_title_teams(title)
-        if parsed is None:
-            parsed = kp.parse_title_teams(subtitle)
-        if parsed is None or isinstance(parsed, kp.ParseError):
+        if not isinstance(parsed, kp.TitleTeams):
+            sub = kp.parse_title_teams(subtitle)
+            if isinstance(sub, kp.TitleTeams):
+                parsed = sub
+        if not isinstance(parsed, kp.TitleTeams):
             reason = "title absent" if parsed is None else parsed.reason
             self._dq(result, "issue", "DQ-KAL-TITLE-001", etype, entity_id, event,
                      f"title does not name a clear game pair: {reason}")
             self._record(result, etype, entity_id, "rejected", "title_unresolved", 0.0, None, [],
                          reason=f"title unresolved: {reason}", review=True)
-            return False
+            return None
+        if parsed.away_name is not None and parsed.home_name is not None:
+            # Ordered `A at B`: away/home must match the ticker's away/home.
+            away = self._resolve_name(parsed.away_name, league_id, season)
+            home = self._resolve_name(parsed.home_name, league_id, season)
+            if away != teams.away_id or home != teams.home_id:
+                self._dq(result, "issue", "DQ-KAL-TITLE-001", etype, entity_id, event,
+                         "ordered 'at' title orientation disagrees with the ticker away/home")
+                self._record(result, etype, entity_id, "rejected", "conflict", 0.0, None, [],
+                             reason="ticker/title orientation disagreement", review=True)
+                return None
+            return "ordered"
+        # Unordered `A vs B`: only the team SET must match; no orientation claimed.
         title_ids = {self._resolve_name(n, league_id, season) for n in parsed.names}
         if None in title_ids or title_ids != {teams.away_id, teams.home_id}:
             self._dq(result, "issue", "DQ-KAL-TITLE-001", etype, entity_id, event,
                      "ticker and title team sets disagree")
             self._record(result, etype, entity_id, "rejected", "conflict", 0.0, None, [],
                          reason="ticker/title team disagreement", review=True)
-            return False
-        return True
+            return None
+        return "unordered"
 
     # -- canonical game matching (tiers §11/§12) ----------------------------- #
     def _match_game(self, league_id, teams, date_local, *, scheduled_time, cutoff, entity_type,
@@ -618,12 +690,19 @@ class MatchKalshiService:
 
     # -- decision / dq helpers ----------------------------------------------- #
     def _event_decision_valid(self, kev, decision_id, game_id) -> bool:  # type: ignore[no-untyped-def]
+        """Whether an event's current link decision genuinely, cleanly backs it.
+
+        A matching game id alone is NOT enough (task §4): the decision must exist,
+        be a ``kalshi_event`` decision for THIS event, accepted, name this game,
+        and NOT be review-gated (a flagged decision is not a clean replay)."""
+
         if decision_id is None:
             return False
         d = self._match.get(decision_id)
         return (d is not None and d.entity_type == "kalshi_event"
                 and d.source_provider == KALSHI_PUBLIC_PROVIDER and d.source_ref == kev
-                and d.outcome == "accepted" and d.matched_entity_id == game_id)
+                and d.outcome == "accepted" and d.matched_entity_id == game_id
+                and not d.needs_manual_review)
 
     def _market_decision_valid(self, kmk, decision_id, game_id) -> bool:  # type: ignore[no-untyped-def]
         if decision_id is None:
@@ -631,7 +710,8 @@ class MatchKalshiService:
         d = self._match.get(decision_id)
         return (d is not None and d.entity_type == "kalshi_market"
                 and d.source_provider == KALSHI_PUBLIC_PROVIDER and d.source_ref == kmk
-                and d.outcome == "accepted" and d.matched_entity_id == game_id)
+                and d.outcome == "accepted" and d.matched_entity_id == game_id
+                and not d.needs_manual_review)
 
     def _ambiguous(self, result, entity_type, entity_id, game_ids, tier):  # type: ignore[no-untyped-def]
         self._record(result, entity_type, entity_id, "ambiguous", tier, 0.0, None, game_ids,

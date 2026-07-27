@@ -565,6 +565,9 @@ class SqliteKalshiRepository(Repository):
             return False
         game_id = self._opt_str(row, "game_id")
         yes_team = self._opt_str(row, "yes_team_id")
+        # Immutable / decision-time facts checked for BOTH current and historical
+        # reads: the link is a supported game-winner naming this market and game,
+        # the decision is accepted, and the Yes team participates.
         if not (
             self._opt_str(row, "market_semantic") == "game_winner"
             and game_id is not None
@@ -573,15 +576,20 @@ class SqliteKalshiRepository(Repository):
             and str(row["source_provider"]) == "kalshi_public"
             and str(row["source_ref"]) == kalshi_market_id
             and str(row["outcome"]) == "accepted"
-            and int(row["review"]) == 0
             and self._opt_str(row, "matched_entity_id") == game_id
             and yes_team in (self._opt_str(row, "home_team_id"), self._opt_str(row, "away_team_id"))
         ):
             return False
-        # A rules change invalidates orientation immediately: the matched hash the
-        # decision was bound to must still be the current hash.
-        if self._opt_str(row, "matched_rules_hash") != self._opt_str(row, "rules_hash"):
-            return False
+        # CURRENT readiness (no cutoff) fails closed on today's mutable state: a
+        # review flag or a rules-hash change invalidates immediately. HISTORICAL
+        # readiness must NOT read today's mutable `rules_hash` or `needs_manual_review`
+        # (a later change would retroactively rewrite an earlier answer); it relies
+        # only on the decision existing by the cutoff and the DQ timeline below.
+        if as_of is None:
+            if int(row["review"]) != 0:
+                return False
+            if self._opt_str(row, "matched_rules_hash") != self._opt_str(row, "rules_hash"):
+                return False
         placeholders = ", ".join("?" for _ in _KALSHI_READINESS_BLOCKING_RULES)
         dq_sql = (
             "SELECT 1 FROM data_quality_issues WHERE severity = 'blocking' "

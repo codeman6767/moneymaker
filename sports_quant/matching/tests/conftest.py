@@ -338,6 +338,7 @@ def seed_kalshi_market(
     series_ticker: str,
     title: str,
     yes_sub_title: Optional[str] = None,
+    no_sub_title: Optional[str] = None,
     subtitle: Optional[str] = None,
     rules_primary: Optional[str] = None,
     close_time: Optional[str] = None,
@@ -356,8 +357,9 @@ def seed_kalshi_market(
             market_ticker=market_ticker, raw_response_id=rid, raw_response_hash=rhash,
             observed_at=observed_at, event_ticker=event_ticker, kalshi_event_id=kalshi_event_id,
             series_ticker=series_ticker, title=title, yes_sub_title=yes_sub_title,
-            subtitle=subtitle, status="active", close_time=close_time, result=result,
-            rules_primary=rules_primary, rules_hash=_rules_hash(rules_primary, None),
+            no_sub_title=no_sub_title, subtitle=subtitle, status="active", close_time=close_time,
+            result=result, rules_primary=rules_primary,
+            rules_hash=_rules_hash(rules_primary, None),
         )
     return market.kalshi_market_id
 

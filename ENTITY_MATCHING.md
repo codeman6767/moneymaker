@@ -518,6 +518,31 @@ missing data nobody notices.
 >
 > The Phase-C ingestion note still holds for the price/book/trade tables: those
 > remain append-only public data, untouched by matching.
+>
+> **D5B2 repair (atomicity / replay / historical readiness / title / No-side /
+> review-state).** A clean event or market accept records the decision and
+> applies + verifies its link (for a market: `game_id`, decision, `yes_team_id`,
+> `matched_rules_hash`, `market_semantic`) inside **one transaction owned by the
+> service**, so a direct persisted `KalshiMatchingService` call is atomic on its
+> own — a failed link rolls the decision and candidates back and accepted/linked
+> counters increment only after commit. `ALREADY_LINKED` replay now requires the
+> full existing link to be valid (same game/Yes/hash/semantic, the exact decision
+> owned by this event/market, accepted, matching entity, and **not**
+> review-gated); a matching game id alone or a corrupt pairing is blocking, never
+> idempotent. Rules-hash readiness distinguishes **current** (compares today's
+> `rules_hash` to `matched_rules_hash` and fails closed on a change or review
+> flag) from **historical** (`as_of` reads rely only on the decision existing by
+> the cutoff and the DQ `detected_at`/`resolved_at` timeline — never today's
+> mutable hash or review flag — so a later rules change cannot retroactively
+> rewrite an earlier answer). Title orientation is honoured: an `A at B` title
+> must match the ticker's away/home (a reversed `at` is rejected + review-flagged);
+> `A vs B` stays an unordered set match. When `no_sub_title` is present it must
+> name the opposing participant (never the Yes team, never an unrelated team);
+> when absent, the No side is derived as the opposing participant only for this
+> binary game-winner semantic. An automated rules-hash invalidation flags the
+> decision for review via `flag_for_review` (sets `needs_manual_review=1`, leaves
+> `reviewed_by`/`reviewed_at` NULL) — it is never recorded as a completed human
+> review; `mark_reviewed` remains reserved for an audited reviewer.
 
 Hardest of the three, because Kalshi identifies markets by ticker and prose
 rather than by structured team fields.

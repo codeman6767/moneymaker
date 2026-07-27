@@ -226,13 +226,19 @@ game-winner markets) built (schema v16):** event and market
 `entity_match_decisions` rows are bounded by `decided_at` the same way; a current
 `kalshi_events.game_id` / `kalshi_markets.game_id` link is not itself PIT-safe;
 `SqliteKalshiRepository.is_kalshi_market_orientation_approved(kalshi_market_id,
-as_of=cutoff)` is fail-closed and as-of correct — it requires an accepted,
-non-review market decision `decided_at ≤ cutoff` that names this market and game,
-a Yes team participating in the game, the **current** `rules_hash` still equal to
-the decision's `matched_rules_hash` (a later rules change invalidates it
-immediately via a blocking `DQ-MATCH-004`), and no blocking identity/orientation/
-rules DQ active at the cutoff (DQ `detected_at`/`resolved_at` evaluated against
-`as_of`). The decision/DQ provenance uses the Kalshi row's
+as_of=cutoff)` is fail-closed and as-of correct. **Current** readiness (no
+cutoff) requires an accepted, non-review-flagged market decision naming this
+market and game, a Yes team participating in the game, today's `rules_hash` still
+equal to the decision's `matched_rules_hash` (a current rules change invalidates
+it immediately via a blocking `DQ-MATCH-004`), and no unresolved blocking DQ.
+**Historical** readiness (`as_of=cutoff`) must NOT read today's mutable
+`rules_hash` or `needs_manual_review` (a later change would retroactively rewrite
+an earlier answer); it requires only that the accepted decision existed by the
+cutoff (`decided_at ≤ cutoff`, immutable accept/game/Yes) and that no blocking
+identity/orientation/rules DQ was *active* at the cutoff (DQ `detected_at ≤
+cutoff AND (resolved_at IS NULL OR resolved_at > cutoff)`) — so a rules change
+detected after the cutoff cannot block it, one active at the cutoff does, and a
+resolution after the cutoff still blocks that cutoff. The decision/DQ provenance uses the Kalshi row's
 `current_raw_response_id` (the response that supplied the matched metadata), never
 the immutable `first_raw_response_id`. Current mutable Kalshi metadata is not a
 complete historical snapshot; c008 retains only current + first provenance, so

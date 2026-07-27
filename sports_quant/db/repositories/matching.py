@@ -142,6 +142,25 @@ class SqliteMatchingRepository(Repository):
             raise RepositoryError(f"match decision {match_id!r} not found")
         return decision
 
+    def flag_for_review(self, match_id: str) -> MatchDecision:
+        """Flag an existing decision for review WITHOUT recording a human review.
+
+        Sets ``needs_manual_review = 1`` only; ``reviewed_by`` and ``reviewed_at``
+        stay NULL, so an AUTOMATED invalidation (e.g. a Kalshi rules-hash change)
+        is never mistaken for a completed audited review. Idempotent, and touches
+        only permitted review columns, so the original accepted decision evidence
+        is preserved. :meth:`mark_reviewed` remains reserved for a real reviewer.
+        """
+
+        self._conn.execute(
+            "UPDATE entity_match_decisions SET needs_manual_review = 1 WHERE match_id = ?",
+            (match_id,),
+        )
+        decision = self.get(match_id)
+        if decision is None:
+            raise RepositoryError(f"match decision {match_id!r} not found")
+        return decision
+
     def get(self, match_id: str) -> Optional[MatchDecision]:
         row = self._fetch_one(
             f"SELECT {self._DECISION_COLUMNS} FROM entity_match_decisions WHERE match_id = ?",
