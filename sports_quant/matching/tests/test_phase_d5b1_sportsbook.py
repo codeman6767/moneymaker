@@ -83,18 +83,50 @@ def _pacific_home_venue(conn: sqlite3.Connection, home: str, away: str) -> str:
 def _game_at_venue(conn: sqlite3.Connection, *, home: str, away: str, key: str, start: str,
                    date: str, tz: str, vid: str, neutral: bool = True,
                    observed_at: str = "2026-07-24T18:00:00.000000Z",
+                   decided_at: str = "2026-07-05T00:00:00.000000Z",
                    validate: bool = True) -> str:
-    """A canonical game whose actual event venue carries timezone ``tz``."""
+    """A canonical game whose actual event venue carries timezone ``tz``.
+
+    ``observed_at`` is the venue entity's knowledge time; ``decided_at`` is the
+    game's accepted match decision time (the venue-association knowledge time)."""
 
     venue = seed_venue(conn, name=f"Venue {key}", provider="mlb_statsapi", provider_venue_id=vid,
                        timezone=tz, observed_at=observed_at, validate=validate)
     gid = _create_canonical(
         conn, league_code="MLB", home_team_id=home, away_team_id=away, scheduled_start=start,
         game_date_local=date, official_provider="mlb_statsapi", official_game_key=key,
-        is_neutral_site=neutral, decided_at="2026-07-05T00:00:00.000000Z")
+        is_neutral_site=neutral, decided_at=decided_at)
     conn.execute("UPDATE games SET venue = ? WHERE game_id = ?", (venue, gid))
     conn.commit()
     return gid
+
+
+def _manual_sb_link(conn: sqlite3.Connection, *, sb_id: str, game_id: str, orientation: str,
+                    outcome: str = "accepted", source_ref: str = None,  # type: ignore[assignment]
+                    matched: str = None) -> str:  # type: ignore[assignment]
+    """Directly record a sportsbook decision and link the event to it.
+
+    Lets corruption/conflict tests construct a specific prior link (a decision
+    for another event, a rejected decision, a decision naming another game)."""
+
+    from sports_quant.db.repositories.matching import CandidateInput, SqliteMatchingRepository
+
+    with transaction(conn):
+        dec = SqliteMatchingRepository(conn).record_decision(
+            entity_type="sportsbook_event", source_provider=ODDS,
+            source_ref=source_ref if source_ref is not None else sb_id,
+            outcome=outcome, method="schedule_key_exact", score=0.95, threshold=0.85,
+            matcher_version="d5a-1",
+            candidates=[CandidateInput(score=0.95, tier="schedule_key_exact",
+                                       candidate_entity_id=game_id)],
+            matched_entity_id=(matched if matched is not None else game_id) if outcome == "accepted"
+            else None,
+            rejection_reason=None if outcome == "accepted" else "seed rejected")
+        conn.execute(
+            "UPDATE sportsbook_events SET game_id = ?, match_decision_id = ?, orientation = ? "
+            "WHERE sb_event_id = ?",
+            (game_id, dec.match_id, orientation, sb_id))
+    return dec.match_id
 
 
 def _event_link(conn: sqlite3.Connection, sb_id: str):  # type: ignore[no-untyped-def]
@@ -1028,22 +1060,55 @@ def test_identical_rerun_is_idempotent(conn: sqlite3.Connection) -> None:
     assert dq_after_first == dq_after_second  # no duplicate rows on identical replay
 
 
-def test_materially_different_later_issue_visible(conn: sqlite3.Connection) -> None:
-    sb = _accepted_event_with_markets(conn)
-    m = seed_sb_market(conn, sb_event_id=sb, market_key="h2h")
-    o = seed_sb_outcome(conn, sb_market_id=m, provider_outcome_name="Test Home",
-                        outcome_role="home")
-    _sb(conn, provider_event_id="E1")  # h2h missing away -> one market DQ
-    first = conn.execute(
-        "SELECT COUNT(*) FROM data_quality_issues WHERE entity_id=?", (m,)).fetchone()[0]
-    # A materially different later defect on the same market (a duplicate home side).
-    seed_sb_outcome(conn, sb_market_id=m, provider_outcome_name="Test Home",
-                    outcome_role="home", point=3.0)
-    _ = o
+def test_dq_dedup_recurrence_and_material_difference(conn: sqlite3.Connection) -> None:
+    # DQ dedup semantics tested directly (an idempotent replay no longer
+    # re-validates outcomes): identical unresolved rows collapse; a materially
+    # different description stays visible; a resolved issue can recur.
+    from sports_quant.db.repositories.data_quality import SqliteDataQualityRepository
+    from sports_quant.matching.sportsbook import MatchSportsbookResult, MatchSportsbookService
+
+    home, away = _setup_mlb(conn)
+    _game(conn, home=home, away=away, key="G1")
+    sb = seed_sb_event(conn, provider_event_id="E1", sport_key=MLB_KEY,
+                       commence_time="2026-07-25T23:05:00Z", home_team_raw="Test Home",
+                       away_team_raw="Test Away")
+    svc = MatchSportsbookService(conn)
+    ev = SqliteSportsbookRepository(conn).get_event(sb)
+    assert ev is not None
+    r = MatchSportsbookResult(dry_run=False)
+    with transaction(conn):
+        svc._dq(r, "issue", "DQ-SB-OUTCOME-001", "sportsbook_market", "mkt_x", ev, "problem A")
+        svc._dq(r, "issue", "DQ-SB-OUTCOME-001", "sportsbook_market", "mkt_x", ev, "problem A")
+        svc._dq(r, "issue", "DQ-SB-OUTCOME-001", "sportsbook_market", "mkt_x", ev, "problem B")
+    count = lambda: conn.execute(  # noqa: E731
+        "SELECT COUNT(*) FROM data_quality_issues WHERE entity_id='mkt_x'").fetchone()[0]
+    assert count() == 2  # A deduped to one row; B materially different -> its own row
+    dq = SqliteDataQualityRepository(conn)
+    issue_a = next(i for i in dq.list_open() if i.description == "problem A")
+    with transaction(conn):
+        dq.resolve(issue_a.issue_id)
+    r2 = MatchSportsbookResult(dry_run=False)
+    with transaction(conn):
+        svc._dq(r2, "issue", "DQ-SB-OUTCOME-001", "sportsbook_market", "mkt_x", ev, "problem A")
+    a_rows = conn.execute(
+        "SELECT COUNT(*) FROM data_quality_issues WHERE entity_id='mkt_x' AND description='problem A'"
+    ).fetchone()[0]
+    assert a_rows == 2  # the resolved detection plus a fresh recurrence
+
+
+def test_idempotent_replay_skips_revalidation(conn: sqlite3.Connection) -> None:
+    home, away = _setup_mlb(conn)
+    _game(conn, home=home, away=away, key="G1")
+    seed_sb_event(conn, provider_event_id="E1", sport_key=MLB_KEY,
+                  commence_time="2026-07-25T23:05:00Z", home_team_raw="Test Home",
+                  away_team_raw="Test Away")
     _sb(conn, provider_event_id="E1")
-    second = conn.execute(
-        "SELECT COUNT(*) FROM data_quality_issues WHERE entity_id=?", (m,)).fetchone()[0]
-    assert second > first  # the new, materially different defect is not hidden
+    decisions_before = SqliteMatchingRepository(conn).count()
+    r2 = _sb(conn, provider_event_id="E1")
+    # Exact replay: recognized, no new accepted decision, no extra link, counted separately.
+    assert r2.counters.events_already_linked == 1 and r2.counters.events_accepted == 0
+    assert r2.counters.event_links_applied == 0
+    assert SqliteMatchingRepository(conn).count() == decisions_before  # no unbounded growth
 
 
 def test_randomized_prices_do_not_change_match(tmp_path: Path) -> None:
@@ -1086,6 +1151,348 @@ def test_dry_run_hash_and_counts_unchanged(conn: sqlite3.Connection) -> None:
     r = _sb(conn, dry_run=True, provider_event_id="E1")
     assert r.counters.rows_persisted == 0
     assert _dump_hash() == before  # dry-run changed no logical database state
+
+
+# --------------------------------------------------------------------------- #
+# §3/§4 Decision/link atomicity + idempotent replay corners
+# --------------------------------------------------------------------------- #
+def test_event_already_linked_to_other_game_blocks(conn: sqlite3.Connection) -> None:
+    home, away = _setup_mlb(conn)
+    # gA is out of the event's window (not a candidate); gB is the real candidate.
+    ga = _game(conn, home=home, away=away, key="GA", start="2026-07-20T23:05:00Z",
+               date="2026-07-20")
+    gb = _game(conn, home=home, away=away, key="GB", start="2026-07-25T23:05:00Z",
+               date="2026-07-25")
+    sb = seed_sb_event(conn, provider_event_id="E1", sport_key=MLB_KEY,
+                       commence_time="2026-07-25T23:05:00Z", home_team_raw="Test Home",
+                       away_team_raw="Test Away")
+    _manual_sb_link(conn, sb_id=sb, game_id=ga, orientation="direct")
+    # A market so we can prove outcome validation is skipped on the conflict.
+    m = seed_sb_market(conn, sb_event_id=sb, market_key="h2h")
+    seed_sb_outcome(conn, sb_market_id=m, provider_outcome_name="Test Home", outcome_role="home")
+    r = _sb(conn, provider_event_id="E1")
+    assert r.needs_failure_exit and r.counters.events_accepted == 0
+    assert r.counters.events_rejected == 1 and r.counters.outcome_rows_checked == 0
+    assert _event_link(conn, sb)[0] == ga  # existing link unchanged, not repointed to gb
+    _ = gb
+
+
+def test_link_failure_rolls_back_accepted_decision(conn: sqlite3.Connection) -> None:
+    import pytest
+
+    from sports_quant.db.repositories.references import LinkOutcome
+
+    home, away = _setup_mlb(conn)
+    _game(conn, home=home, away=away, key="G1")
+    sb = seed_sb_event(conn, provider_event_id="E1", sport_key=MLB_KEY,
+                       commence_time="2026-07-25T23:05:00Z", home_team_raw="Test Home",
+                       away_team_raw="Test Away")
+    svc = MatchSportsbookService(conn)
+    svc._sb.link_game = lambda **_kw: LinkOutcome.CONFLICT  # type: ignore[method-assign]
+    before = SqliteMatchingRepository(conn).count()
+    with pytest.raises(Exception):  # noqa: B017 - SportsbookLinkError propagates
+        with transaction(conn):
+            svc.match_range(provider_event_id="E1")
+    # Rolled back: no accepted decision persisted, event unlinked.
+    assert SqliteMatchingRepository(conn).count() == before
+    assert _event_link(conn, sb)[0] is None
+
+
+def test_replay_mismatched_orientation_not_idempotent(conn: sqlite3.Connection) -> None:
+    home, away = _setup_mlb(conn)
+    g1 = _game(conn, home=home, away=away, key="G1", neutral=True)
+    sb = seed_sb_event(conn, provider_event_id="E1", sport_key=MLB_KEY,
+                       commence_time="2026-07-25T23:05:00Z", home_team_raw="Test Away",
+                       away_team_raw="Test Home")  # matches neutral G1 as swapped
+    _manual_sb_link(conn, sb_id=sb, game_id=g1, orientation="direct")  # corrupt prior orientation
+    r = _sb(conn, provider_event_id="E1")
+    assert r.needs_failure_exit and r.counters.events_accepted == 0
+    assert r.counters.events_already_linked == 0  # orientation differs -> not a clean replay
+
+
+def test_replay_with_rejected_current_decision_is_conflict(conn: sqlite3.Connection) -> None:
+    home, away = _setup_mlb(conn)
+    g1 = _game(conn, home=home, away=away, key="G1")
+    sb = seed_sb_event(conn, provider_event_id="E1", sport_key=MLB_KEY,
+                       commence_time="2026-07-25T23:05:00Z", home_team_raw="Test Home",
+                       away_team_raw="Test Away")
+    # Current link points at G1 with a REJECTED decision -> not a valid link.
+    _manual_sb_link(conn, sb_id=sb, game_id=g1, orientation="direct", outcome="rejected")
+    r = _sb(conn, provider_event_id="E1")
+    assert r.needs_failure_exit and r.counters.events_already_linked == 0
+    assert r.counters.events_accepted == 0
+
+
+def test_replay_with_foreign_decision_is_conflict(conn: sqlite3.Connection) -> None:
+    home, away = _setup_mlb(conn)
+    g1 = _game(conn, home=home, away=away, key="G1")
+    sb = seed_sb_event(conn, provider_event_id="E1", sport_key=MLB_KEY,
+                       commence_time="2026-07-25T23:05:00Z", home_team_raw="Test Home",
+                       away_team_raw="Test Away")
+    # Current link's decision names a DIFFERENT event (source_ref) -> corrupt pairing.
+    _manual_sb_link(conn, sb_id=sb, game_id=g1, orientation="direct", source_ref="OTHER-EVENT")
+    r = _sb(conn, provider_event_id="E1")
+    assert r.needs_failure_exit and r.counters.events_already_linked == 0
+
+
+def test_corrupt_pairing_fails_readiness(conn: sqlite3.Connection) -> None:
+    home, away = _setup_mlb(conn)
+    ga = _game(conn, home=home, away=away, key="GA")
+    gb = _game(conn, home=home, away=away, key="GB", start="2026-07-20T23:05:00Z",
+               date="2026-07-20")
+    sb = seed_sb_event(conn, provider_event_id="E1", sport_key=MLB_KEY,
+                       commence_time="2026-07-25T23:05:00Z", home_team_raw="Test Home",
+                       away_team_raw="Test Away")
+    # Link to gA but with a decision that NAMES gB -> decision/link disagree.
+    _manual_sb_link(conn, sb_id=sb, game_id=ga, orientation="direct", matched=gb)
+    assert not SqliteSportsbookRepository(conn).is_orientation_approved(sb)
+
+
+# --------------------------------------------------------------------------- #
+# §5/§6 UTC contradiction + venue-association knowledge time
+# --------------------------------------------------------------------------- #
+def test_utc_only_contradiction_excludes_candidate(conn: sqlite3.Connection) -> None:
+    # No venue evidence -> UTC fallback; a cross-midnight game whose canonical
+    # slate differs from the UTC date must NOT false-match.
+    home, away = _two_mlb_teams(conn)
+    _game(conn, home=home, away=away, key="G1", start="2026-07-26T02:00:00Z", date="2026-07-25")
+    seed_sb_event(conn, provider_event_id="E1", sport_key=MLB_KEY,
+                  commence_time="2026-07-26T02:00:00Z", home_team_raw="Test Home",
+                  away_team_raw="Test Away")
+    r = _sb(conn, provider_event_id="E1")
+    assert r.counters.events_accepted == 0 and r.counters.events_no_candidate == 1
+
+
+def test_utc_only_agreement_keeps_capped(conn: sqlite3.Connection) -> None:
+    home, away = _two_mlb_teams(conn)
+    _game(conn, home=home, away=away, key="G1", start="2026-07-25T23:05:00Z", date="2026-07-25")
+    seed_sb_event(conn, provider_event_id="E1", sport_key=MLB_KEY,
+                  commence_time="2026-07-25T23:05:00Z", home_team_raw="Test Home",
+                  away_team_raw="Test Away")
+    _sb(conn, provider_event_id="E1")
+    d = SqliteMatchingRepository(conn).decisions_for_source(
+        source_provider=ODDS, source_ref=_only_event(conn), entity_type="sportsbook_event")[0]
+    assert d.outcome == "accepted" and d.score == 0.88  # UTC date agrees -> kept, capped
+
+
+def test_venue_association_learned_late_is_ignored(conn: sqlite3.Connection) -> None:
+    home, away = _setup_mlb(conn)  # NY ordinary home venue known early
+    # Tokyo neutral game: venue entity known early, but the game's accepted
+    # decision (its venue association) is decided AFTER the event cutoff.
+    _game_at_venue(conn, home=home, away=away, key="TOK", start="2026-07-25T16:00:00Z",
+                   date="2026-07-26", tz="Asia/Tokyo", vid="VT",
+                   observed_at="2026-07-01T00:00:00.000000Z",
+                   decided_at="2027-01-01T00:00:00.000000Z")
+    seed_sb_event(conn, provider_event_id="E1", sport_key=MLB_KEY,
+                  commence_time="2026-07-25T16:00:00Z", home_team_raw="Test Home",
+                  away_team_raw="Test Away")
+    r = _sb(conn, provider_event_id="E1")
+    # Tokyo tz not usable (association late) -> home NY fallback -> slate mismatch -> excluded.
+    assert r.counters.events_accepted == 0 and r.counters.events_no_candidate == 1
+
+
+def test_venue_association_known_before_cutoff_matches(conn: sqlite3.Connection) -> None:
+    home, away = _setup_mlb(conn)
+    _game_at_venue(conn, home=home, away=away, key="TOK", start="2026-07-25T16:00:00Z",
+                   date="2026-07-26", tz="Asia/Tokyo", vid="VT",
+                   observed_at="2026-07-01T00:00:00.000000Z",
+                   decided_at="2026-07-05T00:00:00.000000Z")
+    sb = seed_sb_event(conn, provider_event_id="E1", sport_key=MLB_KEY,
+                       commence_time="2026-07-25T16:00:00Z", home_team_raw="Test Home",
+                       away_team_raw="Test Away")
+    r = _sb(conn, provider_event_id="E1")
+    assert r.counters.events_accepted == 1
+    assert _event_link(conn, sb)[0] is not None
+
+
+# --------------------------------------------------------------------------- #
+# §7 Tier isolation: exact ambiguity does not fall through
+# --------------------------------------------------------------------------- #
+def test_exact_ambiguity_does_not_fall_through(conn: sqlite3.Connection) -> None:
+    home, away = _setup_mlb(conn)
+    # Two games within +/-90 min (ambiguous) AND a third within 12h. Must stay
+    # ambiguous, never fall through to accept the lone wider candidate.
+    _game(conn, home=home, away=away, key="G1", start="2026-07-25T23:00:00Z", date="2026-07-25",
+          gn=1)
+    _game(conn, home=home, away=away, key="G2", start="2026-07-25T23:40:00Z", date="2026-07-25",
+          gn=2)
+    _game(conn, home=home, away=away, key="G3", start="2026-07-25T18:00:00Z", date="2026-07-25",
+          gn=3)
+    r = seed_sb_event(conn, provider_event_id="E1", sport_key=MLB_KEY,
+                      commence_time="2026-07-25T23:15:00Z", home_team_raw="Test Home",
+                      away_team_raw="Test Away")
+    _ = r
+    res = _sb(conn, provider_event_id="E1")
+    assert res.counters.events_ambiguous == 1 and res.counters.events_accepted == 0
+
+
+# --------------------------------------------------------------------------- #
+# §9 Orientation readiness as-of DQ temporal behavior
+# --------------------------------------------------------------------------- #
+def _inject_blocking_dq(conn: sqlite3.Connection, *, sb_id: str, detected_at: str,
+                        resolved_at: str = None) -> None:  # type: ignore[assignment]
+    from sports_quant.db.ids import new_data_quality_id
+    with transaction(conn):
+        conn.execute(
+            "INSERT INTO data_quality_issues (issue_id, severity, rule_code, entity_type, "
+            "entity_id, provider, description, detected_at, resolved_at, created_at) "
+            "VALUES (?, 'blocking', 'DQ-MATCH-003', 'sportsbook_event', ?, ?, 'temporal', ?, ?, ?)",
+            (new_data_quality_id(), sb_id, ODDS, detected_at, resolved_at, detected_at))
+
+
+def _linked_direct_event(conn: sqlite3.Connection) -> tuple[str, str]:
+    home, away = _setup_mlb(conn)
+    _game(conn, home=home, away=away, key="G1")
+    sb = seed_sb_event(conn, provider_event_id="E1", sport_key=MLB_KEY,
+                       commence_time="2026-07-25T23:05:00Z", home_team_raw="Test Home",
+                       away_team_raw="Test Away")
+    _sb(conn, provider_event_id="E1")
+    d = SqliteMatchingRepository(conn).decisions_for_source(
+        source_provider=ODDS, source_ref=sb, entity_type="sportsbook_event")[0]
+    return sb, d.decided_at
+
+
+def test_dq_detected_after_cutoff_does_not_block_earlier(conn: sqlite3.Connection) -> None:
+    sb, decided = _linked_direct_event(conn)
+    _inject_blocking_dq(conn, sb_id=sb, detected_at="2030-01-01T00:00:00.000000Z")
+    repo = SqliteSportsbookRepository(conn)
+    assert repo.is_orientation_approved(sb, as_of=decided)  # DQ is in the future of the cutoff
+    assert not repo.is_orientation_approved(sb)  # currently unresolved -> blocked now
+
+
+def test_dq_active_at_cutoff_blocks_even_if_resolved_later(conn: sqlite3.Connection) -> None:
+    sb, decided = _linked_direct_event(conn)
+    _inject_blocking_dq(conn, sb_id=sb, detected_at="2020-01-01T00:00:00.000000Z",
+                        resolved_at="2031-01-01T00:00:00.000000Z")
+    repo = SqliteSportsbookRepository(conn)
+    # At a cutoff between detection and resolution the issue was active -> blocked.
+    assert not repo.is_orientation_approved(sb, as_of="2030-06-01T00:00:00.000000Z")
+    # Currently the row is resolved -> does not block the live check.
+    assert repo.is_orientation_approved(sb)
+
+
+def test_dq_resolved_before_cutoff_does_not_block(conn: sqlite3.Connection) -> None:
+    sb, decided = _linked_direct_event(conn)
+    _inject_blocking_dq(conn, sb_id=sb, detected_at="2020-01-01T00:00:00.000000Z",
+                        resolved_at="2020-02-01T00:00:00.000000Z")
+    repo = SqliteSportsbookRepository(conn)
+    assert repo.is_orientation_approved(sb, as_of="2030-01-01T00:00:00.000000Z")
+
+
+def test_later_conflicting_event_does_not_leak_before_its_decision(conn: sqlite3.Connection) -> None:
+    home, away = _setup_mlb(conn)
+    g1 = _game(conn, home=home, away=away, key="G1", neutral=True)
+    a = seed_sb_event(conn, provider_event_id="EA", sport_key=MLB_KEY,
+                      commence_time="2026-07-25T23:05:00Z", home_team_raw="Test Home",
+                      away_team_raw="Test Away")
+    _sb(conn, provider_event_id="EA")  # A links direct
+    da = SqliteMatchingRepository(conn).decisions_for_source(
+        source_provider=ODDS, source_ref=a, entity_type="sportsbook_event")[0].decided_at
+    # A conflicting swapped event B linked to the same game with a FUTURE decision.
+    b = seed_sb_event(conn, provider_event_id="EB", sport_key=MLB_KEY,
+                      commence_time="2026-07-25T23:05:00Z", home_team_raw="Test Away",
+                      away_team_raw="Test Home")
+    with transaction(conn):
+        conn.execute(
+            "INSERT INTO entity_match_decisions (match_id, entity_type, source_provider, "
+            "source_ref, matched_entity_id, outcome, method, score, threshold, matcher_version, "
+            "needs_manual_review, decided_at, created_at) VALUES "
+            "('mtc_futureconflict01', 'sportsbook_event', ?, ?, ?, 'accepted', "
+            "'schedule_key_swapped', 0.85, 0.85, 'd5a-1', 1, ?, ?)",
+            (ODDS, b, g1, "2030-01-01T00:00:00.000000Z", "2030-01-01T00:00:00.000000Z"))
+        conn.execute(
+            "UPDATE sportsbook_events SET game_id=?, match_decision_id='mtc_futureconflict01', "
+            "orientation='swapped' WHERE sb_event_id=?", (g1, b))
+    repo = SqliteSportsbookRepository(conn)
+    assert repo.is_orientation_approved(a, as_of=da)  # B's conflict is in the future of da
+    assert not repo.is_orientation_approved(a, as_of="2030-06-01T00:00:00.000000Z")  # now leaked
+
+
+# --------------------------------------------------------------------------- #
+# §12/§14 Unsupported markets + alternate-line grouping
+# --------------------------------------------------------------------------- #
+def test_unsupported_market_key_flagged_not_approved(conn: sqlite3.Connection) -> None:
+    # The schema CHECK forbids storing an unsupported market_key, so exercise the
+    # matcher's defensive branch with a doctored market object.
+    import dataclasses
+
+    sb = _accepted_event_with_markets(conn)
+    m = seed_sb_market(conn, sb_event_id=sb, market_key="h2h")
+    seed_sb_outcome(conn, sb_market_id=m, provider_outcome_name="Test Home", outcome_role="home")
+    repo = SqliteSportsbookRepository(conn)
+    real_market = repo.get_market(m)
+    assert real_market is not None
+    propped = dataclasses.replace(real_market, market_key="player_points")
+    svc = MatchSportsbookService(conn)
+    svc._sb.list_markets_for_event = lambda sb_event_id: [propped]  # type: ignore[assignment,method-assign]  # noqa: ARG005,E501
+    with transaction(conn):
+        r = svc.match_range(provider_event_id="E1")
+    assert r.counters.outcome_roles_approved == 0  # unsupported -> nothing approved
+    codes = {row[0] for row in conn.execute("SELECT rule_code FROM data_quality_issues")}
+    assert "DQ-SB-OUTCOME-001" in codes
+
+
+def test_alternate_totals_lines_no_false_duplicate(conn: sqlite3.Connection) -> None:
+    sb = _accepted_event_with_markets(conn)
+    m = seed_sb_market(conn, sb_event_id=sb, market_key="totals")
+    for pt in (8.5, 9.5):
+        seed_sb_outcome(conn, sb_market_id=m, provider_outcome_name="Over", outcome_role="over",
+                        point=pt)
+        seed_sb_outcome(conn, sb_market_id=m, provider_outcome_name="Under", outcome_role="under",
+                        point=pt)
+    r = _sb(conn, provider_event_id="E1")
+    assert r.counters.outcome_roles_approved == 4  # two complete contracts
+    dq = conn.execute(
+        "SELECT COUNT(*) FROM data_quality_issues WHERE entity_id=?", (m,)).fetchone()[0]
+    assert dq == 0  # alternate lines are not a false duplicate
+
+
+def test_alternate_spread_lines_no_false_duplicate(conn: sqlite3.Connection) -> None:
+    sb = _accepted_event_with_markets(conn)
+    m = seed_sb_market(conn, sb_event_id=sb, market_key="spreads")
+    for base in (1.5, 2.5):
+        seed_sb_outcome(conn, sb_market_id=m, provider_outcome_name="Test Home",
+                        outcome_role="home", point=-base)
+        seed_sb_outcome(conn, sb_market_id=m, provider_outcome_name="Test Away",
+                        outcome_role="away", point=base)
+    r = _sb(conn, provider_event_id="E1")
+    assert r.counters.outcome_roles_approved == 4
+    dq = conn.execute(
+        "SELECT COUNT(*) FROM data_quality_issues WHERE entity_id=?", (m,)).fetchone()[0]
+    assert dq == 0
+
+
+def test_separate_bookmakers_validated_independently(conn: sqlite3.Connection) -> None:
+    sb = _accepted_event_with_markets(conn)
+    ok = seed_sb_market(conn, sb_event_id=sb, market_key="h2h", bookmaker_key="draftkings")
+    seed_sb_outcome(conn, sb_market_id=ok, provider_outcome_name="Test Home", outcome_role="home")
+    seed_sb_outcome(conn, sb_market_id=ok, provider_outcome_name="Test Away", outcome_role="away")
+    bad = seed_sb_market(conn, sb_event_id=sb, market_key="h2h", bookmaker_key="fanduel")
+    seed_sb_outcome(conn, sb_market_id=bad, provider_outcome_name="Test Home", outcome_role="home")
+    _sb(conn, provider_event_id="E1")
+    flagged = {row[0] for row in conn.execute(
+        "SELECT entity_id FROM data_quality_issues WHERE entity_type='sportsbook_market'")}
+    assert flagged == {bad}  # only fanduel's incomplete market is flagged
+
+
+# --------------------------------------------------------------------------- #
+# §17 Price isolation: SQL trace proves no price-snapshot access
+# --------------------------------------------------------------------------- #
+def test_sql_trace_never_touches_price_snapshots(conn: sqlite3.Connection) -> None:
+    sb = _accepted_event_with_markets(conn)
+    m = seed_sb_market(conn, sb_event_id=sb, market_key="h2h")
+    o = seed_sb_outcome(conn, sb_market_id=m, provider_outcome_name="Test Home",
+                        outcome_role="home")
+    seed_sb_outcome(conn, sb_market_id=m, provider_outcome_name="Test Away", outcome_role="away")
+    seed_sb_price(conn, sb_outcome_id=o, price_american=-150)
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+    try:
+        with transaction(conn):
+            MatchSportsbookService(conn).match_range(provider_event_id="E1")
+    finally:
+        conn.set_trace_callback(None)
+    assert not any("sportsbook_price_snapshots" in s for s in statements)
 
 
 def _only_event(conn: sqlite3.Connection) -> str:

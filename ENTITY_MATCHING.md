@@ -367,8 +367,10 @@ never a new game.
 > the provider event id never gets an official-key tier. Migration `d015` adds
 > `sportsbook_events.match_decision_id` (the exact accepted decision) and a typed
 > `orientation` (`direct`/`swapped`) — a neutral swapped match is never
-> orientation-approved pricing data (`is_orientation_approved()` returns False
-> until reviewed). Existing `market_key`/`outcome_role` are validated against the
+> orientation-approved pricing data (`is_orientation_approved()` requires
+> `orientation = 'direct'`, so a swapped event is **always excluded**; see the
+> review note below on the absence of an approval workflow). Existing
+> `market_key`/`outcome_role` are validated against the
 > accepted orientation; unknown/malformed outcomes are retained and surfaced via
 > `DQ-SB-OUTCOME-001`, never dropped or rewritten. Kalshi event/market matching
 > (§6) remains **unimplemented (D5B2)**.
@@ -396,6 +398,42 @@ never a new game.
 > narrowest entity — event / `sportsbook_market` / `sportsbook_outcome` — and are
 > idempotent per `(rule, entity, provider, description)`, so two distinct defects
 > stay independently visible.
+>
+> **D5B1 independent-review repairs.** The accepted decision and its link are one
+> atomic unit: before recording an accepted decision the matcher inspects this
+> event's own current link — an exact idempotent replay (same game, same
+> orientation, decision that is accepted, belongs to this event, and names this
+> game) is recognized and records **no** new decision (counter
+> `events_already_linked`); any other existing link (different game/orientation,
+> or a corrupt decision) is a blocking rejection with no fresh accepted row; a
+> `link_game` result other than a clean `LINKED` in the fresh path raises and
+> rolls the whole attempt back (exit 1) rather than leaving an accepted decision
+> unlinked. **UTC fallback (Policy A):** a UTC-only candidate is kept only when
+> the UTC date equals the canonical `game_date_local` (reduced-confidence 0.88 +
+> `DQ-TZ-001`); a cross-midnight game without timezone evidence is excluded, not
+> matched on instant proximity. **Venue-association knowledge time:** the actual
+> event-venue tier requires BOTH the venue entity (`venues.first_observed_at`) and
+> the game's venue association (an accepted non-swapped `game` decision with
+> `decided_at`) to have been known by the event's `last_observed_at`, so a venue
+> learned/attached later cannot leak backward. **As-of readiness** evaluates DQ
+> `detected_at`/`resolved_at` and any conflicting event's decision `decided_at`
+> relative to the cutoff (a later detection/conflict does not block an earlier
+> cutoff; an issue active at the cutoff blocks even if resolved later). **Outcome
+> approval** is gated on the real `is_orientation_approved` check, not the
+> orientation argument, and runs only after a verified link. **Unsupported market
+> keys** cannot be ingested (the `sportsbook_markets.market_key` CHECK allows only
+> `h2h`/`spreads`/`totals`); the matcher additionally never approves roles for any
+> other key defensively. **Market shape** is judged per betting contract (totals
+> grouped by point, spreads by `abs(point)`, h2h single), so alternate lines do
+> not raise false duplicate-side findings. **Neutral swapped review:** there is
+> **no implemented workflow** that promotes a swapped event to orientation-approved
+> — `is_orientation_approved` requires `direct`, so swapped events remain excluded
+> from price-safe use indefinitely; `mark_reviewed` records review bookkeeping only
+> and does not grant orientation approval. **Provenance:** the decision/DQ
+> `raw_response_id` is the event's immutable first-observation response; schema v15
+> records no per-field current-supplying observation, so it is honest
+> first-observation provenance, not a claim about which later re-poll supplied the
+> current mutable commence/team metadata.
 
 Inputs from The Odds API (already normalized by the existing
 `sports_quant/providers/odds_api.py`): `id`, `sport_key`, `commence_time`,

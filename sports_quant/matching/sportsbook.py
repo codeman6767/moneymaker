@@ -62,8 +62,20 @@ _WIDE_WINDOW = timedelta(hours=12)
 
 _SPORT_ARG_KEY = {"mlb": "baseball_mlb", "nba": "basketball_nba"}
 
+
+class SportsbookLinkError(RuntimeError):
+    """A link application failed after its accepted decision was recorded.
+
+    Raised so the enclosing run transaction rolls back rather than committing an
+    accepted decision without its exact, verified link (task §3). The runner
+    surfaces it as an active failure (exit 1)."""
+
 # Provider-side outcome roles the accepted orientation can approve.
 _APPROVABLE_ROLES = ("home", "away", "over", "under", "draw")
+
+# Canonically supported D5B1 market types. Any other key (player props, alternate
+# exotic markets) is retained but its outcome roles are never approved.
+_SUPPORTED_MARKETS = ("h2h", "spreads", "totals")
 
 
 @dataclass
@@ -74,6 +86,7 @@ class SbCounters:
     events_eligible: int = 0
     team_resolution_attempts: int = 0
     events_accepted: int = 0
+    events_already_linked: int = 0
     events_ambiguous: int = 0
     events_no_candidate: int = 0
     events_rejected: int = 0
@@ -319,14 +332,16 @@ class MatchSportsbookService:
 
         The sportsbook event's candidate-relative local date is derived by the
         fixed hierarchy: the candidate's actual event-venue timezone (only when
-        that venue evidence was known by ``event.last_observed_at``), else the
+        that venue association was known by ``event.last_observed_at``), else the
         knowledge-time-valid canonical home-venue timezone, else the UTC calendar
-        date as a last resort. With real venue/home evidence the derived date
-        MUST equal the candidate's ``game_date_local`` -- a contradiction excludes
-        the candidate. Only a genuine UTC fallback (no timezone evidence at all)
-        keeps the candidate without a slate assertion, capped and DQ-noted,
-        because there is no evidence to contradict. An unresolvable timezone is
-        surfaced honestly and the candidate excluded, never silently forced to UTC.
+        date as a last resort. **The derived date must always equal the
+        candidate's ``game_date_local``** -- a contradiction excludes the
+        candidate (task §5, Policy A). The UTC fallback is not a licence to skip
+        the check: it is kept only when the UTC-derived date still equals the
+        canonical local date, and then only at the reduced ``DQ-TZ-001`` cap; a
+        cross-midnight game without timezone evidence therefore does not
+        false-match. An unresolvable timezone is surfaced honestly and the
+        candidate excluded, never silently forced to UTC.
         """
 
         actual_tz = self._candidate_venue_tz(game, cutoff=event.last_observed_at)
@@ -343,24 +358,30 @@ class MatchSportsbookService:
             self._dq(result, "issue", "DQ-TZ-001", "sportsbook_event", event.sb_event_id, event,
                      f"candidate game {game.game_id} local date unresolved: {exc}")
             return None
-        if local.tier == LOCALDATE_UTC_FALLBACK:
-            # No reliable timezone evidence: the slate cannot be asserted, so the
-            # candidate is retained but capped (and DQ-noted when it wins).
-            return _CandidateEval(game=game, cap=local.confidence_cap, local_tier=local.tier)
-        if local.game_date_local == game.game_date_local:
-            return _CandidateEval(game=game, cap=local.confidence_cap, local_tier=local.tier)
-        # Real venue/home evidence puts the event on a different slate: exclude.
-        return None
+        if local.game_date_local != game.game_date_local:
+            # Derived local date contradicts the canonical slate (including a UTC
+            # fallback whose calendar date differs): exclude.
+            return None
+        return _CandidateEval(game=game, cap=local.confidence_cap, local_tier=local.tier)
 
     def _candidate_venue_tz(self, game, *, cutoff):  # type: ignore[no-untyped-def]
         """The candidate game's actual event-venue timezone, knowledge-time bounded.
 
         A neutral / international / relocated game carries its true event venue on
         the game row; that venue's timezone is the strongest local-date evidence.
-        It is used only when the venue evidence was known by ``cutoff``
-        (``event.last_observed_at``) -- venue knowledge recorded later must not
-        influence an earlier match. ``None`` when the game has no venue, the venue
-        carries no timezone, or the venue evidence post-dates the cutoff.
+        Two knowledge-time conditions must BOTH hold as of ``cutoff``
+        (``event.last_observed_at``):
+
+        * the venue **entity** was known (``venues.first_observed_at <= cutoff``);
+        * the venue **association** to this game was known -- proven by an
+          accepted, non-swapped game match decision for this game whose
+          ``decided_at <= cutoff``. A venue that existed in the corpus for years
+          but was only attached to a relocated/new game later must not leak
+          backward.
+
+        ``None`` when the game has no venue, the venue has no timezone, the venue
+        entity post-dates the cutoff, or no accepted game-association decision was
+        known by the cutoff -- the caller then falls back to home-venue/UTC policy.
         """
 
         if game.venue is None:
@@ -370,7 +391,27 @@ class MatchSportsbookService:
             return None
         if cutoff is not None and venue.first_observed_at > cutoff:
             return None
+        if not self._game_association_known(game.game_id, cutoff=cutoff):
+            return None
         return venue.timezone
+
+    def _game_association_known(self, game_id: str, *, cutoff) -> bool:  # type: ignore[no-untyped-def]
+        """Whether the game's venue/identity association was known by ``cutoff``.
+
+        Proven by an accepted, non-swapped ``entity_type='game'`` match decision
+        for the game with ``decided_at <= cutoff`` -- the same knowledge-time
+        anchor the home-venue tier uses. With no cutoff, no association qualifies
+        (conservative)."""
+
+        if cutoff is None:
+            return False
+        row = self._conn.execute(
+            "SELECT 1 FROM entity_match_decisions WHERE entity_type = 'game' "
+            "AND matched_entity_id = ? AND outcome = 'accepted' AND method <> ? "
+            "AND decided_at <= ? LIMIT 1",
+            (game_id, TIER_SCHEDULE_SWAPPED, cutoff),
+        ).fetchone()
+        return row is not None
 
     # -- accept / record / link --------------------------------------------- #
     def _accept(
@@ -379,10 +420,33 @@ class MatchSportsbookService:
     ) -> None:
         sb_id = event.sb_event_id
         game = cand.game
-        # A different sportsbook event already linked to this game with an
-        # incompatible orientation inverts the pricing sign. Detect it BEFORE
-        # recording any accepted decision, so we never write an accepted row we
-        # cannot safely link (task §5).
+
+        # (1) THIS event is already linked. Either an exact idempotent replay
+        # (recognized, no new accepted decision, no recount), or a blocking
+        # conflict; in neither case do we record a fresh accepted decision. The
+        # persisted-link state is authoritative here (dry-run never has one).
+        current_game, current_dec, current_orient = self._sb.event_link(sb_id)
+        if current_game is not None and not self._dry_run:
+            if (current_game == game.game_id and current_orient == orientation
+                    and self._link_decision_valid(sb_id, current_dec, game.game_id)):
+                # Exact idempotent replay: recognize and leave everything unchanged.
+                result.counters.events_already_linked += 1
+                return
+            # Linked to a different game/orientation, or the current link's
+            # decision is corrupt (wrong event, wrong game, not accepted).
+            self._dq(result, "blocking", "DQ-MATCH-003", "sportsbook_event", sb_id, event,
+                     f"event already linked to game {current_game} (orientation "
+                     f"{current_orient!r}); attempt proposes game {game.game_id} "
+                     f"({orientation!r})")
+            result.counters.blocking_orientation_conflicts += 1
+            self._record(result, sb_id, "rejected", tier, 0.0, None, [game.game_id],
+                         reason="event already linked to a different game or orientation",
+                         review=True)
+            return
+
+        # (2) A DIFFERENT event already linked to this game with an incompatible
+        # orientation inverts the pricing sign. Detect it BEFORE recording any
+        # accepted decision, so we never write an accepted row we cannot link.
         conflict = self._orientation_conflict(sb_id, game.game_id, orientation)
         if conflict is not None:
             other_id, other_orient = conflict
@@ -394,6 +458,10 @@ class MatchSportsbookService:
                          reason=f"orientation conflict with linked event {other_id}", review=True)
             return
 
+        # (3) Clean new link: record the accepted decision, apply and VERIFY the
+        # link in the same transaction, then validate outcomes. A link failure
+        # raises (rolls the whole attempt back) rather than leaving an accepted
+        # decision unlinked (task §3).
         minutes = round(abs((_parse_utc(game.scheduled_start) - commence).total_seconds()) / 60)
         evidence = json.dumps({
             "home_team_id": home_id, "away_team_id": away_id, "delta_minutes": minutes,
@@ -418,6 +486,7 @@ class MatchSportsbookService:
             self._dq(result, "issue", "DQ-MATCH-007", "sportsbook_event", sb_id, event,
                      "neutral-site swapped sportsbook match accepted pending review")
         self._link(result, sb_id, game.game_id, decision_id, orientation)
+        # Outcomes are validated only after the link is applied and verified.
         self._validate_outcomes(event, orientation, result)
 
     def _orientation_conflict(self, sb_id, game_id, orientation):  # type: ignore[no-untyped-def]
@@ -429,6 +498,26 @@ class MatchSportsbookService:
                 return (other_id, other_orient)
         return None
 
+    def _link_decision_valid(self, sb_id, decision_id, game_id) -> bool:  # type: ignore[no-untyped-def]
+        """Whether the current link's decision genuinely supports this link.
+
+        True only when the decision exists, is a ``sportsbook_event`` decision
+        for THIS event (`the_odds_api`/`sb_id`), is accepted, and names this
+        game. Guards idempotent replay against a corrupt current link (a decision
+        for another event, a rejected one, or one naming another game)."""
+
+        if decision_id is None:
+            return False
+        d = self._match.get(decision_id)
+        return (
+            d is not None
+            and d.entity_type == "sportsbook_event"
+            and d.source_provider == THE_ODDS_API_PROVIDER
+            and d.source_ref == sb_id
+            and d.outcome == "accepted"
+            and d.matched_entity_id == game_id
+        )
+
     def _link(self, result, sb_id, game_id, decision_id, orientation):  # type: ignore[no-untyped-def]
         if self._dry_run or decision_id is None:
             return
@@ -438,9 +527,13 @@ class MatchSportsbookService:
         if outcome == LinkOutcome.LINKED:
             result.counters.event_links_applied += 1
             result.counters.rows_persisted += 1
-        elif outcome == LinkOutcome.CONFLICT:
-            self._dq(result, "blocking", "DQ-MATCH-003", "sportsbook_event", sb_id, None,
-                     "sportsbook event already linked to a different canonical game")
+            return
+        # Step 3 only runs after verifying this event had no existing link, so a
+        # non-LINKED result is a concurrent/corrupt state. Raise to roll the whole
+        # attempt back rather than commit an accepted decision without its link.
+        raise SportsbookLinkError(
+            f"link_game returned {outcome.value} for event {sb_id} -> game {game_id}; "
+            "expected a clean LINKED")
 
     def _record(
         self, result, sb_id, outcome, method, score, matched, candidate_games,  # type: ignore[no-untyped-def]
@@ -487,15 +580,36 @@ class MatchSportsbookService:
         """Independently recompute each outcome's provider-side role and validate
         market shape. Stored ``outcome_role`` is never trusted blindly, never
         rewritten, and a disagreement is surfaced (scoped to the outcome), never
-        silently corrected. A swapped (review-gated) event approves no role."""
+        silently corrected.
 
-        for market in self._sb.list_markets_for_event(event.sb_event_id):
+        Approval is gated on real link readiness -- the same fail-closed
+        `is_orientation_approved` check exposed to downstream callers -- not on
+        the proposed orientation argument (task §11). A swapped/review-gated event
+        approves nothing. An unsupported market key is retained and flagged, and
+        none of its outcome roles are approved (task §12)."""
+
+        sb_id = event.sb_event_id
+        ready = (orientation == "direct") if self._dry_run else self._sb.is_orientation_approved(
+            sb_id)
+        for market in self._sb.list_markets_for_event(sb_id):
             outcomes = self._sb.list_outcomes_for_market(market.sb_market_id)
             result.counters.outcome_rows_checked += len(outcomes)
-            recomputed_roles: list[str] = []
+            if market.market_key not in _SUPPORTED_MARKETS:
+                # Retain the market and its outcomes; approve nothing; surface once.
+                for o in outcomes:
+                    if self._provider_role(
+                        o.provider_outcome_name, event, market.market_key
+                    ) == "unknown":
+                        result.counters.unknown_outcomes += 1
+                self._dq(result, "issue", "DQ-SB-OUTCOME-001", "sportsbook_market",
+                         market.sb_market_id, event,
+                         f"{market.market_key}: unsupported market key; outcome roles are "
+                         "not canonically approved")
+                continue
+            recomputed: list[tuple[str, Optional[float]]] = []
             for o in outcomes:
                 role = self._provider_role(o.provider_outcome_name, event, market.market_key)
-                recomputed_roles.append(role)
+                recomputed.append((role, o.point))
                 if o.outcome_role != role:
                     self._dq(
                         result, "issue", "DQ-SB-OUTCOME-001", "sportsbook_outcome",
@@ -504,15 +618,10 @@ class MatchSportsbookService:
                         f"provider-side role {role!r} for {o.provider_outcome_name!r}")
                 if role == "unknown":
                     result.counters.unknown_outcomes += 1
-                elif (
-                    orientation == "direct"
-                    and o.outcome_role == role
-                    and role in _APPROVABLE_ROLES
-                ):
-                    # Only an orientation-safe direct event approves a canonical role.
+                elif ready and o.outcome_role == role and role in _APPROVABLE_ROLES:
                     result.counters.outcome_roles_approved += 1
             self._validate_market_shape(
-                market.market_key, recomputed_roles, market.sb_market_id, event, result)
+                market.market_key, recomputed, market.sb_market_id, event, result)
 
     def _provider_role(self, provider_outcome_name, event, market_key):  # type: ignore[no-untyped-def]
         """Recompute the provider-side semantic role from immutable provider text.
@@ -538,29 +647,56 @@ class MatchSportsbookService:
             return "draw"
         return "unknown"
 
-    def _validate_market_shape(self, market_key, roles, sb_market_id, event, result):  # type: ignore[no-untyped-def]
-        if not roles:
+    @staticmethod
+    def _contract_key(market_key, point):  # type: ignore[no-untyped-def]
+        """The grouping that makes one betting contract within a market row.
+
+        Alternate lines share a market row, so completeness must be judged per
+        contract, not across the whole row (task §14):
+
+        * ``totals`` -- group by ``point`` (Over/Under of one line share it);
+        * ``spreads`` -- group by ``abs(point)`` (home/away carry opposite signs
+          of the same line);
+        * ``h2h`` -- a single contract (no line)."""
+
+        if market_key == "spreads":
+            return None if point is None else abs(point)
+        if market_key == "totals":
+            return point
+        return None
+
+    def _validate_market_shape(self, market_key, roles_points, sb_market_id, event, result):  # type: ignore[no-untyped-def]
+        if not roles_points:
             # An empty market row carries no outcome to interpret yet.
             return
-        counts = {r: roles.count(r) for r in set(roles)}
         problem: Optional[str] = None
-        if counts.get("unknown", 0):
+        if any(role == "unknown" for role, _pt in roles_points):
             # An unclassifiable outcome (a team name in a totals market, an
             # over/under in a moneyline, a name matching neither team) is retained
             # and surfaced -- a silently dropped outcome is missing data nobody sees.
             problem = f"{market_key} market has an unclassifiable/unknown outcome"
-        elif market_key == "totals":
-            if counts.get("over", 0) > 1 or counts.get("under", 0) > 1:
-                problem = "totals market has duplicate over/under outcomes"
-            elif counts.get("over", 0) < 1 or counts.get("under", 0) < 1:
-                problem = "totals market is missing an over or under outcome"
-        elif market_key in ("h2h", "spreads"):
-            if counts.get("draw", 0):
-                problem = f"unexpected draw outcome on an MLB/NBA {market_key} market"
-            elif counts.get("home", 0) > 1 or counts.get("away", 0) > 1:
-                problem = f"{market_key} market has duplicate home/away outcomes"
-            elif counts.get("home", 0) < 1 or counts.get("away", 0) < 1:
-                problem = f"{market_key} market is missing a home or away outcome"
+        else:
+            groups: dict[object, list[str]] = {}
+            for role, point in roles_points:
+                groups.setdefault(self._contract_key(market_key, point), []).append(role)
+            for _key, roles in sorted(
+                groups.items(), key=lambda kv: (kv[0] is None, kv[0] if kv[0] is not None else 0.0)
+            ):
+                counts = {r: roles.count(r) for r in set(roles)}
+                if market_key == "totals":
+                    if counts.get("over", 0) > 1 or counts.get("under", 0) > 1:
+                        problem = "totals contract has duplicate over/under outcomes"
+                    elif counts.get("over", 0) < 1 or counts.get("under", 0) < 1:
+                        problem = "totals contract is missing an over or under outcome"
+                else:  # h2h / spreads
+                    if counts.get("draw", 0):
+                        problem = f"unexpected draw outcome on an MLB/NBA {market_key} market"
+                    elif counts.get("home", 0) > 1 or counts.get("away", 0) > 1:
+                        problem = f"{market_key} contract has duplicate home/away outcomes"
+                    elif counts.get("home", 0) < 1 or counts.get("away", 0) < 1:
+                        problem = f"{market_key} contract is missing a home or away outcome"
+                if problem is not None:
+                    break
         if problem is not None:
             self._dq(result, "issue", "DQ-SB-OUTCOME-001", "sportsbook_market", sb_market_id,
                      event, f"{market_key}: {problem}")

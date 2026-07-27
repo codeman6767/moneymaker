@@ -204,13 +204,25 @@ future orientation as historical truth. That readiness check is now
 **fail-closed**: beyond `direct` + accepted + not-review-gated + `decided_at ≤
 cutoff`, it also requires the decision and the link to name the same game, no
 other sportsbook event linked to that game under a different orientation, and no
-unresolved blocking identity/orientation data-quality issue on the event — a
-`direct` orientation string alone is never sufficient. A current
-`sportsbook_events` row is mutable current-state, not a historical event snapshot:
-the matcher uses the event's linked `raw_response_id` provenance and never treats
-a newer mutable event row as a reconstruction of earlier provider metadata; Phase
-E must read from the decision and review timelines and respect that limitation.
-Kalshi match decisions remain D5B2 |
+blocking identity/orientation data-quality issue on the event — a `direct`
+orientation string alone is never sufficient. **These extra gates are themselves
+as-of correct** (independent review): a conflicting event counts only when its
+supporting decision's `decided_at ≤ cutoff` (a later conflict cannot leak
+backward), and a blocking DQ blocks a cutoff only when it was *active* then
+(`detected_at ≤ cutoff AND (resolved_at IS NULL OR resolved_at > cutoff)`) — a DQ
+detected after the cutoff does not block, and one active at the cutoff blocks even
+if resolved later. Because d015 stores only the current immutable link (no
+event-link history), the supported historical boundary is the decision and DQ
+timelines, not a reconstruction of prior mutable event metadata. A neutral
+**swapped** event is never approved by this check and has **no implemented review
+workflow** that would flip it to approved, so it stays excluded from price-safe
+use indefinitely. A current `sportsbook_events` row is mutable current-state, not
+a historical event snapshot: the decision/DQ `raw_response_id` is the event's
+immutable **first-observation** response, and schema v15 records no per-field
+current-supplying observation, so it must not be read as the exact source of the
+current commence/team metadata used for matching; Phase E must read from the
+decision and DQ timelines and respect that limitation. Kalshi match decisions
+remain D5B2 |
 | Weather forecast-vs-actual kept distinct (leakage vector) | ◧ **D4 built (schema v14)** — `weather_snapshots.weather_kind` separates `current_forecast` / `station_observation` / `historical_forecast` / `reanalysis`; `observed_at` is never backdated to a model-run time; an explicit `pit_eligible` (1/0/NULL) is set (a station observation / reanalysis is never PIT-eligible; a stitched historical forecast whose availability is unproven is `pit_eligible=NULL` + a `DQ-WX-PIT-001` note). Phase E must gate pregame weather features on `weather_kind='current_forecast' AND observed_at ≤ cutoff AND pit_eligible=1` — never on the endpoint of origin, and never a reanalysis/observation row |
 | Full `pit/asof.py`, `pit/dataset.py`, adversarial leak fixtures | ◻ Phase E |
 

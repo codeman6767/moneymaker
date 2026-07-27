@@ -25,7 +25,7 @@ accurate insert/update/dedup counters (including a new `ingestion_runs.records_u
 and a single validation path shared by persisted and dry-run ingestion. No
 Kalshi credential, private key, or signing is used anywhere; there is no
 account/balance/position/fill/order column in the schema. The suite passes under
-Ruff and mypy: 1205 passed / 1 skipped locally (optional PyArrow present); under
+Ruff and mypy: 1226 passed / 1 skipped locally (optional PyArrow present); under
 the standard `.[dev]` CI with PyArrow absent only the optional hoopR/PyArrow
 modules skip.
 
@@ -232,7 +232,26 @@ decision, no link, exit 1); `is_orientation_approved()` is fail-closed
 identity/orientation DQ); outcome roles are recomputed provider-side and
 disagreements surfaced (never trusting or rewriting the stored role); DQ issues
 are scoped to event / market / outcome and idempotent per
-`(rule, entity, provider, description)`. **D5B1 is not yet independently reviewed.**
+`(rule, entity, provider, description)`.
+
+*D5B1 independent-review repairs:* the accepted decision and its link are one
+atomic transaction — an exact idempotent replay records no new decision
+(`events_already_linked`), an existing link to a different game/orientation or a
+corrupt supporting decision is a blocking rejection, and any non-`LINKED` result
+in the fresh path rolls the whole attempt back (exit 1). UTC-fallback candidates
+are kept only when the UTC date equals the canonical local date (Policy A). The
+actual-venue tier additionally requires the game's venue *association* (an
+accepted `game` decision) to have been known by the event cutoff, not just the
+venue entity. `is_orientation_approved(as_of=…)` evaluates DQ
+`detected_at`/`resolved_at` and any conflicting event's decision time relative to
+the cutoff. Outcome approval is gated on the real readiness check after a
+verified link. Unsupported market keys cannot be ingested (schema CHECK); market
+shape is judged per betting contract so alternate lines are not false duplicates.
+Neutral swapped events have **no implemented approval workflow** and remain
+excluded from price-safe use; the decision/DQ `raw_response_id` is honest
+first-observation provenance (schema v15 records no per-field current-supplying
+observation). Schema stays v15. **D5B1 has now completed its independent
+correctness review.**
 
 Companion documents:
 

@@ -978,7 +978,27 @@ Model column = recommended driver.
 > surfaced scoped to the outcome, never trusting or rewriting the stored role. DQ
 > issues are scoped to event / `sportsbook_market` / `sportsbook_outcome` and
 > idempotent per `(rule, entity, provider, description)`. No new migration (schema
-> stays v15). **D5B1 is not yet independently reviewed.**
+> stays v15).
+>
+> **D5B1 independent-review repairs.** Accepted decision + link are one atomic
+> transaction: an exact idempotent replay records no new decision
+> (`events_already_linked`); an existing link to a different game/orientation or a
+> corrupt supporting decision is a blocking rejection with no fresh accepted row;
+> a non-`LINKED` result in the fresh path raises and rolls the attempt back (exit
+> 1). UTC-fallback candidates are kept only when the UTC date equals the canonical
+> local date (Policy A) — a cross-midnight game without timezone evidence is
+> excluded. The actual event-venue tier requires the game's venue *association*
+> (an accepted non-swapped `game` decision `decided_at <= last_observed_at`), not
+> just `venues.first_observed_at`. `is_orientation_approved(as_of=…)` is
+> temporally correct over DQ `detected_at`/`resolved_at` and conflicting-event
+> decision times. Outcome approval uses the real readiness check after a verified
+> link. Unsupported market keys are impossible to ingest (`sportsbook_markets`
+> CHECK); market shape is validated per betting contract (alternate lines are not
+> false duplicates). Neutral swapped events have **no implemented approval path**
+> and stay excluded from price-safe use. Decision/DQ `raw_response_id` is honest
+> first-observation provenance (schema v15 has no per-field current-response
+> column). Schema stays v15. **D5B1 has completed its independent correctness
+> review.**
 
 - **Provider:** none (pure compute over ingested data).
 - **Create:** `matching/{__init__,normalize,teams,players,games,markets,decisions,

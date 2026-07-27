@@ -276,8 +276,9 @@ def _report_sportsbook(
     out(f"{prefix}match-games [sportsbook/the_odds_api]: {c.events_considered} events considered")
     out(
         f"  events: accepted {c.events_accepted} (direct {c.direct_orientation}, "
-        f"swapped-review {c.swapped_review_gated}), ambiguous {c.events_ambiguous}, "
-        f"no-candidate {c.events_no_candidate}, rejected {c.events_rejected}"
+        f"swapped-review {c.swapped_review_gated}), already-linked {c.events_already_linked}, "
+        f"ambiguous {c.events_ambiguous}, no-candidate {c.events_no_candidate}, "
+        f"rejected {c.events_rejected}"
     )
     out(
         f"  links applied: {c.event_links_applied}; outcomes checked: {c.outcome_rows_checked} "

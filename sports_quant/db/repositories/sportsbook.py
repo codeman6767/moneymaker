@@ -388,11 +388,23 @@ class SqliteSportsbookRepository(Repository):
           when ``as_of`` is given, was ``decided_at <= as_of``;
         * the decision and the link agree on the game (``matched_entity_id ==
           game_id``) -- no link-integrity conflict;
-        * no OTHER sportsbook event is linked to the same game with a different
-          typed orientation (an unresolved cross-event orientation conflict);
-        * no unresolved blocking identity/orientation data-quality issue
-          (``DQ-MATCH-003``/``DQ-MATCH-006``/``DQ-SB-LEAGUE-001``) is scoped to
-          this event.
+        * no OTHER sportsbook event -- whose supporting decision was itself known
+          by ``as_of`` -- is linked to the same game with a different typed
+          orientation (an unresolved cross-event orientation conflict);
+        * no blocking identity/orientation data-quality issue
+          (``DQ-MATCH-003``/``DQ-MATCH-006``/``DQ-SB-LEAGUE-001``) was *active* on
+          this event at ``as_of``.
+
+        **As-of correctness (task §9).** With an ``as_of`` cutoff the check
+        reconstructs what was safe then, not merely today's state: a decision
+        decided after the cutoff is invisible; a DQ issue detected after the
+        cutoff does not block; a DQ active at the cutoff blocks even if resolved
+        later; a DQ resolved before the cutoff does not block; and a conflicting
+        event whose own decision post-dates the cutoff cannot leak backward.
+        Sportsbook event-link state is current-only (d015 stores no link history),
+        so orientation and link identity are read from the current row -- the
+        supported historical boundary is the decision and DQ timelines, not a
+        reconstruction of prior mutable event metadata.
 
         A neutral-site swapped match (review-gated) is never approved. A direct
         orientation string alone is not enough when any of the above is violated.
@@ -422,19 +434,34 @@ class SqliteSportsbookRepository(Repository):
         ):
             return False
         # A different event linked to the same game with an incompatible
-        # orientation makes this game's orientation contested -> not safe.
-        for other_id, other_orient, _dec in self.events_linked_to_game(game_id):
-            if other_id != sb_event_id and other_orient is not None and other_orient != "direct":
-                return False
-        # Any unresolved blocking identity/orientation issue on this event fails closed.
-        placeholders = ", ".join("?" for _ in self._READINESS_BLOCKING_RULES)
-        blocking = self._fetch_one(
-            "SELECT 1 FROM data_quality_issues WHERE severity = 'blocking' "
-            "AND resolved_at IS NULL AND entity_type = 'sportsbook_event' AND entity_id = ? "
-            f"AND rule_code IN ({placeholders}) LIMIT 1",  # noqa: S608 - fixed rule tuple
-            (sb_event_id, *self._READINESS_BLOCKING_RULES),
+        # orientation makes this game's orientation contested -> not safe. Only
+        # count a conflicting event whose supporting decision was known by as_of.
+        conflict_sql = (
+            "SELECT 1 FROM sportsbook_events e2 "
+            "JOIN entity_match_decisions d2 ON e2.match_decision_id = d2.match_id "
+            "WHERE e2.game_id = ? AND e2.sb_event_id <> ? AND e2.orientation IS NOT NULL "
+            "AND e2.orientation <> 'direct'"
         )
-        return blocking is None
+        conflict_params: list[object] = [game_id, sb_event_id]
+        if as_of is not None:
+            conflict_sql += " AND d2.decided_at <= ?"
+            conflict_params.append(as_of)
+        if self._fetch_one(conflict_sql + " LIMIT 1", tuple(conflict_params)) is not None:
+            return False
+        # A blocking identity/orientation issue that was ACTIVE at as_of fails closed.
+        placeholders = ", ".join("?" for _ in self._READINESS_BLOCKING_RULES)
+        dq_sql = (
+            "SELECT 1 FROM data_quality_issues WHERE severity = 'blocking' "
+            "AND entity_type = 'sportsbook_event' AND entity_id = ? "
+            f"AND rule_code IN ({placeholders})"  # noqa: S608 - fixed rule tuple
+        )
+        dq_params: list[object] = [sb_event_id, *self._READINESS_BLOCKING_RULES]
+        if as_of is None:
+            dq_sql += " AND resolved_at IS NULL"
+        else:
+            dq_sql += " AND detected_at <= ? AND (resolved_at IS NULL OR resolved_at > ?)"
+            dq_params += [as_of, as_of]
+        return self._fetch_one(dq_sql + " LIMIT 1", tuple(dq_params)) is None
 
     # -- Markets -------------------------------------------------------------
     def upsert_market(
