@@ -390,11 +390,17 @@ def is_valid_status(status: str) -> bool:
 def season_label(league_code: str, year: int, phase: str) -> str:
     """Human label for a season.
 
-    Baseball seasons sit inside one calendar year; basketball seasons straddle
-    two, and are conventionally written with both.
+    ``year`` is the season's **start year** in every league (the one contract:
+    MLB ``2026`` = the 2026 season; NBA ``2025`` = the 2025-26 season). Baseball
+    seasons sit inside one calendar year; basketball seasons straddle two and are
+    written with both, start year first -- so this is the exact inverse companion
+    of :func:`sports_quant.matching.season.season_year_for` and agrees with
+    :func:`~sports_quant.matching.season.season_bounds` (NBA ``[Y-07-01,
+    (Y+1)-06-30]``). Postseason preserves the same start year (``2025-26
+    postseason``), so a label never silently shifts an NBA season by a year.
     """
 
-    base = f"{year - 1}-{str(year)[2:]}" if league_code == "NBA" else str(year)
+    base = f"{year}-{str(year + 1)[2:]}" if league_code == "NBA" else str(year)
     return base if phase == "regular" else f"{base} {phase}"
 
 

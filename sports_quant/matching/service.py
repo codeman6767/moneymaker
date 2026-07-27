@@ -29,6 +29,8 @@ from ..db.repositories.matching import CandidateInput, SqliteMatchingRepository
 from ..db.repositories.official_games import SqliteScheduleRepository
 from ..db.repositories.references import LinkOutcome, SqliteProviderReferenceRepository
 from ..db.repositories.venues import SqliteVenueRepository
+from ..db.schema import season_label
+from .linkatomic import LinkAttempt, MatchLinkError, classify_link_attempt
 from .localdate import InvalidTimezoneError, resolve_local_date
 from .model import (
     AMBIGUOUS,
@@ -82,6 +84,7 @@ class MatchCounters:
     provider_references_linked: int = 0
     canonical_games_created: int = 0
     canonical_entities_unchanged: int = 0
+    already_linked: int = 0
     dq_issues: int = 0
     blocking_issues: int = 0
 
@@ -510,9 +513,16 @@ class MatchGamesService:
 
         phase = _season_phase(game_type)
         if not self._dry_run:
+            # ``season_year`` is the season START year in both leagues (the one
+            # contract); ``season_label`` renders it canonically (MLB ``2026``,
+            # NBA ``2025-26``). ``start_date`` here is a documented PLACEHOLDER
+            # (calendar Jan 1), NOT an authoritative membership bound -- real
+            # season dates are not yet curated, and ``season.season_bounds`` (NBA
+            # July-June) remains the source of truth for season membership.
             self._seasons.upsert(
                 league_code=league_code, league_id=league_id, year=season_year, phase=phase,
-                label=f"{league_code} {season_year} {phase}", start_date=f"{season_year}-01-01",
+                label=season_label(league_code, season_year, phase),
+                start_date=f"{season_year}-01-01",
             )
             game = self._games.create(
                 league_id=league_id,
@@ -723,37 +733,102 @@ class MatchGamesService:
             CandidateInput(score=score, tier=tier, candidate_entity_id=cid, method=tier)
             for cid in candidate_ids
         ]
-        decision_id = self._persist_decision(
-            entity_type="game", source_provider=provider, source_ref=provider_game_id,
-            outcome="accepted", method=tier, score=score, matched_entity_id=game_id,
-            candidates=candidates, needs_review=False, result=result,
+        self._apply_game_link(
+            provider, provider_game_id, game_id, tier, score, candidates, result,
+            created=created, needs_review=False,
         )
-        if not created:
-            result.counters.canonical_entities_unchanged += 1
-        if game_id is not None:
-            self._link_game_reference(provider, provider_game_id, game_id, decision_id, result)
 
     def _accept_swapped(
         self, provider: str, provider_game_id: str, game_id: str, result: MatchGamesResult
     ) -> None:
+        candidates = [CandidateInput(
+            score=SCORE_SCHEDULE_SWAPPED, tier=TIER_SCHEDULE_SWAPPED,
+            candidate_entity_id=game_id, method=TIER_SCHEDULE_SWAPPED,
+            evidence="neutral-site team-swapped orientation",
+        )]
+        self._apply_game_link(
+            provider, provider_game_id, game_id, TIER_SCHEDULE_SWAPPED, SCORE_SCHEDULE_SWAPPED,
+            candidates, result, created=False, needs_review=True,
+            review_dq=(
+                "issue", "DQ-MATCH-007",
+                "neutral-site team-swapped match accepted pending review",
+            ),
+        )
+
+    def _apply_game_link(
+        self, provider: str, provider_game_id: str, game_id: Optional[str], tier: str,
+        score: float, candidates: list[CandidateInput], result: MatchGamesResult, *,
+        created: bool, needs_review: bool,
+        review_dq: Optional[tuple[str, str, str]] = None,
+    ) -> None:
+        """Record an accepted game decision and apply its provider link atomically.
+
+        Before recording, the provider game reference's CURRENT link is inspected
+        (task §7): an exact idempotent replay records no new accepted decision; an
+        existing link to a different game -- or a corrupt supporting decision -- is
+        a blocking rejection with no accepted decision; only a clean reference
+        records the accepted decision and then applies + verifies the link (a
+        non-``LINKED`` result raises, rolling the whole run back). Dry-run keeps
+        counter parity and persists nothing."""
+
+        if game_id is not None and not self._dry_run:
+            ref = self._refs.get("game", provider, provider_game_id)
+            current = ref.canonical_id if ref is not None else None
+            attempt = classify_link_attempt(
+                current_canonical_id=current, proposed_canonical_id=game_id,
+                decision_valid=self._game_decision_valid(
+                    provider, provider_game_id,
+                    ref.match_decision_id if ref is not None else None, game_id),
+            )
+            if attempt is LinkAttempt.REPLAY:
+                if not created:
+                    result.counters.canonical_entities_unchanged += 1
+                return
+            if attempt is LinkAttempt.CONFLICT:
+                self._dq_issue(
+                    result, severity="blocking", rule_code="DQ-MATCH-003", entity_type="game",
+                    entity_id=provider_game_id, provider=provider,
+                    description="provider game already linked to a different canonical game",
+                )
+                self._record_game_reject(
+                    provider, provider_game_id, result,
+                    "provider game already linked to a different canonical entity",
+                    candidate=current,
+                )
+                return
+
         decision_id = self._persist_decision(
             entity_type="game", source_provider=provider, source_ref=provider_game_id,
-            outcome="accepted", method=TIER_SCHEDULE_SWAPPED, score=SCORE_SCHEDULE_SWAPPED,
-            matched_entity_id=game_id,
-            candidates=[CandidateInput(
-                score=SCORE_SCHEDULE_SWAPPED, tier=TIER_SCHEDULE_SWAPPED,
-                candidate_entity_id=game_id, method=TIER_SCHEDULE_SWAPPED,
-                evidence="neutral-site team-swapped orientation",
-            )],
-            needs_review=True, result=result,
+            outcome="accepted", method=tier, score=score, matched_entity_id=game_id,
+            candidates=candidates, needs_review=needs_review, result=result,
         )
-        result.counters.canonical_entities_unchanged += 1
-        self._dq_issue(
-            result, severity="issue", rule_code="DQ-MATCH-007", entity_type="game",
-            entity_id=provider_game_id, provider=provider,
-            description="neutral-site team-swapped match accepted pending review",
+        if not created:
+            result.counters.canonical_entities_unchanged += 1
+        if review_dq is not None:
+            severity, rule_code, description = review_dq
+            self._dq_issue(
+                result, severity=severity, rule_code=rule_code, entity_type="game",
+                entity_id=provider_game_id, provider=provider, description=description,
+            )
+        if game_id is not None:
+            self._link_game_reference(provider, provider_game_id, game_id, decision_id, result)
+
+    def _game_decision_valid(
+        self, provider: str, provider_game_id: str, decision_id: Optional[str], game_id: str
+    ) -> bool:
+        """Whether the reference's current link decision genuinely backs it."""
+
+        if decision_id is None:
+            return False
+        d = self._match.get(decision_id)
+        return (
+            d is not None
+            and d.entity_type == "game"
+            and d.source_provider == provider
+            and d.source_ref == provider_game_id
+            and d.outcome == "accepted"
+            and d.matched_entity_id == game_id
         )
-        self._link_game_reference(provider, provider_game_id, game_id, decision_id, result)
 
     def _record_game_ambiguous(
         self, provider: str, provider_game_id: str, result: MatchGamesResult,
@@ -890,12 +965,14 @@ class MatchGamesService:
         )
         if outcome == LinkOutcome.LINKED:
             result.counters.provider_references_linked += 1
-        elif outcome == LinkOutcome.CONFLICT:
-            self._dq_issue(
-                result, severity="blocking", rule_code="DQ-MATCH-003", entity_type="game",
-                entity_id=provider_game_id, provider=provider,
-                description="provider game already linked to a different canonical game",
-            )
+            return
+        # The clean-path pre-check verified the reference was unlinked, so any
+        # other result is a concurrent/corrupt state. Raise so the whole run
+        # rolls back rather than commit an accepted decision without its link.
+        raise MatchLinkError(
+            f"game link for {provider}:{provider_game_id} -> {game_id} returned "
+            f"{outcome.value}; expected a clean LINKED"
+        )
 
     def _dq_issue(
         self, result: MatchGamesResult, *, severity: str, rule_code: str, entity_type: str,

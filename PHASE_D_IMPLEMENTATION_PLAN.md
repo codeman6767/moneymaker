@@ -944,6 +944,30 @@ Model column = recommended driver.
 > (`DQ-MATCH-016`), and a real repository/constraint failure propagates to command
 > exit 1.
 >
+> **D5A atomic decision-and-link hardening (pre-D5B2).** The official-game and
+> provider-player accept paths now share the D5B1 atomic invariant via
+> `matching/linkatomic.py` (`classify_link_attempt` → CLEAN / REPLAY / CONFLICT;
+> `MatchLinkError`). Before recording an accepted decision the matcher inspects
+> the provider reference's CURRENT link: an exact idempotent replay records **no**
+> new accepted decision (game replay → `canonical_entities_unchanged`, player →
+> `already_linked`); an existing link to a different entity or a corrupt/mismatched
+> supporting decision is a **blocking rejection** (`DQ-MATCH-003` game /
+> `DQ-MATCH-016` player) that records no accepted decision; only a clean reference
+> records the accepted decision and then applies + verifies the link, and a
+> non-`LINKED` result raises `MatchLinkError` so the whole run rolls back (exit 1)
+> rather than commit an accepted decision without its link. Team/venue resolution
+> decisions remain input-resolution audit records (recorded per run); their
+> crosswalk conflicts stay blocking. The player entry point only processes
+> `player_id IS NULL` references, so replay/conflict there are defensive.
+>
+> **Packaging / season contract (pre-D5B2).** `pyproject.toml` uses automatic
+> package discovery (ships `sports_quant.matching`; excludes tests/venv/build/data)
+> and declares `sports_quant.db` package-data `migrations/*.sql`; a CI
+> `wheel-smoke` job installs the built wheel non-editable and runs `db-init` to
+> schema v15 from outside the source tree. `schema.season_label` is corrected to
+> the NBA START-year convention so it agrees with `season_year_for` /
+> `season_bounds` (the one contract). Schema stays v15; no d016.
+>
 > **D5B1 — sportsbook-event matching (built, mocked/offline; migration d015,
 > schema v15).** `sports_quant/matching/sportsbook.py` resolves already-ingested
 > The Odds API `sportsbook_events` to canonical `games` via provider-scoped

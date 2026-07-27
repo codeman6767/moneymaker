@@ -39,24 +39,47 @@ dev = [
 [project.scripts]
 sports-quant = "sports_quant.cli:main"
 
-[tool.setuptools]
-packages = [
-    "sports_quant",
-    "sports_quant.providers",
-    "sports_quant.db",
-    "sports_quant.db.repositories",
-    "sports_quant.db.seeds",
-    "sports_quant.ingest",
-    "streaming",
-    "state",
-    "probability",
-    "intel",
-    "intel.adapters",
-    "tracking",
-    "evaluation",
-    "backtest",
-    "gateway",
+# Automatic package discovery: every first-party package (including newer ones
+# such as `sports_quant.matching`) ships without needing to be listed by hand,
+# while tests, the local venv, build output, caches, Graphify output, and local
+# data are excluded. The `include` allow-list keeps discovery scoped to the
+# intentionally-distributed top-level packages, so a stray directory (or `.env`,
+# a database, a raw payload) can never be packaged.
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+    "sports_quant*",
+    "streaming*",
+    "state*",
+    "probability*",
+    "intel*",
+    "tracking*",
+    "evaluation*",
+    "backtest*",
+    "gateway*",
 ]
+exclude = [
+    "*.tests",
+    "*.tests.*",
+    "tests",
+    "tests.*",
+    "venv*",
+    "build*",
+    "dist*",
+    "*.egg-info",
+]
+
+# The database engine loads migrations from the installed package
+# (`sports_quant/db/migrations/*.sql` via `Path(__file__)`), so the SQL files
+# must travel inside the wheel as package data of `sports_quant.db`. Filenames
+# and ordering are unchanged; no migration is copied into the tree at runtime.
+[tool.setuptools.package-data]
+"sports_quant.db" = ["migrations/*.sql"]
+
+# Belt-and-braces: never sweep unlisted data files (`.env`, `*.db`, raw exports)
+# into a build just because they sit next to a package.
+[tool.setuptools]
+include-package-data = false
 
 # --------------------------------------------------------------------------- #
 # pytest

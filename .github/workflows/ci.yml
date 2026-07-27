@@ -48,3 +48,69 @@ jobs:
 
       - name: pytest
         run: python -m pytest -q
+
+  wheel-smoke:
+    name: Non-editable wheel install smoke (Python 3.11)
+    runs-on: ubuntu-latest
+    # A separate job that installs the BUILT WHEEL into a clean environment --
+    # never an editable install -- so a missing package (e.g. sports_quant.matching)
+    # or missing migration SQL fails here even though the editable `checks` job
+    # would still pass. No secret is used and no outbound provider request is made.
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Build the wheel (no editable install)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip wheel . --no-deps --wheel-dir "$RUNNER_TEMP/wheelhouse"
+          echo "Wheel contents:"
+          python - "$RUNNER_TEMP/wheelhouse" <<'PY'
+          import glob, sys, zipfile
+          whl = glob.glob(f"{sys.argv[1]}/sports_quant-*.whl")[0]
+          names = zipfile.ZipFile(whl).namelist()
+          migs = sorted(n.split("/")[-1] for n in names if "/db/migrations/" in n and n.endswith(".sql"))
+          assert "sports_quant/matching/sportsbook.py" in names, "matching package missing"
+          assert len(migs) == 15 and migs[0] == "a001_core_entities.sql" and migs[-1] == "d015_sportsbook_matching.sql", migs
+          assert not any("/tests/" in n for n in names), "tests packaged"
+          assert not any(n.lower().endswith((".env", ".db")) for n in names), "secret/db packaged"
+          print("wheel OK:", len(migs), "migrations, matching package present")
+          PY
+
+      - name: Install the wheel into a clean, non-editable environment
+        run: |
+          python -m venv "$RUNNER_TEMP/smokeenv"
+          "$RUNNER_TEMP/smokeenv/bin/python" -m pip install --upgrade pip
+          WHEEL="$(ls "$RUNNER_TEMP"/wheelhouse/sports_quant-*.whl)"
+          "$RUNNER_TEMP/smokeenv/bin/python" -m pip install "$WHEEL"
+
+      - name: Import, CLI, and db-init from the installed wheel (outside the source tree)
+        env:
+          PYTHONPATH: ""
+        working-directory: ${{ runner.temp }}
+        run: |
+          PY="$RUNNER_TEMP/smokeenv/bin/python"
+          REPO="$GITHUB_WORKSPACE" "$PY" - <<'PY'
+          import os
+          import sports_quant, sports_quant.matching, sports_quant.matching.sportsbook, sports_quant.db.engine
+          repo = os.path.abspath(os.environ["REPO"])
+          for m in (sports_quant, sports_quant.matching, sports_quant.matching.sportsbook, sports_quant.db.engine):
+              f = os.path.abspath(m.__file__)
+              assert "site-packages" in f and not f.startswith(repo), f"{m.__name__} not from wheel: {f}"
+          from sports_quant.db.engine import discover_migrations
+          migs = discover_migrations()
+          assert len(migs) == 15 and migs[-1].name == "d015_sportsbook_matching", (len(migs), migs[-1].name)
+          print("imports + migrations resolve from the installed wheel")
+          PY
+          "$RUNNER_TEMP/smokeenv/bin/sports-quant" --help >/dev/null
+          "$PY" -m sports_quant db-init --db "$RUNNER_TEMP/smoke.db" | tee /tmp/init1.txt
+          "$PY" -m sports_quant db-init --db "$RUNNER_TEMP/smoke.db" | tee /tmp/init2.txt
+          grep -q "Schema version: 15" /tmp/init1.txt
+          grep -q "nothing was changed" /tmp/init2.txt

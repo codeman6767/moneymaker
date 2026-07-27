@@ -16,6 +16,14 @@ venv/
 __pycache__/
 *.py[cod]
 
+# Packaging build output (created by `pip wheel .` / `python -m build`); the
+# wheel-smoke test and CI build into temporary dirs, but a local build may drop
+# these in-tree. Never committed -- they are regenerated from source.
+build/
+dist/
+*.egg-info/
+wheelhouse/
+
 # Tool caches
 .pytest_cache/
 .mypy_cache/

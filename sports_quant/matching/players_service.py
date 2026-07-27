@@ -26,6 +26,7 @@ from typing import Optional
 from ..db.repositories.data_quality import SqliteDataQualityRepository
 from ..db.repositories.matching import CandidateInput, SqliteMatchingRepository
 from ..db.repositories.references import LinkOutcome, SqliteProviderReferenceRepository
+from .linkatomic import LinkAttempt, MatchLinkError, classify_link_attempt
 from .model import MATCHER_VERSION, THRESHOLD, Resolution
 from .players import PlayerResolver
 from .season import league_code_from_id, season_bounds
@@ -99,14 +100,82 @@ class MatchPlayersService:
             team_id=team_id, season_year=season_year,
         )
         raw_id = self._reference_raw_id(provider, provider_player_id)
-        decision_id = self._record(provider, provider_player_id, res, raw_id, result)
         if res.scope_conflict:
+            self._record(provider, provider_player_id, res, raw_id, result)
             self._dq_issue(
                 result, rule_code="DQ-MATCH-015", entity_id=provider_player_id, provider=provider,
                 description="exact provider player link resolves into the wrong league",
             )
-        elif res.is_matched:
-            self._link(provider, provider_player_id, res, decision_id, result)
+            return
+        if not res.is_matched:
+            # Ambiguous / no-candidate / rejected: recorded normally, never links.
+            self._record(provider, provider_player_id, res, raw_id, result)
+            return
+
+        # Matched (accepted): record the accepted decision and apply the link as
+        # one atomic unit (task §7). The player matcher only processes references
+        # with a NULL link (`_unresolved`), so a clean link is the normal path;
+        # the replay/conflict branches are defensive against a corrupt or
+        # already-linked reference (a non-LINKED result raises and rolls back).
+        assert res.entity_id is not None  # noqa: S101 - is_matched implies an entity
+        if not self._dry_run:
+            ref = self._refs.get("player", provider, provider_player_id)
+            current = ref.canonical_id if ref is not None else None
+            attempt = classify_link_attempt(
+                current_canonical_id=current, proposed_canonical_id=res.entity_id,
+                decision_valid=self._player_decision_valid(
+                    provider, provider_player_id,
+                    ref.match_decision_id if ref is not None else None, res.entity_id),
+            )
+            if attempt is LinkAttempt.REPLAY:
+                result.counters.already_linked += 1
+                return
+            if attempt is LinkAttempt.CONFLICT:
+                self._dq_issue(
+                    result, rule_code="DQ-MATCH-016", entity_id=provider_player_id,
+                    provider=provider,
+                    description="provider player already linked to a different canonical player",
+                )
+                self._record_link_conflict(provider, provider_player_id, current, raw_id, result)
+                return
+        decision_id = self._record(provider, provider_player_id, res, raw_id, result)
+        self._link(provider, provider_player_id, res, decision_id, result)
+
+    def _player_decision_valid(
+        self, provider: str, provider_player_id: str, decision_id: Optional[str], player_id: str
+    ) -> bool:
+        if decision_id is None:
+            return False
+        d = self._match.get(decision_id)
+        return (
+            d is not None
+            and d.entity_type == "player"
+            and d.source_provider == provider
+            and d.source_ref == provider_player_id
+            and d.outcome == "accepted"
+            and d.matched_entity_id == player_id
+        )
+
+    def _record_link_conflict(
+        self, provider: str, provider_player_id: str, current: Optional[str],
+        raw_id: Optional[str], result: MatchPlayersResult,
+    ) -> None:
+        """Record a blocking rejected decision for a corrupt/conflicting link."""
+
+        result.counters.decisions_evaluated += 1
+        result.counters.rejected += 1
+        result.counters.manual_review_required += 1
+        if self._dry_run:
+            return
+        self._match.record_decision(
+            entity_type="player", source_provider=provider, source_ref=provider_player_id,
+            outcome="rejected", method="conflict", score=0.0, threshold=THRESHOLD,
+            matcher_version=self._version,
+            candidates=[CandidateInput(score=0.0, tier="conflict", candidate_entity_id=current)],
+            matched_entity_id=None,
+            rejection_reason="provider player already linked to a different canonical player",
+            needs_manual_review=True, run_id=self._run_id, raw_response_id=raw_id,
+        )
 
     def _reference_raw_id(self, provider: str, provider_player_id: str) -> Optional[str]:
         row = self._conn.execute(
@@ -206,6 +275,14 @@ class MatchPlayersService:
         )
         if outcome == LinkOutcome.LINKED:
             result.counters.provider_references_linked += 1
+            return
+        # The pre-check verified a NULL link, so any other result is a
+        # concurrent/corrupt state; raise so the run rolls back rather than commit
+        # an accepted decision without its link (task §7).
+        raise MatchLinkError(
+            f"player link for {provider}:{provider_player_id} -> {res.entity_id} returned "
+            f"{outcome.value}; expected a clean LINKED"
+        )
 
     def _dq_issue(
         self, result: MatchPlayersResult, *, rule_code: str, entity_id: str, provider: str,

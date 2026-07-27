@@ -162,6 +162,17 @@ additional Clippers city makes the genuine ambiguity visible to the derivation.
 not contain it. Provider aliases are additionally scoped by `provider`, so one
 provider's idiosyncratic spelling cannot pollute another's namespace.
 
+> **One season-year contract.** The season integer is always the season's START
+> year: MLB `2026` = the 2026 season; NBA `2025` = the 2025-26 season. The three
+> helpers agree by construction — `season.season_year_for(date)` maps a date to
+> that start year (NBA Jan–June → the previous year), `season.season_bounds`
+> gives the membership window (NBA `[Y-07-01, (Y+1)-06-30]`), and
+> `schema.season_label` renders it (`2026`, `2025-26`, `… postseason`). Sportsbook
+> and official-game matching both pass this start-year integer to the resolver, so
+> no call site uses NBA ending-year semantics. `season_bounds` is authoritative
+> for membership; the placeholder `seasons.start_date` (calendar Jan 1) written by
+> official-game matching is not.
+
 > ⚠️ **The seeded aliases carry no real validity years.** Every seeded alias —
 > including historical names such as "Cleveland Indians", "Washington Bullets"
 > and "Oakland Athletics" — is stored with the unbounded sentinels

@@ -25,9 +25,33 @@ accurate insert/update/dedup counters (including a new `ingestion_runs.records_u
 and a single validation path shared by persisted and dry-run ingestion. No
 Kalshi credential, private key, or signing is used anywhere; there is no
 account/balance/position/fill/order column in the schema. The suite passes under
-Ruff and mypy: 1226 passed / 1 skipped locally (optional PyArrow present); under
+Ruff and mypy: 1249 passed / 1 skipped locally (optional PyArrow present); under
 the standard `.[dev]` CI with PyArrow absent only the optional hoopR/PyArrow
 modules skip.
+
+**Release-integrity hardening (pre-D5B2).** Packaging is wheel-tested, not just
+editable: `pyproject.toml` uses automatic package discovery (so every first-party
+package, including `sports_quant.matching`, ships) with a tests/venv/build/data
+exclude list, and declares `sports_quant.db` package-data `migrations/*.sql` so
+the engine loads all fifteen migrations (`a001`..`d015`) from an installed wheel.
+A dedicated CI `wheel-smoke` job builds the wheel, installs it into a clean
+**non-editable** environment, and proves `import sports_quant.matching`, the
+`sports-quant` console script, and `db-init` (twice, schema v15) all resolve from
+the wheel — a missing package or migration fails there even when the editable
+`checks` job would pass; a pytest wheel-content test enforces the same in-suite.
+The MLB/NBA **season-year contract is unified**: the integer is always the
+season START year (MLB `2026` = the 2026 season; NBA `2025` = the 2025-26 season),
+so `schema.season_label` (corrected here), `season.season_year_for`, and
+`season.season_bounds` agree, and official-game matching creates season rows under
+that convention (`start_date` there is a documented placeholder; `season_bounds`
+remains the authoritative NBA membership window). D5A official-game and
+provider-player accepts now share the D5B1 **atomic decision-and-link** invariant
+(shared `matching/linkatomic.py`): a clean reference records the accepted decision
+and applies + verifies the link together; an existing link to another entity or a
+corrupt supporting decision is a blocking rejection with no accepted decision
+(exit 1); a link failure rolls the whole run back; an idempotent replay records no
+new accepted decision. Schema stays v15; **D5B2 (Kalshi) and Phase E have not
+started.**
 
 **D4 weather ingestion code is complete at schema v14 (migration `d014_weather`)
 against mocked NWS and Open-Meteo contracts: NWS is primary for supported US
