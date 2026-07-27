@@ -231,7 +231,11 @@ cutoff) requires an accepted, non-review-flagged market decision naming this
 market and game, a Yes team participating in the game, today's `rules_hash` still
 equal to the decision's `matched_rules_hash` (a current rules change invalidates
 it immediately via a blocking `DQ-MATCH-004`), and no unresolved blocking DQ.
-**Historical** readiness (`as_of=cutoff`) must NOT read today's mutable
+The MLB exact-time tier converts the ticker's venue-local clock through the
+candidate venue's timezone, but that venue association is itself knowledge-time
+gated (an accepted `game` decision + venue `first_observed_at ≤ cutoff`), so the
+time conversion can never borrow future venue evidence. **Historical** readiness
+(`as_of=cutoff`) must NOT read today's mutable
 `rules_hash` or `needs_manual_review` (a later change would retroactively rewrite
 an earlier answer); it requires only that the accepted decision existed by the
 cutoff (`decided_at ≤ cutoff`, immutable accept/game/Yes) and that no blocking

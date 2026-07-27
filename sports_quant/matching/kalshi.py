@@ -23,8 +23,9 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import asdict, dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..db.engine import transaction
 from ..db.repositories.data_quality import SqliteDataQualityRepository
@@ -37,8 +38,8 @@ from ..db.repositories.venues import SqliteVenueRepository
 from ..db.schema import KALSHI_PUBLIC_PROVIDER
 from . import kalshi_parse as kp
 from .linkatomic import MatchLinkError
-from .localdate import InvalidTimezoneError, _parse_utc, resolve_local_date
-from .model import LOCALDATE_UTC_FALLBACK, MATCHER_VERSION, TIER_SCHEDULE_SWAPPED
+from .localdate import _parse_utc
+from .model import MATCHER_VERSION, TIER_SCHEDULE_SWAPPED
 from .season import season_year_for
 from .service import MatchGamesService
 from .teams import TeamResolver
@@ -54,6 +55,36 @@ _SPORT_TO_SERIES = {"mlb": "KXMLBGAME", "nba": "KXNBAGAME"}
 
 def series_ticker_for_sport(sport: Optional[str]) -> Optional[str]:
     return _SPORT_TO_SERIES.get(sport) if sport else None
+
+
+def _local_clock_to_utc(
+    date_local: str, local_clock: str, venue_tz: str, tz_abbrev: Optional[str]
+) -> tuple[Optional[datetime], Optional[str]]:
+    """Convert a venue-LOCAL wall clock to a UTC instant via the venue timezone.
+
+    ``date_local`` (``YYYY-MM-DD``) + ``local_clock`` (``HH:MM``) are a naive wall
+    time in ``venue_tz`` (an IANA name). Returns ``(utc_datetime, None)`` on
+    success or ``(None, reason)`` when the timezone is unknown, the local time is
+    DST-ambiguous/invalid, or a supplied ``tz_abbrev`` (e.g. ``EDT``) does not
+    match the venue timezone's abbreviation at that instant. The local clock is
+    NEVER treated as UTC or as a fixed offset (task §4/§6)."""
+
+    try:
+        zone = ZoneInfo(venue_tz)
+    except (ZoneInfoNotFoundError, ValueError, KeyError):
+        return None, f"unknown venue timezone {venue_tz!r}"
+    y, mo, d = (int(x) for x in date_local.split("-"))
+    hh, mm = (int(x) for x in local_clock.split(":"))
+    naive = datetime(y, mo, d, hh, mm)
+    dt0 = naive.replace(tzinfo=zone, fold=0)
+    dt1 = naive.replace(tzinfo=zone, fold=1)
+    if dt0.utcoffset() != dt1.utcoffset():
+        # DST fold (ambiguous) or gap (invalid) local time -> refuse, never guess.
+        return None, f"DST-ambiguous/invalid local time {date_local} {local_clock} in {venue_tz}"
+    if tz_abbrev is not None and dt0.tzname() != tz_abbrev:
+        return None, (f"rules timezone {tz_abbrev!r} does not match venue {venue_tz!r} "
+                      f"({dt0.tzname()}) at {date_local} {local_clock}")
+    return dt0.astimezone(timezone.utc), None
 
 
 @dataclass
@@ -239,10 +270,12 @@ class MatchKalshiService:
         if title_kind is None:
             return
 
+        # MLB event tickers carry a venue-local clock; NBA are date-only. Events
+        # have no rules, so there is no timezone abbreviation to verify here.
         game = self._match_game(
-            league_id, teams, parsed.game_date_local, scheduled_time=None,
-            cutoff=event.last_observed_at, entity_type="kalshi_event", entity_id=kev,
-            event=event, result=result,
+            league_id, teams, parsed.game_date_local, local_clock=parsed.local_clock,
+            tz_abbrev=None, cutoff=event.last_observed_at, entity_type="kalshi_event",
+            entity_id=kev, event=event, result=result,
         )
         if game is None:
             return
@@ -364,16 +397,16 @@ class MatchKalshiService:
         if title_kind is None:
             return
 
-        # Rules are authoritative for the settlement subject (task §9); no_sub_title
-        # (when present) must name the opposing participant (task §7).
-        yes_team, scheduled_time = self._resolve_yes_and_rules(
-            market, pmk, teams, league_id, season, result)
+        # Rules are authoritative for the settlement subject; they also cross-check
+        # the ticker teams/time and validate no_sub_title.
+        yes_team, local_clock, tz_abbrev = self._resolve_yes_and_rules(
+            market, pmk, pev, teams, league_id, season, result)
         if yes_team is None:
             return
         result.counters.yes_teams_resolved += 1
 
         game = self._match_game(
-            league_id, teams, pev.game_date_local, scheduled_time=scheduled_time,
+            league_id, teams, pev.game_date_local, local_clock=local_clock, tz_abbrev=tz_abbrev,
             cutoff=market.last_observed_at, entity_type="kalshi_market", entity_id=kmk,
             event=market, result=result,
         )
@@ -383,75 +416,70 @@ class MatchKalshiService:
         self._accept_market(market, cand, tier, score, [cand], yes_team, series, title_kind,
                             result)
 
-    def _resolve_yes_and_rules(self, market, pmk, teams, league_id, season, result):  # type: ignore[no-untyped-def]
-        """Resolve the canonical Yes team from ticker/yes_sub_title/rules agreement.
+    def _resolve_yes_and_rules(self, market, pmk, pev, teams, league_id, season, result):  # type: ignore[no-untyped-def]
+        """Resolve the canonical Yes team and the scheduled local clock/timezone.
 
-        Returns ``(yes_team_id, scheduled_time)`` or ``(None, None)`` on rejection.
-        Never defaults Yes to home/first-team, and never reads a price or result."""
+        Returns ``(yes_team_id, local_clock, tz_abbrev)`` or ``(None, None, None)``
+        on rejection. Ticker, ``yes_sub_title``, and authoritative rules must all
+        agree on the Yes team and the participants; rules also cross-check the
+        ticker date and (MLB) local clock. Never defaults Yes to home/first-team;
+        never reads a price, result, or order book."""
 
         kmk = market.kalshi_market_id
-        # Ticker subject -> canonical Yes team.
+        reject = lambda code, msg, dq_sev="issue": (  # noqa: E731
+            self._dq(result, dq_sev, code, "kalshi_market", kmk, market, msg),
+            self._record(result, "kalshi_market", kmk, "rejected", "conflict", 0.0, None, [],
+                         reason=msg, review=True))
+
         yes_from_ticker = teams.by_code.get(pmk.yes_code)
-        if yes_from_ticker is None:
-            self._dq(result, "issue", "DQ-KAL-RULES-001", "kalshi_market", kmk, market,
-                     "market ticker Yes subject code is not one of the event teams")
-            self._record(result, "kalshi_market", kmk, "rejected", "conflict", 0.0, None, [],
-                         reason="ticker Yes subject not a participant", review=True)
-            return None, None
-        if yes_from_ticker not in (teams.away_id, teams.home_id):
-            self._dq(result, "blocking", "DQ-KAL-YES-001", "kalshi_market", kmk, market,
-                     "Yes subject team does not participate in the game")
-            self._record(result, "kalshi_market", kmk, "rejected", "conflict", 0.0, None, [],
-                         reason="Yes team not a participant", review=True)
-            return None, None
-        # yes_sub_title must agree.
+        if yes_from_ticker is None or yes_from_ticker not in (teams.away_id, teams.home_id):
+            reject("DQ-KAL-YES-001", "Yes subject team does not participate in the game",
+                   "blocking")
+            return None, None, None
+        # yes_sub_title must agree with the ticker Yes subject.
         if market.yes_sub_title:
-            yes_from_sub = self._resolve_name(market.yes_sub_title, league_id, season)
-            if yes_from_sub is None or yes_from_sub != yes_from_ticker:
-                self._dq(result, "issue", "DQ-KAL-RULES-001", "kalshi_market", kmk, market,
-                         "yes_sub_title disagrees with the ticker Yes subject")
-                self._record(result, "kalshi_market", kmk, "rejected", "conflict", 0.0, None, [],
-                             reason="yes_sub_title/ticker disagreement", review=True)
-                return None, None
+            if self._resolve_name(market.yes_sub_title, league_id, season) != yes_from_ticker:
+                reject("DQ-KAL-RULES-001", "yes_sub_title disagrees with the ticker Yes subject")
+                return None, None, None
         # Rules are authoritative.
         rules = kp.parse_rules_yes_subject(market.rules_primary)
         if rules is None or isinstance(rules, kp.ParseError):
             reason = "rules absent" if rules is None else rules.reason
-            self._dq(result, "issue", "DQ-KAL-RULES-001", "kalshi_market", kmk, market,
-                     f"rules Yes subject unresolved: {reason}")
-            self._record(result, "kalshi_market", kmk, "rejected", "rules_unresolved", 0.0, None,
-                         [], reason=f"rules Yes subject unresolved: {reason}", review=True)
-            return None, None
-        yes_from_rules = self._resolve_name(rules.yes_name, league_id, season)
-        other_from_rules = self._resolve_name(rules.other_name, league_id, season)
-        rules_pair = {yes_from_rules, other_from_rules}
+            reject("DQ-KAL-RULES-001", f"rules Yes subject unresolved: {reason}")
+            return None, None, None
+        rules_pair = {self._resolve_name(n, league_id, season) for n in rules.names}
         if None in rules_pair or rules_pair != {teams.away_id, teams.home_id}:
-            self._dq(result, "issue", "DQ-KAL-RULES-001", "kalshi_market", kmk, market,
-                     "rules team set disagrees with ticker/title teams")
-            self._record(result, "kalshi_market", kmk, "rejected", "conflict", 0.0, None, [],
-                         reason="ticker/title/rules team disagreement", review=True)
-            return None, None
-        if yes_from_rules != yes_from_ticker:
-            self._dq(result, "issue", "DQ-KAL-RULES-001", "kalshi_market", kmk, market,
-                     "rules Yes subject disagrees with the ticker Yes subject")
-            self._record(result, "kalshi_market", kmk, "rejected", "conflict", 0.0, None, [],
-                         reason="rules/ticker Yes disagreement", review=True)
-            return None, None
-        # The No side, for this supported binary game-winner semantic, is the
-        # opposing game participant. When `no_sub_title` is supplied it must
-        # resolve to exactly that team -- never the Yes team, never an unrelated
-        # team; when absent, the authoritative ticker+rules already prove both
-        # binary participants, so absence alone is acceptable (task §7).
-        other_team = teams.away_id if yes_from_ticker == teams.home_id else teams.home_id
+            reject("DQ-KAL-RULES-001", "rules team set disagrees with the ticker/title teams")
+            return None, None, None
+        if self._resolve_name(rules.yes_name, league_id, season) != yes_from_ticker:
+            reject("DQ-KAL-RULES-001", "rules Yes subject disagrees with the ticker Yes subject")
+            return None, None, None
+        # Ordered `at` rules must agree with the ticker away/home orientation.
+        if rules.away_name is not None and rules.home_name is not None:
+            if (self._resolve_name(rules.away_name, league_id, season) != teams.away_id
+                    or self._resolve_name(rules.home_name, league_id, season) != teams.home_id):
+                reject("DQ-KAL-RULES-001", "rules 'at' orientation disagrees with the ticker")
+                return None, None, None
+        # Rules scheduled date must agree with the ticker date.
+        if rules.scheduled_date != pev.game_date_local:
+            reject("DQ-KAL-RULES-001", "rules scheduled date disagrees with the ticker date")
+            return None, None, None
+        # A ticker local clock (MLB) and a rules local clock must not disagree.
+        if pev.local_clock is not None and rules.local_clock is not None \
+                and pev.local_clock != rules.local_clock:
+            reject("DQ-KAL-RULES-001", "rules scheduled clock disagrees with the ticker clock")
+            return None, None, None
+        # `no_sub_title`, when present, must resolve to a game participant (current
+        # public Kalshi sets it to the Yes-subject team, not the opponent); an
+        # unresolved or unrelated team is rejected. Absent is acceptable because
+        # the authoritative ticker + rules already prove both binary participants.
         if market.no_sub_title:
             no_id = self._resolve_name(market.no_sub_title, league_id, season)
-            if no_id is None or no_id == yes_from_ticker or no_id != other_team:
-                self._dq(result, "issue", "DQ-KAL-RULES-001", "kalshi_market", kmk, market,
-                         "no_sub_title does not name the opposing game participant")
-                self._record(result, "kalshi_market", kmk, "rejected", "conflict", 0.0, None, [],
-                             reason="no_sub_title/opponent disagreement", review=True)
-                return None, None
-        return yes_from_ticker, rules.scheduled_time
+            if no_id is None or no_id not in (teams.away_id, teams.home_id):
+                reject("DQ-KAL-RULES-001", "no_sub_title does not name a game participant")
+                return None, None, None
+        local_clock = pev.local_clock if pev.local_clock is not None else rules.local_clock
+        return yes_from_ticker, local_clock, rules.tz_abbrev
 
     def _accept_market(self, market, game, tier, score, candidate_games, yes_team, series,
                        title_kind, result):  # type: ignore[no-untyped-def]
@@ -602,76 +630,54 @@ class MatchKalshiService:
             return None
         return "unordered"
 
-    # -- canonical game matching (tiers §11/§12) ----------------------------- #
-    def _match_game(self, league_id, teams, date_local, *, scheduled_time, cutoff, entity_type,
-                    entity_id, event, result):  # type: ignore[no-untyped-def]
+    # -- canonical game matching (tiers §9/§11) ------------------------------ #
+    def _match_game(self, league_id, teams, date_local, *, local_clock, tz_abbrev, cutoff,
+                    entity_type, entity_id, event, result):  # type: ignore[no-untyped-def]
         """Return ``(game, tier, score)`` for exactly one canonical candidate, else
-        record ambiguous/no_candidate and return ``None``."""
+        record ambiguous/no_candidate and return ``None``.
 
-        # Tier 1: an authoritative rules-supplied exact instant + venue-local slate.
-        if scheduled_time is not None:
-            try:
-                commence = _parse_utc(scheduled_time)
-            except InvalidTimezoneError:
-                commence = None
-            if commence is not None:
-                lo = (commence - _EXACT_WINDOW).strftime("%Y-%m-%dT%H:%M:%SZ")
-                hi = (commence + _EXACT_WINDOW).strftime("%Y-%m-%dT%H:%M:%SZ")
-                raw = self._games.find_in_window(
-                    league_id=league_id, home_team_id=teams.home_id,
-                    away_team_id=teams.away_id, start_low=lo, start_high=hi)
-                kept: list = []  # (game, cap) pairs
-                for g in raw:
-                    cap = self._slate_cap(event, g, commence, cutoff, entity_type, entity_id,
-                                          result)
-                    if cap is not None:
-                        kept.append((g, cap))
-                if len(kept) == 1:
-                    g, cap = kept[0]
-                    return g, "kalshi_ticker_time", min(_SCORE_TICKER_TIME, cap)
-                if len(kept) > 1:
-                    self._ambiguous(result, entity_type, entity_id,
-                                    [g.game_id for g, _ in kept], "kalshi_ticker_time")
-                    return None
+        ``local_clock`` is a venue-LOCAL wall clock (``HH:MM``) from the MLB ticker
+        and/or the rules -- never a UTC instant. Tier 1 converts it through each
+        candidate's actual event-venue ``zoneinfo`` timezone (knowledge-time
+        gated) to UTC and requires it within +/-90 min of the canonical start on
+        the same slate. When no candidate has usable venue evidence, or the clock
+        is absent (NBA date-only), it falls back to Tier 2 (date-only slate)."""
 
-        # Tier 2: provider date + same venue-local slate (game_date_local).
-        rows = self._games.find_on_local_date(
+        candidates = self._games.find_on_local_date(
             league_id=league_id, home_team_id=teams.home_id, away_team_id=teams.away_id,
             game_date_local=date_local)
-        if len(rows) == 1:
-            return rows[0], "kalshi_date", _SCORE_DATE
-        if len(rows) > 1:
-            self._ambiguous(result, entity_type, entity_id, [g.game_id for g in rows],
+        if local_clock is not None:
+            timed = []
+            for g in candidates:
+                vtz = self._candidate_venue_tz(g, cutoff=cutoff)
+                if vtz is None:
+                    continue  # no knowledge-time venue evidence -> no exact-time here
+                utc, err = _local_clock_to_utc(date_local, local_clock, vtz, tz_abbrev)
+                if err is not None:
+                    self._dq(result, "issue", "DQ-TZ-001", entity_type, entity_id, event,
+                             f"candidate {g.game_id}: {err}")
+                    continue
+                if abs((utc - _parse_utc(g.scheduled_start)).total_seconds()) \
+                        <= _EXACT_WINDOW.total_seconds():
+                    timed.append(g)
+            if len(timed) == 1:
+                return timed[0], "kalshi_ticker_time", _SCORE_TICKER_TIME
+            if len(timed) > 1:
+                self._ambiguous(result, entity_type, entity_id, [g.game_id for g in timed],
+                                "kalshi_ticker_time")
+                return None
+            # else: no venue evidence / no time match -> conservative date-only.
+
+        # Tier 2: provider date + same venue-local slate (game_date_local).
+        if len(candidates) == 1:
+            return candidates[0], "kalshi_date", _SCORE_DATE
+        if len(candidates) > 1:
+            self._ambiguous(result, entity_type, entity_id, [g.game_id for g in candidates],
                             "kalshi_date")
             return None
         self._record(result, entity_type, entity_id, "no_candidate", "none", 0.0, None, [],
                      reason="no canonical game matches the teams and date/time", review=True)
         return None
-
-    def _slate_cap(self, event, game, commence, cutoff, entity_type, entity_id, result):  # type: ignore[no-untyped-def]
-        """Per-candidate local-slate cap (Policy A), or ``None`` to exclude.
-
-        The event's candidate-relative local date must equal the candidate's
-        ``game_date_local`` (a UTC fallback is kept only when its calendar date
-        agrees, capped). Mirrors the D5B1 sportsbook policy."""
-
-        actual_tz = self._candidate_venue_tz(game, cutoff=cutoff)
-        home_tz = None
-        if actual_tz is None:
-            home_tz = self._home._home_venue_tz(
-                game.home_team_id, before_start=commence.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                cutoff=cutoff)
-        try:
-            local = resolve_local_date(
-                scheduled_start=commence.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                actual_venue_tz=actual_tz, provider_local_date=None, home_venue_tz=home_tz)
-        except InvalidTimezoneError as exc:
-            self._dq(result, "issue", "DQ-TZ-001", entity_type, entity_id, event,
-                     f"candidate {game.game_id} local date unresolved: {exc}")
-            return None
-        if local.game_date_local != game.game_date_local:
-            return None
-        return local.confidence_cap if local.tier == LOCALDATE_UTC_FALLBACK else 1.0
 
     def _candidate_venue_tz(self, game, *, cutoff):  # type: ignore[no-untyped-def]
         if game.venue is None:

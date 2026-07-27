@@ -495,9 +495,12 @@ missing data nobody notices.
 > `sports_quant/matching/kalshi.py` with pure, versioned parsers in
 > `matching/kalshi_parse.py`. Already-ingested public MLB/NBA Kalshi events are
 > matched through an **exact series allowlist** (`KXMLBGAME`/`KXNBAGAME`; no
-> prefix guessing, no `category=Sports` catch-all), versioned ticker parsing
-> (event `{SERIES}-{YYMONDD}{AWAY}{HOME}`, split against curated `kalshi_public`
-> alias codes; market `{EVENT}-{SUBJECT}`), provider-scoped team aliases, explicit
+> prefix guessing, no `category=Sports` catch-all), **series-specific versioned
+> ticker parsers** (MLB `kmlb-2`: `KXMLBGAME-{YYMONDD}{HHMM}{AWAY}{HOME}` with a
+> venue-local `HHMM` clock; NBA `knba-1`: `KXNBAGAME-{YYMONDD}{AWAY}{HOME}`,
+> date-only) dispatched by exact series ticker, split against curated
+> `kalshi_public` alias codes; market `{EVENT}-{SUBJECT}`), provider-scoped team
+> aliases, explicit
 > title/sub-title and `rules_primary` team/Yes agreement, and venue-aware
 > canonical schedule evidence. Migration **d016** (schema v16) adds
 > `kalshi_events.match_decision_id` and `kalshi_markets.match_decision_id` +
@@ -537,12 +540,45 @@ missing data nobody notices.
 > rewrite an earlier answer). Title orientation is honoured: an `A at B` title
 > must match the ticker's away/home (a reversed `at` is rejected + review-flagged);
 > `A vs B` stays an unordered set match. When `no_sub_title` is present it must
-> name the opposing participant (never the Yes team, never an unrelated team);
-> when absent, the No side is derived as the opposing participant only for this
-> binary game-winner semantic. An automated rules-hash invalidation flags the
+> name a **game participant** (the current public Kalshi contract sets it equal to
+> the Yes-subject team, verified by the live audit — never an unrelated team); an
+> unresolved or non-participant `no_sub_title` is rejected. When absent, both
+> binary participants are already proven by the authoritative ticker + rules. An
+> automated rules-hash invalidation flags the
 > decision for review via `flag_for_review` (sets `needs_manual_review=1`, leaves
 > `reviewed_by`/`reviewed_at` NULL) — it is never recorded as a completed human
 > review; `mark_reviewed` remains reserved for an audited reviewer.
+>
+> **D5B2 live public-contract repair (current MLB/NBA shapes).** The mocked
+> single-ticker contract was replaced with **series-specific versioned parsers**
+> after a bounded, GET-only, unauthenticated public audit (3 requests) plus a
+> controlled live parser smoke (2 requests; 5 of a 6-request budget, persists
+> nothing). Verified current public shapes:
+> * **MLB** `KXMLBGAME` (`kmlb-2`): `KXMLBGAME-{YYMONDD}{HHMM}{AWAY}{HOME}` — the
+>   `HHMM` is a **venue-local wall clock**, not UTC; title `A vs B`; rules
+>   `If {Yes} wins the {A} vs {B} professional baseball game originally scheduled
+>   for {Mon D, YYYY} at {H:MM AM/PM TZ}, then …`.
+> * **NBA** `KXNBAGAME` (`knba-1`): `KXNBAGAME-{YYMONDD}{AWAY}{HOME}` — date-only
+>   (any time segment is rejected); title `[Game N: ]A at B`; rules date-only.
+>
+> The live smoke confirmed **20/20** open MLB events parse under `kmlb-2`
+> (structural ticker, present clock, title, and rules template); NBA had **no**
+> open events at smoke time (offseason), so its live evidence rests on the audit
+> and sanitized fixtures (`matching/tests/kalshi_fixtures.py`). Parser versions
+> are golden-pinned in tests so a future provider change breaks loudly instead of
+> silently mis-parsing.
+>
+> **Time-safe MLB clock → UTC (task §4/§6).** The MLB `HHMM` is converted
+> **per candidate** through that candidate's actual event-venue `zoneinfo`
+> timezone (knowledge-time gated), never the machine tz, UTC, or a fixed offset.
+> Conversion refuses (never guesses) on an unknown zone, a DST fold-ambiguous or
+> non-existent local time, or a rules timezone abbreviation (`EDT`/`CDT`/`MDT`/
+> `PDT`) that disagrees with the venue zone's abbreviation at that instant. The
+> resulting UTC instant must fall within ±90 min of the canonical start on the
+> same venue-local slate to earn the strongest tier (`kalshi_ticker_time`, 0.97);
+> with no usable venue evidence or no ticker clock (NBA date-only) it falls back
+> conservatively to a date-only slate (`kalshi_date`, 0.92). The ticker clock and
+> a rules clock, when both present, must agree or the market is rejected.
 
 Hardest of the three, because Kalshi identifies markets by ticker and prose
 rather than by structured team fields.
@@ -567,8 +603,11 @@ Procedure:
    A market whose title suggests one game but whose rules name another is
    **rejected** — `rejection_reason = 'title/rules disagreement'`, review
    flagged. Rules text is authoritative because it is what actually settles.
-5. **Date resolution** from `close_time` in venue-local terms, then game tiers
-   §4.2.
+5. **Date/time resolution.** The provider calendar date from the ticker fixes
+   the venue-local slate; for MLB the ticker `HHMM` venue-local clock is converted
+   to UTC through each candidate's venue timezone (see the D5B2 time-safety note
+   above) for the exact-time tier. `close_time` is never treated as the scheduled
+   start.
 
 **`rules_hash` is load-bearing.** `kalshi_markets.rules_hash` is the SHA-256 of
 the settlement rules. If a market's rules change after a match was accepted, the

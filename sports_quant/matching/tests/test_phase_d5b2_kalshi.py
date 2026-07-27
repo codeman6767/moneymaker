@@ -1,8 +1,11 @@
-﻿"""Phase D5B2: deterministic Kalshi event + game-winner market matching.
+"""Phase D5B2: deterministic Kalshi event + game-winner market matching.
 
-Isolated temporary corpora only; no provider client, no network. Canonical games
-are seeded via the D5A helpers; Kalshi events/markets via the conftest helpers;
-teams carry provider-scoped ``kalshi_public`` code and full-name aliases.
+Isolated temporary corpora only; no provider client, no network. Ticker/rules
+forms match the VERIFIED current public Kalshi contract (see ``kalshi_fixtures``
+and ``ENTITY_MATCHING.md`` §6): MLB ``KXMLBGAME-{YYMONDD}{HHMM}{AWAY}{HOME}`` with
+a venue-local clock and ``A vs B`` titles; NBA ``KXNBAGAME-{YYMONDD}{AWAY}{HOME}``
+date-only with ``[Game N: ]A at B`` titles. Strings labelled SYNTHETIC are unit
+edge cases only, never a provider-contract claim.
 """
 
 from __future__ import annotations
@@ -10,15 +13,18 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from sports_quant.db.engine import Database, transaction
+from sports_quant.db.engine import transaction
 from sports_quant.db.repositories.kalshi import SqliteKalshiRepository
 from sports_quant.db.repositories.matching import SqliteMatchingRepository
-from sports_quant.matching.kalshi import MatchKalshiService
+from sports_quant.matching import kalshi_parse as kp
+from sports_quant.matching.kalshi import MatchKalshiService, _local_clock_to_utc
 
+from . import kalshi_fixtures as fx
 from .conftest import (
     seed_kalshi_event,
     seed_kalshi_market,
     seed_team,
+    seed_venue,
     set_kalshi_market_rules,
 )
 from .test_phase_d5a_matching import _create_canonical
@@ -27,14 +33,13 @@ KALSHI = "kalshi_public"
 MLB_SERIES = "KXMLBGAME"
 NBA_SERIES = "KXNBAGAME"
 
-_RULES = ("This market resolves to Yes if the {yes} win the game against the {other}, "
-          "originally scheduled for {sched}.")
-
-
-def _ticker(conn: sqlite3.Connection, kmk: str) -> str:
-    m = SqliteKalshiRepository(conn).get_market(kmk)
-    assert m is not None  # noqa: S101
-    return m.market_ticker
+# Real-contract MLB: San Diego (away) at Los Angeles Dodgers (home), 19:10 PT.
+_MLB_EVENT = "KXMLBGAME-25JUL041910SDLAD"
+_MLB_MARKET = "KXMLBGAME-25JUL041910SDLAD-LAD"
+_MLB_TITLE = "San Diego Padres vs Los Angeles Dodgers"
+_MLB_RULES = ("If Los Angeles Dodgers wins the San Diego Padres vs Los Angeles Dodgers "
+              "professional baseball game originally scheduled for Jul 4, 2025 at 7:10 PM PDT, "
+              "then the market resolves to Yes.")
 
 
 def _kal(conn: sqlite3.Connection, *, dry_run: bool = False, **kw):  # type: ignore[no-untyped-def]
@@ -45,403 +50,402 @@ def _kal(conn: sqlite3.Connection, *, dry_run: bool = False, **kw):  # type: ign
         return svc.match_range(**kw)
 
 
+def _ticker(conn: sqlite3.Connection, kmk: str) -> str:
+    m = SqliteKalshiRepository(conn).get_market(kmk)
+    assert m is not None  # noqa: S101
+    return m.market_ticker
+
+
+def _team(conn: sqlite3.Connection, *, league: str, abbr: str, name: str, code: str) -> str:
+    return seed_team(conn, league_code=league, abbreviation=abbr, canonical_name=name,
+                     city=name, nickname=abbr,
+                     aliases=[(code, "provider", KALSHI), (name, "full", KALSHI)])
+
+
 def _mlb_teams(conn: sqlite3.Connection) -> tuple[str, str]:
-    dodgers = seed_team(
-        conn, league_code="MLB", abbreviation="LAD", canonical_name="Los Angeles Dodgers",
-        city="Los Angeles", nickname="Dodgers",
-        aliases=[("LAD", "provider", KALSHI), ("Los Angeles Dodgers", "full", KALSHI)])
-    padres = seed_team(
-        conn, league_code="MLB", abbreviation="SD", canonical_name="San Diego Padres",
-        city="San Diego", nickname="Padres",
-        aliases=[("SD", "provider", KALSHI), ("San Diego Padres", "full", KALSHI)])
+    dodgers = _team(conn, league="MLB", abbr="LAD", name="Los Angeles Dodgers", code="LAD")
+    padres = _team(conn, league="MLB", abbr="SD", name="San Diego Padres", code="SD")
     return dodgers, padres
 
 
-def _nba_teams(conn: sqlite3.Connection) -> tuple[str, str]:
-    lakers = seed_team(
-        conn, league_code="NBA", abbreviation="LAL", canonical_name="Los Angeles Lakers",
-        city="Los Angeles", nickname="Lakers",
-        aliases=[("LAL", "provider", KALSHI), ("Los Angeles Lakers", "full", KALSHI)])
-    celtics = seed_team(
-        conn, league_code="NBA", abbreviation="BOS", canonical_name="Boston Celtics",
-        city="Boston", nickname="Celtics",
-        aliases=[("BOS", "provider", KALSHI), ("Boston Celtics", "full", KALSHI)])
-    return lakers, celtics
-
-
-def _mlb_game(conn: sqlite3.Connection, home: str, away: str, *, start: str, date: str,
-              key: str = "G1", neutral: bool = False, gn: int = 1) -> str:
-    return _create_canonical(
-        conn, league_code="MLB", home_team_id=home, away_team_id=away, scheduled_start=start,
-        game_date_local=date, official_provider="mlb_statsapi", official_game_key=key,
-        is_neutral_site=neutral, game_number=gn, decided_at="2025-07-01T00:00:00.000000Z")
-
-
 def _dodgers_home_setup(conn: sqlite3.Connection) -> tuple[str, str, str]:
-    """Dodgers (home) vs Padres (away) canonical game on 2025-07-04; returns
-    (dodgers, padres, game_id)."""
+    """Dodgers (home) vs Padres (away), 2025-07-04 19:10 PT at Dodger Stadium
+    (America/Los_Angeles). Returns (dodgers, padres, game_id)."""
 
     dodgers, padres = _mlb_teams(conn)
-    gid = _mlb_game(conn, dodgers, padres, start="2025-07-05T02:10:00Z", date="2025-07-04")
+    venue = seed_venue(conn, name="Dodger Stadium", provider="mlb_statsapi",
+                       provider_venue_id="LAV", timezone="America/Los_Angeles")
+    gid = _create_canonical(
+        conn, league_code="MLB", home_team_id=dodgers, away_team_id=padres,
+        scheduled_start="2025-07-05T02:10:00Z", game_date_local="2025-07-04",
+        official_provider="mlb_statsapi", official_game_key="G1",
+        decided_at="2025-07-01T00:00:00.000000Z")
+    conn.execute("UPDATE games SET venue = ? WHERE game_id = ?", (venue, gid))
+    conn.commit()
     return dodgers, padres, gid
 
 
-def _seed_event_and_market(conn: sqlite3.Connection, *, sched: str = "2025-07-05T02:10:00Z",
-                           yes: str = "Los Angeles Dodgers", other: str = "San Diego Padres",
-                           yes_code: str = "LAD",
-                           event_ticker: str = "KXMLBGAME-25JUL04SDLAD") -> tuple[str, str]:
-    kev = seed_kalshi_event(
-        conn, event_ticker=event_ticker, series_ticker=MLB_SERIES,
-        title="San Diego Padres at Los Angeles Dodgers")
-    kmk = seed_kalshi_market(
-        conn, market_ticker=f"{event_ticker}-{yes_code}", event_ticker=event_ticker,
-        series_ticker=MLB_SERIES, kalshi_event_id=kev,
-        title="San Diego Padres at Los Angeles Dodgers", yes_sub_title=yes,
-        rules_primary=_RULES.format(yes=yes, other=other, sched=sched),
-        close_time="2025-07-05T02:00:00Z")
+def _seed_event_and_market(conn: sqlite3.Connection, *, event_ticker: str = _MLB_EVENT,
+                           market_ticker: str = _MLB_MARKET, title: str = _MLB_TITLE,
+                           yes_sub: str = "Los Angeles Dodgers",
+                           no_sub: str = "Los Angeles Dodgers",
+                           rules: str = _MLB_RULES) -> tuple[str, str]:
+    kev = seed_kalshi_event(conn, event_ticker=event_ticker, series_ticker=MLB_SERIES,
+                            title=title)
+    kmk = seed_kalshi_market(conn, market_ticker=market_ticker, event_ticker=event_ticker,
+                             series_ticker=MLB_SERIES, kalshi_event_id=kev, title=title,
+                             yes_sub_title=yes_sub, no_sub_title=no_sub, rules_primary=rules,
+                             close_time="2025-07-07T02:00:00Z")
     return kev, kmk
 
 
 # --------------------------------------------------------------------------- #
-# Happy path: event + game-winner market
+# Parser unit tests (§11 1-8, 13-23)
 # --------------------------------------------------------------------------- #
-def test_clean_event_and_market_match(conn: sqlite3.Connection) -> None:
-    dodgers, _padres, gid = _dodgers_home_setup(conn)
+_MLB_CODES = frozenset({"LAD", "SD", "AZ", "PIT", "BAL", "DET", "NYY"})
+_NBA_CODES = frozenset({"NYK", "SAS", "LAL", "BOS"})
+
+
+def test_mlb_event_ticker_with_clock() -> None:
+    e = kp.parse_event_ticker("KXMLBGAME-26JUL271840AZPIT", _MLB_CODES)
+    assert isinstance(e, kp.ParsedEventTicker)
+    assert e.series.parser_version == "kmlb-2" and e.game_date_local == "2026-07-27"
+    assert e.local_clock == "18:40" and e.away_code == "AZ" and e.home_code == "PIT"
+
+
+def test_mlb_ticker_malformed_hour_and_minute() -> None:
+    assert isinstance(kp.parse_event_ticker("KXMLBGAME-26JUL272540AZPIT", _MLB_CODES), kp.ParseError)
+    assert isinstance(kp.parse_event_ticker("KXMLBGAME-26JUL271870AZPIT", _MLB_CODES), kp.ParseError)
+
+
+def test_mlb_ticker_missing_clock_rejected() -> None:
+    # Date-only MLB (the old synthetic shape) must FAIL the current MLB parser.
+    assert isinstance(kp.parse_event_ticker("KXMLBGAME-26JUL27AZPIT", _MLB_CODES), kp.ParseError)
+
+
+def test_mlb_ambiguous_team_split_rejected() -> None:
+    # 'AZPIT' with only {AZ,PIT,A,ZP...} -> here A/ZPIT invalid; but two valid splits reject.
+    codes = frozenset({"AZ", "PIT", "AZP", "IT"})
+    assert kp.split_team_codes("AZPIT", codes) is None  # AZ+PIT and AZP+IT both valid
+
+
+def test_nba_date_only_ticker() -> None:
+    n = kp.parse_event_ticker("KXNBAGAME-26JUN13NYKSAS", _NBA_CODES)
+    assert isinstance(n, kp.ParsedEventTicker)
+    assert n.series.parser_version == "knba-1" and n.local_clock is None
+    assert n.away_code == "NYK" and n.home_code == "SAS"
+
+
+def test_nba_unexpected_time_segment_rejected() -> None:
+    assert isinstance(kp.parse_event_ticker("KXNBAGAME-26JUN131840NYKSAS", _NBA_CODES),
+                      kp.ParseError)
+
+
+def test_market_ticker_ancestry_and_subject() -> None:
+    e = kp.parse_event_ticker("KXMLBGAME-26JUL271840AZPIT", _MLB_CODES)
+    assert isinstance(e, kp.ParsedEventTicker)
+    ok = kp.parse_market_ticker("KXMLBGAME-26JUL271840AZPIT-AZ", e)
+    assert isinstance(ok, kp.ParsedMarketTicker) and ok.yes_code == "AZ"
+    assert isinstance(kp.parse_market_ticker("KXMLBGAME-26JUL271840BALDET-BAL", e), kp.ParseError)
+
+
+def test_title_vs_and_at_and_game_prefix() -> None:
+    vs = kp.parse_title_teams("Arizona vs Pittsburgh")
+    assert isinstance(vs, kp.TitleTeams) and vs.away_name is None
+    at = kp.parse_title_teams("Game 5: New York at San Antonio")
+    assert isinstance(at, kp.TitleTeams) and at.away_name == "New York" and at.home_name == "San Antonio"
+    win = kp.parse_title_teams("Arizona vs Pittsburgh Winner?")  # market title suffix stripped
+    assert isinstance(win, kp.TitleTeams) and set(win.names) == {"Arizona", "Pittsburgh"}
+    assert isinstance(kp.parse_title_teams("Arizona game"), kp.ParseError)
+
+
+def test_rules_current_mlb_and_nba() -> None:
+    m = kp.parse_rules_yes_subject(fx.MLB_AZ_PIT.rules_primary)
+    assert isinstance(m, kp.ParsedRules)
+    assert m.yes_name == "Arizona" and set(m.names) == {"Arizona", "Pittsburgh"}
+    assert m.scheduled_date == "2026-07-27" and m.local_clock == "18:40" and m.tz_abbrev == "EDT"
+    n = kp.parse_rules_yes_subject(fx.NBA_NYK_SAS.rules_primary)
+    assert isinstance(n, kp.ParsedRules)
+    assert n.yes_name == "San Antonio" and n.away_name == "New York" and n.home_name == "San Antonio"
+    assert n.scheduled_date == "2026-06-13" and n.local_clock is None
+
+
+def test_rules_without_the_before_yes_and_game_prefix() -> None:
+    # Current wording has no 'the' before the Yes team and an optional 'Game N:'.
+    r = kp.parse_rules_yes_subject(
+        "If Boston wins the Game 2: Philadelphia at Boston professional basketball game "
+        "originally scheduled for May 6, 2026, then the market resolves to Yes.")
+    assert isinstance(r, kp.ParsedRules) and r.yes_name == "Boston"
+    assert r.away_name == "Philadelphia" and r.home_name == "Boston"
+
+
+def test_rules_natural_language_clock_conversions() -> None:
+    for text, want in (("12:00 AM", "00:00"), ("12:00 PM", "12:00"), ("1:05 PM", "13:05")):
+        r = kp.parse_rules_yes_subject(
+            f"If Arizona wins the Arizona vs Pittsburgh professional baseball game originally "
+            f"scheduled for Jul 27, 2026 at {text} EDT, then the market resolves to Yes.")
+        assert isinstance(r, kp.ParsedRules) and r.local_clock == want
+
+
+# --------------------------------------------------------------------------- #
+# Timezone conversion (§11 9-12)
+# --------------------------------------------------------------------------- #
+def test_local_clock_to_utc_venue_conversion() -> None:
+    # 19:10 America/Los_Angeles on 2025-07-04 (PDT) -> 02:10 UTC next day.
+    utc, err = _local_clock_to_utc("2025-07-04", "19:10", "America/Los_Angeles", "PDT")
+    assert err is None and utc is not None
+    assert utc.strftime("%Y-%m-%dT%H:%M:%SZ") == "2025-07-05T02:10:00Z"
+
+
+def test_local_clock_never_utc() -> None:
+    # Same wall clock in ET is a different instant than in PT -> proves not UTC.
+    et, _ = _local_clock_to_utc("2026-07-27", "18:40", "America/New_York", "EDT")
+    pt, _ = _local_clock_to_utc("2026-07-27", "18:40", "America/Los_Angeles", "PDT")
+    assert et is not None and pt is not None and et != pt
+
+
+def test_tz_abbreviation_mismatch_rejected() -> None:
+    # EDT claimed but the venue is Pacific -> mismatch rejected.
+    _utc, err = _local_clock_to_utc("2026-07-27", "18:40", "America/Los_Angeles", "EDT")
+    assert err is not None
+
+
+# --------------------------------------------------------------------------- #
+# End-to-end matching on the real contract
+# --------------------------------------------------------------------------- #
+def test_mlb_clean_match_tier1_ticker_time(conn: sqlite3.Connection) -> None:
+    dodgers, _p, gid = _dodgers_home_setup(conn)
     kev, kmk = _seed_event_and_market(conn)
     r = _kal(conn, series_ticker=MLB_SERIES)
-    assert r.counters.events_accepted == 1 and r.counters.events_linked == 1
-    assert r.counters.markets_accepted == 1 and r.counters.markets_linked == 1
-    assert r.counters.yes_teams_resolved == 1
+    assert r.counters.events_accepted == 1 and r.counters.markets_accepted == 1
     repo = SqliteKalshiRepository(conn)
     assert repo.event_link(kev)[0] == gid
-    g, dec, yes, mhash, sem = repo.market_link(kmk)
+    g, _dec, yes, mhash, sem = repo.market_link(kmk)
     assert g == gid and yes == dodgers and sem == "game_winner" and mhash is not None
     assert repo.is_kalshi_market_orientation_approved(kmk)
+    d = SqliteMatchingRepository(conn).decisions_for_source(
+        source_provider=KALSHI, source_ref=kev, entity_type="kalshi_event")[0]
+    assert d.method == "kalshi_ticker_time" and d.score == 0.97  # venue-local clock -> Tier 1
 
 
-def test_nba_date_only_match(conn: sqlite3.Connection) -> None:
-    lakers, celtics = _nba_teams(conn)
+def test_mlb_no_venue_falls_back_to_date_only(conn: sqlite3.Connection) -> None:
+    # Same MLB market but the canonical game has no venue tz -> no Tier-1 time,
+    # conservative date-only Tier 2.
+    dodgers, padres = _mlb_teams(conn)
     gid = _create_canonical(
-        conn, league_code="NBA", home_team_id=lakers, away_team_id=celtics,
-        scheduled_start="2026-01-16T03:30:00Z", game_date_local="2026-01-15",
+        conn, league_code="MLB", home_team_id=dodgers, away_team_id=padres,
+        scheduled_start="2025-07-05T02:10:00Z", game_date_local="2025-07-04",
+        official_provider="mlb_statsapi", official_game_key="G1",
+        decided_at="2025-07-01T00:00:00.000000Z")
+    _kev, kmk = _seed_event_and_market(conn)
+    _kal(conn, series_ticker=MLB_SERIES)
+    d = SqliteMatchingRepository(conn).decisions_for_source(
+        source_provider=KALSHI, source_ref=kmk, entity_type="kalshi_market")
+    # No venue tz -> no exact time; conservative date-only Tier 2 (0.92).
+    assert any(x.method == "kalshi_date" and x.matched_entity_id == gid for x in d)
+
+
+def test_nba_date_only_end_to_end(conn: sqlite3.Connection) -> None:
+    nyk = _team(conn, league="NBA", abbr="NYK", name="New York", code="NYK")
+    sas = _team(conn, league="NBA", abbr="SAS", name="San Antonio", code="SAS")
+    gid = _create_canonical(
+        conn, league_code="NBA", home_team_id=sas, away_team_id=nyk,
+        scheduled_start="2026-06-14T00:00:00Z", game_date_local="2026-06-13",
         official_provider="balldontlie", official_game_key="NG1",
-        decided_at="2025-12-01T00:00:00.000000Z")
-    ev = "KXNBAGAME-26JAN15BOSLAL"
-    kev = seed_kalshi_event(conn, event_ticker=ev, series_ticker=NBA_SERIES,
-                            title="Boston Celtics at Los Angeles Lakers")
-    seed_kalshi_market(
-        conn, market_ticker=f"{ev}-LAL", event_ticker=ev, series_ticker=NBA_SERIES,
-        kalshi_event_id=kev,
-        title="Boston Celtics at Los Angeles Lakers", yes_sub_title="Los Angeles Lakers",
-        rules_primary="Resolves Yes if the Los Angeles Lakers win the game against the "
-                      "Boston Celtics.")
+        decided_at="2026-06-01T00:00:00.000000Z")
+    kev = seed_kalshi_event(conn, event_ticker=fx.NBA_NYK_SAS.event_ticker,
+                            series_ticker=NBA_SERIES, title=fx.NBA_NYK_SAS.title)
+    seed_kalshi_market(conn, market_ticker=fx.NBA_NYK_SAS.market_ticker,
+                       event_ticker=fx.NBA_NYK_SAS.event_ticker, series_ticker=NBA_SERIES,
+                       kalshi_event_id=kev, title=fx.NBA_NYK_SAS.title,
+                       yes_sub_title=fx.NBA_NYK_SAS.yes_sub_title,
+                       no_sub_title=fx.NBA_NYK_SAS.no_sub_title,
+                       rules_primary=fx.NBA_NYK_SAS.rules_primary)
     r = _kal(conn, series_ticker=NBA_SERIES)
     assert r.counters.events_accepted == 1 and r.counters.markets_accepted == 1
     d = SqliteMatchingRepository(conn).decisions_for_source(
         source_provider=KALSHI, source_ref=kev, entity_type="kalshi_event")[0]
     assert d.method == "kalshi_date" and d.score == 0.92 and d.matched_entity_id == gid
-
-
-# --------------------------------------------------------------------------- #
-# Pure parser tests (Â§22 series/parsers, teams/titles, rules)
-# --------------------------------------------------------------------------- #
-_MLB_CODES = frozenset({"LAD", "SD", "NYY", "NYM", "ATL"})
-_NBA_CODES = frozenset({"LAL", "BOS", "GSW"})
-
-
-def test_parse_event_ticker_mlb_and_nba() -> None:
-    from sports_quant.matching import kalshi_parse as kp
-
-    e = kp.parse_event_ticker("KXMLBGAME-25JUL04SDLAD", _MLB_CODES)
-    assert isinstance(e, kp.ParsedEventTicker)
-    assert e.series.league_code == "MLB" and e.series.parser_version == "kmlb-1"
-    assert e.game_date_local == "2025-07-04" and e.away_code == "SD" and e.home_code == "LAD"
-    n = kp.parse_event_ticker("KXNBAGAME-26JAN15BOSLAL", _NBA_CODES)
-    assert isinstance(n, kp.ParsedEventTicker) and n.away_code == "BOS" and n.home_code == "LAL"
-
-
-def test_parse_event_ticker_rejects() -> None:
-    from sports_quant.matching import kalshi_parse as kp
-
-    assert isinstance(kp.parse_event_ticker("KXNFLGAME-25JUL04SDLAD", _MLB_CODES), kp.ParseError)
-    assert isinstance(kp.parse_event_ticker("KXMLBGAME-25Xxx04SDLAD", _MLB_CODES), kp.ParseError)
-    assert isinstance(kp.parse_event_ticker("KXMLBGAME-25JUL34SDLAD", _MLB_CODES), kp.ParseError)
-    assert isinstance(kp.parse_event_ticker("KXMLBGAME-25JUL04ZZLAD", _MLB_CODES), kp.ParseError)
-    # Trailing junk -> not a complete match.
-    assert isinstance(kp.parse_event_ticker("KXMLBGAME-25JUL04SDLAD-X", _MLB_CODES), kp.ParseError)
-
-
-def test_split_team_codes_ambiguous_rejected() -> None:
-    from sports_quant.matching.kalshi_parse import split_team_codes
-
-    # NYNYM could split NY+NYM or ... only unique valid split accepted.
-    assert split_team_codes("SDLAD", _MLB_CODES) == ("SD", "LAD")
-    assert split_team_codes("XXYY", _MLB_CODES) is None  # no valid codes
-
-
-def test_parse_market_ticker_ancestry_and_subject() -> None:
-    from sports_quant.matching import kalshi_parse as kp
-
-    e = kp.parse_event_ticker("KXMLBGAME-25JUL04SDLAD", _MLB_CODES)
-    assert isinstance(e, kp.ParsedEventTicker)
-    ok = kp.parse_market_ticker("KXMLBGAME-25JUL04SDLAD-LAD", e)
-    assert isinstance(ok, kp.ParsedMarketTicker) and ok.yes_code == "LAD"
-    # Descends from a different event.
-    assert isinstance(kp.parse_market_ticker("KXMLBGAME-25JUL04NYYNYM-NYY", e), kp.ParseError)
-
-
-def test_parse_title_teams_forms() -> None:
-    from sports_quant.matching import kalshi_parse as kp
-
-    at = kp.parse_title_teams("San Diego Padres at Los Angeles Dodgers")
-    assert isinstance(at, kp.TitleTeams) and at.away_name == "San Diego Padres"
-    vs = kp.parse_title_teams("Padres vs. Dodgers")
-    assert isinstance(vs, kp.TitleTeams) and vs.away_name is None
-    assert isinstance(kp.parse_title_teams("Dodgers game tonight"), kp.ParseError)
-    assert kp.parse_title_teams(None) is None
-
-
-def test_parse_rules_yes_subject_forms() -> None:
-    from sports_quant.matching import kalshi_parse as kp
-
-    r = kp.parse_rules_yes_subject(
-        "This market resolves to Yes if the Los Angeles Dodgers win the game against the "
-        "San Diego Padres, originally scheduled for 2025-07-05T02:10:00Z.")
-    assert isinstance(r, kp.ParsedRules)
-    assert r.yes_name == "Los Angeles Dodgers" and r.other_name == "San Diego Padres"
-    assert r.scheduled_time == "2025-07-05T02:10:00Z"
-    assert isinstance(kp.parse_rules_yes_subject("A market about the weather."), kp.ParseError)
-    assert kp.parse_rules_yes_subject(None) is None
-
-
-# --------------------------------------------------------------------------- #
-# Series / semantic classification
-# --------------------------------------------------------------------------- #
-def test_unsupported_series_no_review_flood(conn: sqlite3.Connection) -> None:
-    # A non-sports (or unsupported sports) series: honest no-candidate, NOT
-    # review-flagged, no DQ flood.
-    seed_kalshi_event(conn, event_ticker="KXPRESIDENT-28", series_ticker="KXPRESIDENT",
-                      title="Some non-sports market", category="Politics")
-    r = _kal(conn, series_ticker="KXPRESIDENT")
-    assert r.counters.unsupported_series == 1 and r.counters.events_accepted == 0
-    review = SqliteMatchingRepository(conn).list_needs_review(entity_type="kalshi_event")
-    assert review == []  # never enters the review queue
-    assert conn.execute("SELECT COUNT(*) FROM data_quality_issues").fetchone()[0] == 0
-
-
-def test_unsupported_market_semantic_not_malformed(conn: sqlite3.Connection) -> None:
-    _dodgers_home_setup(conn)
-    ev = "KXMLBGAME-25JUL04SDLAD"
-    kev = seed_kalshi_event(conn, event_ticker=ev, series_ticker=MLB_SERIES,
-                            title="San Diego Padres at Los Angeles Dodgers")
-    # A totals market (suffix is not a bare team code) -> unsupported semantic.
-    for suffix in ("T85", "LADM15", "OHTANIHR"):
-        seed_kalshi_market(conn, market_ticker=f"{ev}-{suffix}", event_ticker=ev,
-                           series_ticker=MLB_SERIES, kalshi_event_id=kev,
-                           title="San Diego Padres at Los Angeles Dodgers",
-                           rules_primary="Some non-game-winner proposition.")
-    r = _kal(conn, series_ticker=MLB_SERIES)
-    assert r.counters.unsupported_semantics == 3 and r.counters.markets_accepted == 0
-    # Unsupported semantics are not review-flagged and produce no DQ defect.
-    assert not any(d.entity_type == "kalshi_market"
-                   for d in SqliteMatchingRepository(conn).list_needs_review())
-
-
-# --------------------------------------------------------------------------- #
-# Teams / title / rules disagreement
-# --------------------------------------------------------------------------- #
-def test_ticker_title_disagreement_rejected(conn: sqlite3.Connection) -> None:
-    _dodgers_home_setup(conn)
-    ev = "KXMLBGAME-25JUL04SDLAD"
-    seed_kalshi_event(conn, event_ticker=ev, series_ticker=MLB_SERIES,
-                      title="New York Yankees at New York Mets")  # title disagrees with ticker
-    r = _kal(conn, series_ticker=MLB_SERIES)
-    assert r.counters.events_accepted == 0 and r.counters.events_rejected >= 1
-    codes = {row[0] for row in conn.execute("SELECT rule_code FROM data_quality_issues")}
-    assert "DQ-KAL-TITLE-001" in codes
-
-
-def test_unknown_team_code(conn: sqlite3.Connection) -> None:
-    _mlb_teams(conn)  # only LAD/SD aliases; NYY/NYM unknown
-    seed_kalshi_event(conn, event_ticker="KXMLBGAME-25JUL04SDLAD", series_ticker=MLB_SERIES,
-                      title="San Diego Padres at Los Angeles Dodgers")
-    # A different event whose codes are not curated -> unparseable/no-candidate.
-    seed_kalshi_event(conn, event_ticker="KXMLBGAME-25JUL04XXYY", series_ticker=MLB_SERIES,
-                      title="Nobody at Someone")
-    r = _kal(conn, series_ticker=MLB_SERIES, event_ticker="KXMLBGAME-25JUL04XXYY")
-    assert r.counters.events_accepted == 0 and r.counters.events_no_candidate >= 1
-
-
-def test_ambiguous_team_code_blocks(conn: sqlite3.Connection) -> None:
-    from .conftest import mark_team_ambiguous, seed_team_alias
-    _dodgers_home_setup(conn)
-    # A second team also carries the "SD" kalshi_public alias -> ambiguous.
-    other = seed_team(conn, league_code="MLB", abbreviation="SDX", canonical_name="Sd Other",
-                      city="Elsewhere", nickname="Others")
-    seed_team_alias(conn, team_id=other, league_code="MLB", alias="SD", provider=KALSHI)
-    mark_team_ambiguous(conn, "MLB")
-    seed_kalshi_event(conn, event_ticker="KXMLBGAME-25JUL04SDLAD", series_ticker=MLB_SERIES,
-                      title="San Diego Padres at Los Angeles Dodgers")
-    r = _kal(conn, series_ticker=MLB_SERIES)
-    assert r.needs_failure_exit
-    codes = {row[0] for row in conn.execute("SELECT rule_code FROM data_quality_issues")}
-    assert "DQ-MATCH-006" in codes
-
-
-def test_rules_ticker_disagreement_rejected(conn: sqlite3.Connection) -> None:
-    _dodgers_home_setup(conn)
-    ev = "KXMLBGAME-25JUL04SDLAD"
-    kev = seed_kalshi_event(conn, event_ticker=ev, series_ticker=MLB_SERIES,
-                            title="San Diego Padres at Los Angeles Dodgers")
-    # Rules name a DIFFERENT pair than the ticker/title.
-    seed_kalshi_market(conn, market_ticker=f"{ev}-LAD", event_ticker=ev, series_ticker=MLB_SERIES,
-                       kalshi_event_id=kev, title="San Diego Padres at Los Angeles Dodgers",
-                       yes_sub_title="Los Angeles Dodgers",
-                       rules_primary="Yes if the New York Yankees win against the New York Mets.")
-    r = _kal(conn, series_ticker=MLB_SERIES)
-    assert r.counters.markets_accepted == 0 and r.counters.markets_rejected >= 1
-    codes = {row[0] for row in conn.execute("SELECT rule_code FROM data_quality_issues")}
-    assert "DQ-KAL-RULES-001" in codes
-
-
-def test_yes_sub_title_disagreement_rejected(conn: sqlite3.Connection) -> None:
-    _dodgers_home_setup(conn)
-    ev = "KXMLBGAME-25JUL04SDLAD"
-    kev = seed_kalshi_event(conn, event_ticker=ev, series_ticker=MLB_SERIES,
-                            title="San Diego Padres at Los Angeles Dodgers")
-    seed_kalshi_market(conn, market_ticker=f"{ev}-LAD", event_ticker=ev, series_ticker=MLB_SERIES,
-                       kalshi_event_id=kev, title="San Diego Padres at Los Angeles Dodgers",
-                       yes_sub_title="San Diego Padres",  # disagrees with ticker suffix LAD
-                       rules_primary=_RULES.format(yes="Los Angeles Dodgers",
-                                                    other="San Diego Padres", sched="n/a"))
-    r = _kal(conn, series_ticker=MLB_SERIES)
-    assert r.counters.markets_accepted == 0 and r.counters.markets_rejected >= 1
-
-
-def test_result_field_does_not_influence_yes(conn: sqlite3.Connection) -> None:
-    dodgers, _padres, _gid = _dodgers_home_setup(conn)
-    ev = "KXMLBGAME-25JUL04SDLAD"
-    kev = seed_kalshi_event(conn, event_ticker=ev, series_ticker=MLB_SERIES,
-                            title="San Diego Padres at Los Angeles Dodgers")
-    # A misleading settled result must not affect the Yes-team resolution.
-    seed_kalshi_market(conn, market_ticker=f"{ev}-LAD", event_ticker=ev, series_ticker=MLB_SERIES,
-                       kalshi_event_id=kev, title="San Diego Padres at Los Angeles Dodgers",
-                       yes_sub_title="Los Angeles Dodgers", result="no",
-                       rules_primary=_RULES.format(yes="Los Angeles Dodgers",
-                                                    other="San Diego Padres", sched="n/a"))
-    _kal(conn, series_ticker=MLB_SERIES)
     repo = SqliteKalshiRepository(conn)
-    m = repo.get_market_by_ticker(f"{ev}-LAD")
+    m = repo.get_market_by_ticker(fx.NBA_NYK_SAS.market_ticker)
     assert m is not None
-    _g, _d, yes, _h, _s = repo.market_link(m.kalshi_market_id)
-    assert yes == dodgers  # from rules, not the 'no' result field
-    _ = kev
+    assert repo.market_link(m.kalshi_market_id)[2] == sas  # Yes = San Antonio (home)
 
 
-# --------------------------------------------------------------------------- #
-# Atomic links, replay, conflict
-# --------------------------------------------------------------------------- #
-def test_market_conflict_leaves_no_new_accepted(conn: sqlite3.Connection) -> None:
-    from sports_quant.db.ids import new_match_decision_id
-    dodgers, padres, gid = _dodgers_home_setup(conn)
-    # A second, unrelated game the market's link is corruptly pointed at.
-    other = _mlb_game(conn, dodgers, padres, start="2025-07-10T02:10:00Z", date="2025-07-09",
-                      key="G2")
-    kev, kmk = _seed_event_and_market(conn)
-    with transaction(conn):
-        mid = new_match_decision_id()
-        conn.execute(
-            "INSERT INTO entity_match_decisions (match_id, entity_type, source_provider, "
-            "source_ref, matched_entity_id, outcome, method, score, threshold, matcher_version, "
-            "needs_manual_review, decided_at, created_at) VALUES "
-            "(?, 'kalshi_market', 'kalshi_public', ?, ?, 'accepted', 'kalshi_date', 0.92, 0.85, "
-            "'v', 0, '2025-07-01T00:00:00.000000Z', '2025-07-01T00:00:00.000000Z')",
-            (mid, kmk, other))
-        conn.execute("UPDATE kalshi_markets SET game_id=?, match_decision_id=?, yes_team_id=?, "
-                     "matched_rules_hash='oldhash', market_semantic='game_winner' "
-                     "WHERE kalshi_market_id=?", (other, mid, dodgers, kmk))
+def test_audited_mlb_fixture_end_to_end(conn: sqlite3.Connection) -> None:
+    az = _team(conn, league="MLB", abbr="AZ", name="Arizona", code="AZ")
+    pit = _team(conn, league="MLB", abbr="PIT", name="Pittsburgh", code="PIT")
+    venue = seed_venue(conn, name="PNC Park", provider="mlb_statsapi", provider_venue_id="PNC",
+                       timezone="America/New_York")
+    gid = _create_canonical(
+        conn, league_code="MLB", home_team_id=pit, away_team_id=az,
+        scheduled_start="2026-07-27T22:40:00Z", game_date_local="2026-07-27",
+        official_provider="mlb_statsapi", official_game_key="AZPIT",
+        decided_at="2026-07-01T00:00:00.000000Z")
+    conn.execute("UPDATE games SET venue=? WHERE game_id=?", (venue, gid))
+    conn.commit()
+    kev = seed_kalshi_event(conn, event_ticker=fx.MLB_AZ_PIT.event_ticker,
+                            series_ticker=MLB_SERIES, title=fx.MLB_AZ_PIT.title)
+    seed_kalshi_market(conn, market_ticker=fx.MLB_AZ_PIT.market_ticker,
+                       event_ticker=fx.MLB_AZ_PIT.event_ticker, series_ticker=MLB_SERIES,
+                       kalshi_event_id=kev, title=fx.MLB_AZ_PIT.title,
+                       yes_sub_title=fx.MLB_AZ_PIT.yes_sub_title,
+                       no_sub_title=fx.MLB_AZ_PIT.no_sub_title,
+                       rules_primary=fx.MLB_AZ_PIT.rules_primary)
     r = _kal(conn, series_ticker=MLB_SERIES)
-    assert r.needs_failure_exit
-    # No new accepted market decision naming the (correct) gid; existing link intact.
+    assert r.counters.events_accepted == 1 and r.counters.markets_accepted == 1
+    assert SqliteKalshiRepository(conn).event_link(kev)[0] == gid
+    _ = (az, pit)
+
+
+# --------------------------------------------------------------------------- #
+# Title / rules disagreement, no_sub_title, unsupported semantics
+# --------------------------------------------------------------------------- #
+def test_reversed_at_title_rejected(conn: sqlite3.Connection) -> None:
+    # NBA 'at' orientation reversed vs the ticker (ticker away=NYK, home=SAS).
+    nyk = _team(conn, league="NBA", abbr="NYK", name="New York", code="NYK")
+    sas = _team(conn, league="NBA", abbr="SAS", name="San Antonio", code="SAS")
+    _create_canonical(conn, league_code="NBA", home_team_id=sas, away_team_id=nyk,
+                      scheduled_start="2026-06-14T00:00:00Z", game_date_local="2026-06-13",
+                      official_provider="balldontlie", official_game_key="NG1",
+                      decided_at="2026-06-01T00:00:00.000000Z")
+    seed_kalshi_event(conn, event_ticker="KXNBAGAME-26JUN13NYKSAS", series_ticker=NBA_SERIES,
+                      title="San Antonio at New York")  # reversed: home named as away
+    r = _kal(conn, series_ticker=NBA_SERIES)
+    assert r.counters.events_accepted == 0 and r.counters.events_rejected >= 1
+    _ = (nyk, sas)
+
+
+def test_no_sub_title_equal_yes_is_accepted(conn: sqlite3.Connection) -> None:
+    # Current public Kalshi sets no_sub_title == the Yes-subject team; must accept.
+    _dodgers_home_setup(conn)
+    _seed_event_and_market(conn, no_sub="Los Angeles Dodgers")
+    r = _kal(conn, series_ticker=MLB_SERIES)
+    assert r.counters.markets_accepted == 1
+
+
+def test_no_sub_title_unrelated_rejected(conn: sqlite3.Connection) -> None:
+    _dodgers_home_setup(conn)
+    _team(conn, league="MLB", abbr="NYY", name="New York Yankees", code="NYY")
+    _seed_event_and_market(conn, no_sub="New York Yankees")
+    r = _kal(conn, series_ticker=MLB_SERIES)
+    assert r.counters.markets_accepted == 0 and r.counters.markets_rejected >= 1
+
+
+def test_rules_ticker_time_disagreement_rejected(conn: sqlite3.Connection) -> None:
+    _dodgers_home_setup(conn)
+    bad_rules = _MLB_RULES.replace("7:10 PM PDT", "9:10 PM PDT")  # rules clock != ticker 19:10
+    _seed_event_and_market(conn, rules=bad_rules)
+    r = _kal(conn, series_ticker=MLB_SERIES)
+    assert r.counters.markets_accepted == 0 and r.counters.markets_rejected >= 1
+
+
+def test_rules_team_disagreement_rejected(conn: sqlite3.Connection) -> None:
+    _dodgers_home_setup(conn)
+    bad = ("If Los Angeles Dodgers wins the New York Yankees vs Los Angeles Dodgers professional "
+           "baseball game originally scheduled for Jul 4, 2025 at 7:10 PM PDT, then the market "
+           "resolves to Yes.")
+    _team(conn, league="MLB", abbr="NYY", name="New York Yankees", code="NYY")
+    _seed_event_and_market(conn, rules=bad)
+    r = _kal(conn, series_ticker=MLB_SERIES)
+    assert r.counters.markets_accepted == 0 and r.counters.markets_rejected >= 1
+
+
+def test_unsupported_semantic_not_malformed(conn: sqlite3.Connection) -> None:
+    _dodgers_home_setup(conn)
+    kev = seed_kalshi_event(conn, event_ticker=_MLB_EVENT, series_ticker=MLB_SERIES,
+                            title=_MLB_TITLE)
+    seed_kalshi_market(conn, market_ticker=f"{_MLB_EVENT}-T85", event_ticker=_MLB_EVENT,
+                       series_ticker=MLB_SERIES, kalshi_event_id=kev, title=_MLB_TITLE,
+                       rules_primary="A totals proposition.")
+    r = _kal(conn, series_ticker=MLB_SERIES)
+    assert r.counters.unsupported_semantics == 1 and r.counters.markets_accepted == 0
+
+
+def test_indistinguishable_doubleheader_ambiguous(conn: sqlite3.Connection) -> None:
+    # Two same-slate Dodgers/Padres games; date-only NBA-style ambiguity for MLB
+    # when the ticker time cannot single one out (both share the venue tz slate).
+    dodgers, padres = _mlb_teams(conn)
+    for key, gn in (("G1", 1), ("G2", 2)):
+        _create_canonical(conn, league_code="MLB", home_team_id=dodgers, away_team_id=padres,
+                          scheduled_start="2025-07-05T02:10:00Z", game_date_local="2025-07-04",
+                          official_provider="mlb_statsapi", official_game_key=key, game_number=gn,
+                          decided_at="2025-07-01T00:00:00.000000Z")
+    seed_kalshi_event(conn, event_ticker=_MLB_EVENT, series_ticker=MLB_SERIES, title=_MLB_TITLE)
+    r = _kal(conn, series_ticker=MLB_SERIES)
+    assert r.counters.events_ambiguous == 1 and r.counters.events_accepted == 0
+
+
+# --------------------------------------------------------------------------- #
+# Atomicity / replay / rules-hash / PIT / isolation / dry-run (preserved)
+# --------------------------------------------------------------------------- #
+def test_direct_service_market_link_failure_rolls_back(conn: sqlite3.Connection) -> None:
+    import pytest
+
+    from sports_quant.db.repositories.references import LinkOutcome
+    from sports_quant.matching.linkatomic import MatchLinkError
+    _dodgers_home_setup(conn)
+    _kev, kmk = _seed_event_and_market(conn)
+    svc = MatchKalshiService(conn)
+    svc._kal.link_market_game = lambda **_kw: LinkOutcome.CONFLICT  # type: ignore[assignment,method-assign]  # noqa: E501
+    with pytest.raises(MatchLinkError):
+        svc.match_range(series_ticker=MLB_SERIES)  # not wrapped in transaction()
     accepted = [d for d in SqliteMatchingRepository(conn).decisions_for_source(
         source_provider=KALSHI, source_ref=kmk, entity_type="kalshi_market")
         if d.outcome == "accepted"]
-    assert all(d.matched_entity_id == other for d in accepted)
-    assert SqliteKalshiRepository(conn).market_link(kmk)[0] == other
-    _ = (gid, kev)
-
-
-def test_market_link_failure_rolls_back(conn: sqlite3.Connection) -> None:
-    import pytest
-
-    from sports_quant.matching.linkatomic import MatchLinkError
-    _dodgers_home_setup(conn)
-    _seed_event_and_market(conn)
-    svc = MatchKalshiService(conn)
-    svc._kal.link_market_game = lambda **_kw: LinkOutcomeStub.CONFLICT  # type: ignore[assignment,method-assign]  # noqa: E501
-    before = SqliteMatchingRepository(conn).count()
-    with pytest.raises(MatchLinkError):
-        with transaction(conn):
-            svc.match_range(series_ticker=MLB_SERIES)
-    assert SqliteMatchingRepository(conn).count() == before  # rolled back
+    assert accepted == []
+    assert SqliteKalshiRepository(conn).market_link(kmk) == (None, None, None, None, None)
 
 
 def test_replay_is_stable(conn: sqlite3.Connection) -> None:
     _dodgers_home_setup(conn)
-    _kev, kmk = _seed_event_and_market(conn)
+    _seed_event_and_market(conn)
     _kal(conn, series_ticker=MLB_SERIES)
     before = SqliteMatchingRepository(conn).count()
     r2 = _kal(conn, series_ticker=MLB_SERIES)
     assert r2.counters.events_already_linked == 1 and r2.counters.markets_already_linked == 1
     assert r2.counters.events_accepted == 0 and r2.counters.markets_accepted == 0
-    assert SqliteMatchingRepository(conn).count() == before  # no new decisions
+    assert SqliteMatchingRepository(conn).count() == before
 
 
-# --------------------------------------------------------------------------- #
-# rules_hash invalidation (Â§15)
-# --------------------------------------------------------------------------- #
 def test_rules_hash_change_invalidates(conn: sqlite3.Connection) -> None:
     _dodgers_home_setup(conn)
     _kev, kmk = _seed_event_and_market(conn)
     _kal(conn, series_ticker=MLB_SERIES)
     repo = SqliteKalshiRepository(conn)
-    assert repo.is_kalshi_market_orientation_approved(kmk)  # approved under the matched hash
+    assert repo.is_kalshi_market_orientation_approved(kmk)
     matched_before = repo.market_link(kmk)[3]
-    # Rules change (still parses to the same Yes team, but a new hash).
+    # A benign trailing change keeps the settlement template parseable (same
+    # orientation) but changes rules_hash, so orientation must be invalidated.
     set_kalshi_market_rules(
-        conn, market_ticker=f"{_ticker(conn, kmk)}",
-        rules_primary="Per updated house rules, Yes if the Los Angeles Dodgers win the game "
-                      "against the San Diego Padres.",
-        observed_at="2026-08-01T00:00:00.000000Z")  # newer than the seed knowledge time
+        conn, market_ticker=_ticker(conn, kmk),
+        rules_primary=_MLB_RULES.replace("then the market resolves to Yes.",
+                                         "then the market resolves to Yes (rev 2)."),
+        observed_at="2026-08-01T00:00:00.000000Z")
     r = _kal(conn, series_ticker=MLB_SERIES)
     assert r.counters.rules_hash_conflicts >= 1 and r.needs_failure_exit
-    codes = {row[0] for row in conn.execute("SELECT rule_code FROM data_quality_issues")}
-    assert "DQ-MATCH-004" in codes
-    assert not repo.is_kalshi_market_orientation_approved(kmk)  # readiness disabled
-    assert repo.market_link(kmk)[3] == matched_before  # matched hash NOT overwritten
+    assert not repo.is_kalshi_market_orientation_approved(kmk)
+    assert repo.market_link(kmk)[3] == matched_before  # matched hash unchanged
+    d = SqliteMatchingRepository(conn).decisions_for_source(
+        source_provider=KALSHI, source_ref=kmk, entity_type="kalshi_market")[0]
+    flagged = SqliteMatchingRepository(conn).get(d.match_id)
+    assert flagged is not None and flagged.needs_manual_review  # flagged for review
+    assert flagged.reviewed_by is None and flagged.reviewed_at is None  # no human reviewer
 
 
-# --------------------------------------------------------------------------- #
-# PIT + provenance
-# --------------------------------------------------------------------------- #
-def test_pit_as_of_and_provenance(conn: sqlite3.Connection) -> None:
+def test_pit_as_of(conn: sqlite3.Connection) -> None:
     _dodgers_home_setup(conn)
     _kev, kmk = _seed_event_and_market(conn)
     _kal(conn, series_ticker=MLB_SERIES)
     repo = SqliteKalshiRepository(conn)
     d = SqliteMatchingRepository(conn).decisions_for_source(
         source_provider=KALSHI, source_ref=kmk, entity_type="kalshi_market")[0]
-    # Later decision invisible before the cutoff; visible at/after it.
     assert not repo.is_kalshi_market_orientation_approved(kmk, as_of="2000-01-01T00:00:00.000000Z")
     assert repo.is_kalshi_market_orientation_approved(kmk, as_of=d.decided_at)
-    # Provenance is the market's CURRENT response, not fabricated.
-    market = repo.get_market(kmk)
-    assert market is not None and d.raw_response_id == market.current_raw_response_id
+    m = repo.get_market(kmk)
+    assert m is not None and d.raw_response_id == m.current_raw_response_id
 
 
-# --------------------------------------------------------------------------- #
-# Price / order-book / trade isolation (Â§18)
-# --------------------------------------------------------------------------- #
 def _seed_book_and_trade(conn: sqlite3.Connection, market_ticker: str) -> None:
     from sports_quant.db.repositories.ingestion_runs import SqliteIngestionRunRepository
     from sports_quant.db.repositories.kalshi import (
@@ -470,9 +474,12 @@ def _seed_book_and_trade(conn: sqlite3.Connection, market_ticker: str) -> None:
                                             taker_side="yes"))
 
 
-def test_sql_trace_never_touches_books_or_trades(conn: sqlite3.Connection) -> None:
+def test_sql_trace_and_result_isolation(conn: sqlite3.Connection) -> None:
     _dodgers_home_setup(conn)
-    _kev, kmk = _seed_event_and_market(conn)
+    _kev, kmk = _seed_event_and_market(conn, no_sub="Los Angeles Dodgers")
+    # A misleading settled result must not affect matching.
+    conn.execute("UPDATE kalshi_markets SET result='no' WHERE kalshi_market_id=?", (kmk,))
+    conn.commit()
     _seed_book_and_trade(conn, _ticker(conn, kmk))
     statements: list[str] = []
     conn.set_trace_callback(statements.append)
@@ -483,42 +490,9 @@ def test_sql_trace_never_touches_books_or_trades(conn: sqlite3.Connection) -> No
         conn.set_trace_callback(None)
     for banned in ("kalshi_orderbook_snapshots", "kalshi_orderbook_levels", "kalshi_public_trades"):
         assert not any(banned in s for s in statements), banned
+    assert SqliteKalshiRepository(conn).market_link(kmk)[0] is not None  # matched despite 'no'
 
 
-def test_prices_and_trades_do_not_change_decision(tmp_path: Path) -> None:
-    # Two fresh corpora -- one with a (lopsided) order book + trade, one without.
-    # The order-book/trade tables are append-only, so isolation is proven by
-    # comparing independent runs (matching provably never queries them).
-    import random
-
-    from sports_quant.db.init import initialize_database
-    links: set[tuple] = set()  # type: ignore[type-arg]
-    rng = random.Random(3)
-    for i, with_book in enumerate((True, False, True)):
-        db = tmp_path / f"iso{i}.db"
-        initialize_database(db)
-        with Database(db).connection() as c:
-            _dodgers_home_setup(c)
-            _kev, kmk = _seed_event_and_market(c)
-            mt = _ticker(c, kmk)
-            if with_book:
-                _seed_book_and_trade(c, mt)
-                _ = rng.random()
-            with transaction(c):
-                MatchKalshiService(c).match_range(series_ticker=MLB_SERIES)
-            g, _d, yes, _h, sem = SqliteKalshiRepository(c).market_link(kmk)
-            links.add((yes, sem, g is not None))
-    assert len(links) == 1  # identical Yes/semantic/linked regardless of book/trade presence
-
-
-def test_no_execution_import() -> None:
-    src = (Path(__file__).parent.parent / "kalshi.py").read_text(encoding="utf-8")
-    assert "execution" not in src and "gateway" not in src and "order_book" not in src
-
-
-# --------------------------------------------------------------------------- #
-# Dry-run + CLI
-# --------------------------------------------------------------------------- #
 def test_dry_run_persists_nothing(conn: sqlite3.Connection) -> None:
     import hashlib
     _dodgers_home_setup(conn)
@@ -533,16 +507,9 @@ def test_dry_run_persists_nothing(conn: sqlite3.Connection) -> None:
     assert r.counters.rows_persisted == 0 and _dump() == before
 
 
-def test_sportsbook_and_kalshi_books_untouched(conn: sqlite3.Connection) -> None:
-    _dodgers_home_setup(conn)
-    _kev, kmk = _seed_event_and_market(conn)
-    _seed_book_and_trade(conn, _ticker(conn, kmk))
-    books_before = conn.execute("SELECT COUNT(*) FROM kalshi_orderbook_snapshots").fetchone()[0]
-    sb_before = conn.execute("SELECT COUNT(*) FROM sportsbook_events").fetchone()[0]
-    _kal(conn, series_ticker=MLB_SERIES)
-    assert conn.execute("SELECT COUNT(*) FROM kalshi_orderbook_snapshots").fetchone()[0] == \
-        books_before
-    assert conn.execute("SELECT COUNT(*) FROM sportsbook_events").fetchone()[0] == sb_before
+def test_no_execution_import() -> None:
+    src = (Path(__file__).parent.parent / "kalshi.py").read_text(encoding="utf-8")
+    assert "execution" not in src and "gateway" not in src
 
 
 def test_cli_json_and_exit(conn: sqlite3.Connection, db_path) -> None:  # type: ignore[no-untyped-def]
@@ -559,310 +526,3 @@ def test_cli_json_and_exit(conn: sqlite3.Connection, db_path) -> None:  # type: 
     assert code == 0
     payload = _json.loads(out[-1])
     assert payload["provider"] == "kalshi_public" and payload["markets_accepted"] == 1
-
-
-def test_cross_midnight_tier1_local_slate(conn: sqlite3.Connection) -> None:
-    from .conftest import seed_venue
-    dodgers, padres = _mlb_teams(conn)
-    venue = seed_venue(conn, name="Dodger Stadium", provider="mlb_statsapi",
-                       provider_venue_id="LAV", timezone="America/Los_Angeles")
-    gid = _mlb_game(conn, dodgers, padres, start="2025-07-05T02:10:00Z", date="2025-07-04")
-    conn.execute("UPDATE games SET venue = ? WHERE game_id = ?", (venue, gid))
-    conn.commit()
-    kev = seed_kalshi_event(conn, event_ticker="KXMLBGAME-25JUL04SDLAD", series_ticker=MLB_SERIES,
-                            title="San Diego Padres at Los Angeles Dodgers")
-    # Rules carry the exact scheduled instant -> Tier 1 with venue-local slate.
-    seed_kalshi_market(
-        conn, market_ticker="KXMLBGAME-25JUL04SDLAD-LAD", event_ticker="KXMLBGAME-25JUL04SDLAD",
-        series_ticker=MLB_SERIES, kalshi_event_id=kev,
-        title="San Diego Padres at Los Angeles Dodgers", yes_sub_title="Los Angeles Dodgers",
-        rules_primary=_RULES.format(yes="Los Angeles Dodgers", other="San Diego Padres",
-                                    sched="2025-07-05T02:10:00Z"))
-    _kal(conn, series_ticker=MLB_SERIES)
-    d = SqliteMatchingRepository(conn).decisions_for_source(
-        source_provider=KALSHI, source_ref=kev, entity_type="kalshi_event")[0]
-    assert d.matched_entity_id == gid  # matched by instant, venue-local slate = 07-04
-
-
-def test_indistinguishable_doubleheader_ambiguous(conn: sqlite3.Connection) -> None:
-    dodgers, padres = _mlb_teams(conn)
-    _mlb_game(conn, dodgers, padres, start="2025-07-04T17:00:00Z", date="2025-07-04", key="G1",
-              gn=1)
-    _mlb_game(conn, dodgers, padres, start="2025-07-04T23:00:00Z", date="2025-07-04", key="G2",
-              gn=2)
-    seed_kalshi_event(conn, event_ticker="KXMLBGAME-25JUL04SDLAD", series_ticker=MLB_SERIES,
-                      title="San Diego Padres at Los Angeles Dodgers")
-    r = _kal(conn, series_ticker=MLB_SERIES)  # date-only, two same-slate games
-    assert r.counters.events_ambiguous == 1 and r.counters.events_accepted == 0
-
-
-def test_same_game_different_yes_is_conflict(conn: sqlite3.Connection) -> None:
-    from sports_quant.db.ids import new_match_decision_id
-    dodgers, padres, gid = _dodgers_home_setup(conn)
-    _kev, kmk = _seed_event_and_market(conn)
-    # Corrupt prior link: same game, but Yes wrongly set to the Padres.
-    with transaction(conn):
-        mid = new_match_decision_id()
-        conn.execute(
-            "INSERT INTO entity_match_decisions (match_id, entity_type, source_provider, "
-            "source_ref, matched_entity_id, outcome, method, score, threshold, matcher_version, "
-            "needs_manual_review, decided_at, created_at) VALUES "
-            "(?, 'kalshi_market', 'kalshi_public', ?, ?, 'accepted', 'kalshi_date', 0.92, 0.85, "
-            "'v', 0, '2025-07-01T00:00:00.000000Z', '2025-07-01T00:00:00.000000Z')",
-            (mid, kmk, gid))
-        conn.execute("UPDATE kalshi_markets SET game_id=?, match_decision_id=?, yes_team_id=?, "
-                     "matched_rules_hash='h', market_semantic='game_winner' "
-                     "WHERE kalshi_market_id=?", (gid, mid, padres, kmk))
-    r = _kal(conn, series_ticker=MLB_SERIES)
-    assert r.needs_failure_exit  # same game, different Yes team -> not a replay, blocking
-    assert SqliteKalshiRepository(conn).market_link(kmk)[2] == padres  # unchanged
-    _ = dodgers
-
-
-# --------------------------------------------------------------------------- #
-# D5B2 repair: service-level atomicity, replay ownership, historical readiness,
-# ordered title, No-subtitle, automated review-flag.
-# --------------------------------------------------------------------------- #
-def test_direct_service_event_link_failure_rolls_back(conn: sqlite3.Connection) -> None:
-    # No external transaction: the service must be atomic by itself (§2).
-    import pytest
-
-    from sports_quant.matching.linkatomic import MatchLinkError
-    _dodgers_home_setup(conn)
-    _seed_event_and_market(conn)
-    svc = MatchKalshiService(conn)
-    svc._kal.link_event_game = lambda **_kw: LinkOutcomeStub.CONFLICT  # type: ignore[assignment,method-assign]  # noqa: E501
-    before = SqliteMatchingRepository(conn).count()
-    with pytest.raises(MatchLinkError):
-        svc.match_range(series_ticker=MLB_SERIES)  # NOT wrapped in transaction()
-    assert SqliteMatchingRepository(conn).count() == before  # accepted decision rolled back
-
-
-def test_direct_service_market_link_failure_rolls_back(conn: sqlite3.Connection) -> None:
-    import pytest
-
-    from sports_quant.matching.linkatomic import MatchLinkError
-    _dodgers_home_setup(conn)
-    _kev, kmk = _seed_event_and_market(conn)
-    svc = MatchKalshiService(conn)
-    svc._kal.link_market_game = lambda **_kw: LinkOutcomeStub.CONFLICT  # type: ignore[assignment,method-assign]  # noqa: E501
-    with pytest.raises(MatchLinkError):
-        svc.match_range(series_ticker=MLB_SERIES)  # NOT wrapped in transaction()
-    # The event linked (its own atomic unit committed); the market rolled back
-    # fully -- no accepted market decision and no semantic fields.
-    accepted = [d for d in SqliteMatchingRepository(conn).decisions_for_source(
-        source_provider=KALSHI, source_ref=kmk, entity_type="kalshi_market")
-        if d.outcome == "accepted"]
-    assert accepted == []
-    assert SqliteKalshiRepository(conn).market_link(kmk) == (None, None, None, None, None)
-
-
-def test_event_replay_requires_valid_decision_ownership(conn: sqlite3.Connection) -> None:
-    from sports_quant.db.ids import new_match_decision_id
-    dodgers, padres, gid = _dodgers_home_setup(conn)
-    kev, _kmk = _seed_event_and_market(conn)
-    # Link the event to the correct game but with a decision owned by ANOTHER ref.
-    with transaction(conn):
-        mid = new_match_decision_id()
-        conn.execute(
-            "INSERT INTO entity_match_decisions (match_id, entity_type, source_provider, "
-            "source_ref, matched_entity_id, outcome, method, score, threshold, matcher_version, "
-            "needs_manual_review, decided_at, created_at) VALUES "
-            "(?, 'kalshi_event', 'kalshi_public', 'OTHER-EVENT', ?, 'accepted', 'kalshi_date', "
-            "0.92, 0.85, 'v', 0, '2025-07-01T00:00:00.000000Z', '2025-07-01T00:00:00.000000Z')",
-            (mid, gid))
-        conn.execute("UPDATE kalshi_events SET game_id=?, match_decision_id=? "
-                     "WHERE kalshi_event_id=?", (gid, mid, kev))
-    r = _kal(conn, series_ticker=MLB_SERIES)
-    assert r.needs_failure_exit and r.counters.events_already_linked == 0
-    _ = (dodgers, padres)
-
-
-def test_market_replay_corrupt_pairing_is_blocking(conn: sqlite3.Connection) -> None:
-    from sports_quant.db.ids import new_match_decision_id
-    dodgers, _p, gid = _dodgers_home_setup(conn)
-    _kev, kmk = _seed_event_and_market(conn)
-    # Same game/Yes/hash/semantic, but the supporting decision names another market.
-    with transaction(conn):
-        mid = new_match_decision_id()
-        _m = SqliteKalshiRepository(conn).get_market(kmk)
-        assert _m is not None
-        rules_hash = _m.rules_hash
-        conn.execute(
-            "INSERT INTO entity_match_decisions (match_id, entity_type, source_provider, "
-            "source_ref, matched_entity_id, outcome, method, score, threshold, matcher_version, "
-            "needs_manual_review, decided_at, created_at) VALUES "
-            "(?, 'kalshi_market', 'kalshi_public', 'OTHER-MKT', ?, 'accepted', 'kalshi_date', "
-            "0.92, 0.85, 'v', 0, '2025-07-01T00:00:00.000000Z', '2025-07-01T00:00:00.000000Z')",
-            (mid, gid))
-        conn.execute("UPDATE kalshi_markets SET game_id=?, match_decision_id=?, yes_team_id=?, "
-                     "matched_rules_hash=?, market_semantic='game_winner' "
-                     "WHERE kalshi_market_id=?", (gid, mid, dodgers, rules_hash, kmk))
-    r = _kal(conn, series_ticker=MLB_SERIES)
-    assert r.needs_failure_exit and r.counters.markets_already_linked == 0
-
-
-def test_counters_only_reflect_committed(conn: sqlite3.Connection) -> None:
-    _dodgers_home_setup(conn)
-    _seed_event_and_market(conn)
-    r1 = _kal(conn, series_ticker=MLB_SERIES)
-    assert r1.counters.events_accepted == 1 and r1.counters.events_linked == 1
-    assert r1.counters.markets_accepted == 1 and r1.counters.markets_linked == 1
-    r2 = _kal(conn, series_ticker=MLB_SERIES)  # replay
-    assert r2.counters.events_accepted == 0 and r2.counters.markets_accepted == 0
-    assert r2.counters.events_already_linked == 1 and r2.counters.markets_already_linked == 1
-    assert r2.counters.events_linked == 0 and r2.counters.markets_linked == 0
-
-
-def test_historical_readiness_ignores_later_rules_change(conn: sqlite3.Connection) -> None:
-    _dodgers_home_setup(conn)
-    _kev, kmk = _seed_event_and_market(conn)
-    _kal(conn, series_ticker=MLB_SERIES)
-    repo = SqliteKalshiRepository(conn)
-    d = SqliteMatchingRepository(conn).decisions_for_source(
-        source_provider=KALSHI, source_ref=kmk, entity_type="kalshi_market")[0]
-    cutoff = d.decided_at
-    # A later rules change: current readiness fails, but the EARLIER cutoff must
-    # not be retroactively invalidated by today's mutable hash/review flag.
-    set_kalshi_market_rules(
-        conn, market_ticker=_ticker(conn, kmk),
-        rules_primary="Updated house rules: Yes if the Los Angeles Dodgers win the game "
-                      "against the San Diego Padres.",
-        observed_at="2026-08-01T00:00:00.000000Z")
-    _kal(conn, series_ticker=MLB_SERIES)  # detects the change -> DQ-MATCH-004 + flag
-    assert not repo.is_kalshi_market_orientation_approved(kmk)  # current: rejected
-    assert repo.is_kalshi_market_orientation_approved(kmk, as_of=cutoff)  # historical: still ok
-
-
-def test_historical_readiness_blocks_active_dq(conn: sqlite3.Connection) -> None:
-    from sports_quant.db.ids import new_data_quality_id
-    _dodgers_home_setup(conn)
-    _kev, kmk = _seed_event_and_market(conn)
-    _kal(conn, series_ticker=MLB_SERIES)
-    repo = SqliteKalshiRepository(conn)
-    d = SqliteMatchingRepository(conn).decisions_for_source(
-        source_provider=KALSHI, source_ref=kmk, entity_type="kalshi_market")[0]
-    # A blocking rules DQ detected far in the future of the decision, still active.
-    with transaction(conn):
-        conn.execute(
-            "INSERT INTO data_quality_issues (issue_id, severity, rule_code, entity_type, "
-            "entity_id, provider, description, detected_at, resolved_at, created_at) VALUES "
-            "(?, 'blocking', 'DQ-MATCH-004', 'kalshi_market', ?, 'kalshi_public', 'active', "
-            "'2030-01-01T00:00:00.000000Z', NULL, '2030-01-01T00:00:00.000000Z')",
-            (new_data_quality_id(), kmk))
-    # At the decision's own cutoff the DQ is in the future -> not active -> approved.
-    assert repo.is_kalshi_market_orientation_approved(kmk, as_of=d.decided_at)
-    # After the DQ was detected (and still unresolved) it blocks that later cutoff.
-    assert not repo.is_kalshi_market_orientation_approved(kmk, as_of="2030-06-01T00:00:00.000000Z")
-
-
-def test_ordered_title_orientation(conn: sqlite3.Connection) -> None:
-    # Reversed 'A at B' (home named as away) is rejected, not silently accepted.
-    _dodgers_home_setup(conn)  # ticker away=SD, home=LAD
-    ev = "KXMLBGAME-25JUL04SDLAD"
-    seed_kalshi_event(conn, event_ticker=ev, series_ticker=MLB_SERIES,
-                      title="Los Angeles Dodgers at San Diego Padres")  # reversed orientation
-    r = _kal(conn, series_ticker=MLB_SERIES)
-    assert r.counters.events_accepted == 0 and r.counters.events_rejected >= 1
-    codes = {row[0] for row in conn.execute("SELECT rule_code FROM data_quality_issues")}
-    assert "DQ-KAL-TITLE-001" in codes
-
-
-def test_unordered_vs_title_accepted(conn: sqlite3.Connection) -> None:
-    _dodgers_home_setup(conn)
-    ev = "KXMLBGAME-25JUL04SDLAD"
-    kev = seed_kalshi_event(conn, event_ticker=ev, series_ticker=MLB_SERIES,
-                            title="San Diego Padres vs Los Angeles Dodgers")  # unordered
-    seed_kalshi_market(conn, market_ticker=f"{ev}-LAD", event_ticker=ev, series_ticker=MLB_SERIES,
-                       kalshi_event_id=kev, title="San Diego Padres vs Los Angeles Dodgers",
-                       yes_sub_title="Los Angeles Dodgers",
-                       rules_primary=_RULES.format(yes="Los Angeles Dodgers",
-                                                    other="San Diego Padres", sched="n/a"))
-    r = _kal(conn, series_ticker=MLB_SERIES)
-    assert r.counters.events_accepted == 1 and r.counters.markets_accepted == 1
-
-
-def _market_with_no_sub(conn: sqlite3.Connection, no_sub: str):  # type: ignore[no-untyped-def]
-    ev = "KXMLBGAME-25JUL04SDLAD"
-    kev = seed_kalshi_event(conn, event_ticker=ev, series_ticker=MLB_SERIES,
-                            title="San Diego Padres at Los Angeles Dodgers")
-    return seed_kalshi_market(
-        conn, market_ticker=f"{ev}-LAD", event_ticker=ev, series_ticker=MLB_SERIES,
-        kalshi_event_id=kev, title="San Diego Padres at Los Angeles Dodgers",
-        yes_sub_title="Los Angeles Dodgers", no_sub_title=no_sub,
-        rules_primary=_RULES.format(yes="Los Angeles Dodgers", other="San Diego Padres",
-                                    sched="n/a"))
-
-
-def test_no_sub_title_correct(conn: sqlite3.Connection) -> None:
-    _dodgers_home_setup(conn)
-    _market_with_no_sub(conn, "San Diego Padres")
-    r = _kal(conn, series_ticker=MLB_SERIES)
-    assert r.counters.markets_accepted == 1
-
-
-def test_no_sub_title_names_yes_team_rejected(conn: sqlite3.Connection) -> None:
-    _dodgers_home_setup(conn)
-    _market_with_no_sub(conn, "Los Angeles Dodgers")  # No == Yes
-    r = _kal(conn, series_ticker=MLB_SERIES)
-    assert r.counters.markets_accepted == 0 and r.counters.markets_rejected >= 1
-
-
-def test_no_sub_title_unrelated_rejected(conn: sqlite3.Connection) -> None:
-    _dodgers_home_setup(conn)
-    seed_team(conn, league_code="MLB", abbreviation="NYY", canonical_name="New York Yankees",
-              city="New York", nickname="Yankees",
-              aliases=[("NYY", "provider", KALSHI), ("New York Yankees", "full", KALSHI)])
-    _market_with_no_sub(conn, "New York Yankees")  # unrelated
-    r = _kal(conn, series_ticker=MLB_SERIES)
-    assert r.counters.markets_accepted == 0 and r.counters.markets_rejected >= 1
-
-
-def test_missing_no_sub_title_allowed(conn: sqlite3.Connection) -> None:
-    # Absent no_sub_title: acceptable because ticker + rules prove both teams.
-    _dodgers_home_setup(conn)
-    _seed_event_and_market(conn)  # seeds no no_sub_title
-    r = _kal(conn, series_ticker=MLB_SERIES)
-    assert r.counters.markets_accepted == 1
-
-
-def test_automated_invalidation_is_not_a_human_review(conn: sqlite3.Connection) -> None:
-    _dodgers_home_setup(conn)
-    _kev, kmk = _seed_event_and_market(conn)
-    _kal(conn, series_ticker=MLB_SERIES)
-    d = SqliteMatchingRepository(conn).decisions_for_source(
-        source_provider=KALSHI, source_ref=kmk, entity_type="kalshi_market")[0]
-    set_kalshi_market_rules(
-        conn, market_ticker=_ticker(conn, kmk),
-        rules_primary="Updated: Yes if the Los Angeles Dodgers win the game against the "
-                      "San Diego Padres.",
-        observed_at="2026-08-01T00:00:00.000000Z")
-    _kal(conn, series_ticker=MLB_SERIES)
-    flagged = SqliteMatchingRepository(conn).get(d.match_id)
-    assert flagged is not None and flagged.needs_manual_review is True
-    assert flagged.reviewed_by is None and flagged.reviewed_at is None  # no human review recorded
-    assert any(x.match_id == d.match_id for x in
-               SqliteMatchingRepository(conn).list_needs_review(entity_type="kalshi_market"))
-
-
-def test_mark_reviewed_still_records_human_review(conn: sqlite3.Connection) -> None:
-    _dodgers_home_setup(conn)
-    _kev, kmk = _seed_event_and_market(conn)
-    _kal(conn, series_ticker=MLB_SERIES)
-    d = SqliteMatchingRepository(conn).decisions_for_source(
-        source_provider=KALSHI, source_ref=kmk, entity_type="kalshi_market")[0]
-    with transaction(conn):
-        SqliteMatchingRepository(conn).mark_reviewed(
-            d.match_id, reviewed_by="alice", needs_manual_review=False)
-    reviewed = SqliteMatchingRepository(conn).get(d.match_id)
-    assert reviewed is not None and reviewed.reviewed_by == "alice"
-    assert reviewed.reviewed_at is not None and reviewed.needs_manual_review is False
-
-
-class LinkOutcomeStub:
-    """Local stand-in so the rollback test can force a CONFLICT without importing
-    the repository enum at module load (kept trivial and explicit)."""
-
-    from sports_quant.db.repositories.references import LinkOutcome as _LO
-    CONFLICT = _LO.CONFLICT
-

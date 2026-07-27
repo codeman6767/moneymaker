@@ -992,10 +992,13 @@ Model column = recommended driver.
 > migration `d016_kalshi_matching`, schema v16).** `sports_quant/matching/kalshi.py`
 > + pure versioned parsers in `matching/kalshi_parse.py` resolve public MLB/NBA
 > Kalshi events and supported binary game-winner markets to canonical `games` via
-> an exact series allowlist (`KXMLBGAME`/`KXNBAGAME`), versioned ticker parsing
-> (team codes split against curated `kalshi_public` aliases), explicit
-> title/`rules_primary` team + Yes-subject agreement, and venue-aware canonical
-> schedule tiers (`kalshi_ticker_time` 0.97 with a rules-supplied instant +
+> an exact series allowlist (`KXMLBGAME`/`KXNBAGAME`), **series-specific versioned
+> ticker parsers** (MLB `kmlb-2`: `KXMLBGAME-{YYMONDD}{HHMM}{AWAY}{HOME}` with a
+> venue-local `HHMM` clock; NBA `knba-1`: `KXNBAGAME-{YYMONDD}{AWAY}{HOME}`
+> date-only) dispatched by exact series (team codes split against curated
+> `kalshi_public` aliases), explicit title/`rules_primary` team + Yes-subject
+> agreement, and venue-aware canonical schedule tiers (`kalshi_ticker_time` 0.97
+> from the MLB ticker clock converted per candidate through the venue timezone +
 > venue-local slate; `kalshi_date` 0.92 date-only; threshold 0.85). d016 adds
 > `kalshi_events.match_decision_id`; `kalshi_markets.match_decision_id` +
 > `yes_team_id` + `matched_rules_hash` + typed `market_semantic` (only
@@ -1028,11 +1031,30 @@ Model column = recommended driver.
 > (`as_of` uses only decision-existence + DQ `detected_at`/`resolved_at`, never
 > today's mutable hash/flag). Ordered `A at B` titles are validated for
 > away/home orientation (reversed rejected); `A vs B` stays unordered.
-> `no_sub_title`, when present, must name the opposing participant. Automated
+> `no_sub_title`, when present, must name a game participant (the current public
+> Kalshi contract sets it equal to the Yes-subject team, per the live audit; an
+> unrelated or unresolved team is rejected). Automated
 > rules-hash invalidation uses `flag_for_review` (sets `needs_manual_review=1`,
 > leaves `reviewed_by`/`reviewed_at` NULL) so it is never mistaken for a completed
 > human review; `mark_reviewed` stays reserved for an audited reviewer. Schema
 > remains v16; no d017.
+>
+> **D5B2 live public-contract repair (current MLB/NBA shapes).** A bounded GET-only
+> unauthenticated public audit (3 requests) plus a controlled live parser smoke
+> (2 requests; 5 of a 6-request budget, persisted nothing) replaced the earlier
+> mocked single-ticker contract with the series-specific `kmlb-2` (MLB, ticker
+> venue-local `HHMM`) and `knba-1` (NBA, date-only) parsers and the current rules
+> wording `If {Yes} wins the [Game N: ]{A} (vs|at) {B} professional {sport} game
+> originally scheduled for {Mon D, YYYY}[ at {H:MM AM/PM TZ}], then …` (no "the"
+> before Yes; no "against the"). The MLB ticker clock is converted **per candidate**
+> through the venue's `zoneinfo` timezone (knowledge-time gated), refusing on
+> unknown zone, DST fold/gap, or a rules timezone abbreviation
+> (`EDT`/`CDT`/`MDT`/`PDT`) that disagrees with the venue zone — never machine tz,
+> UTC, or a fixed offset. The live smoke parsed **20/20** open MLB events under
+> `kmlb-2`; NBA had no open events (offseason), so its live evidence rests on the
+> audit + sanitized fixtures (`matching/tests/kalshi_fixtures.py`); parser
+> versions are golden-pinned so a provider change breaks loudly. Full suite:
+> 1284 passed / 1 skipped. Schema remains v16; no d017.
 >
 > **D5B1 correctness repair (season / local-slate / conflict / outcome / DQ).**
 > Team resolution now uses the league-specific season (`season_year_for`): an NBA

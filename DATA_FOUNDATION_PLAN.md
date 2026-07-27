@@ -25,7 +25,7 @@ accurate insert/update/dedup counters (including a new `ingestion_runs.records_u
 and a single validation path shared by persisted and dry-run ingestion. No
 Kalshi credential, private key, or signing is used anywhere; there is no
 account/balance/position/fill/order column in the schema. The suite passes under
-Ruff and mypy: 1296 passed / 1 skipped locally (optional PyArrow present); under
+Ruff and mypy: 1284 passed / 1 skipped locally (optional PyArrow present); under
 the standard `.[dev]` CI with PyArrow absent only the optional hoopR/PyArrow
 modules skip.
 
@@ -253,7 +253,10 @@ nothing.
 mocked/offline; migration `d016_kalshi_matching`, schema v16).** Already-ingested
 public MLB/NBA Kalshi events and supported binary game-winner markets resolve to
 canonical `games` via an exact series allowlist (`KXMLBGAME`/`KXNBAGAME`),
-versioned ticker parsing (`matching/kalshi_parse.py`), provider-scoped
+**series-specific versioned ticker parsers verified against the current public
+contract** (MLB `kmlb-2`: `KXMLBGAME-{YYMONDD}{HHMM}{AWAY}{HOME}`, `HHMM` a
+venue-local clock; NBA `knba-1`: `KXNBAGAME-{YYMONDD}{AWAY}{HOME}`, date-only —
+`matching/kalshi_parse.py`), provider-scoped
 (`kalshi_public`) team aliases, explicit title/`rules_primary` team + Yes-subject
 agreement, and venue-aware canonical schedule evidence — never a price, order-book
 side, trade, volume, `result`, or settlement. d016 adds
