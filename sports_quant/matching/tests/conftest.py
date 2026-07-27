@@ -204,6 +204,83 @@ def link_player_ref(
         )
 
 
+def seed_sb_event(
+    conn: sqlite3.Connection,
+    *,
+    provider_event_id: str,
+    sport_key: str,
+    commence_time: str,
+    home_team_raw: str,
+    away_team_raw: str,
+    league_code: Optional[str] = "MLB",
+    observed_at: str = T0,
+) -> str:
+    """Create a The Odds API sportsbook event; returns sb_event_id."""
+
+    from sports_quant.db.repositories.sportsbook import SqliteSportsbookRepository
+
+    rid, _rhash = raw_response(conn, marker=f"sbevent:{provider_event_id}:{observed_at}")
+    league_id = f"lg_{league_code.lower()}" if league_code else None
+    with transaction(conn):
+        event = SqliteSportsbookRepository(conn).upsert_event(
+            provider="the_odds_api", provider_event_id=provider_event_id, sport_key=sport_key,
+            commence_time=commence_time, home_team_raw=home_team_raw, away_team_raw=away_team_raw,
+            raw_response_id=rid, observed_at=observed_at, league_id=league_id,
+        )
+    return event.sb_event_id
+
+
+def seed_sb_market(
+    conn: sqlite3.Connection, *, sb_event_id: str, market_key: str, bookmaker_key: str = "draftkings",
+) -> str:
+    from sports_quant.db.repositories.sportsbook import SqliteSportsbookRepository
+
+    rid, _rhash = raw_response(conn, marker=f"sbmarket:{sb_event_id}:{bookmaker_key}:{market_key}")
+    with transaction(conn):
+        market = SqliteSportsbookRepository(conn).upsert_market(
+            sb_event_id=sb_event_id, bookmaker_key=bookmaker_key, market_key=market_key,
+            raw_response_id=rid, observed_at=T0,
+        )
+    return market.sb_market_id
+
+
+def seed_sb_outcome(
+    conn: sqlite3.Connection, *, sb_market_id: str, provider_outcome_name: str, outcome_role: str,
+    point: Optional[float] = None,
+) -> str:
+    from sports_quant.db.normalize import normalized_key
+    from sports_quant.db.repositories.sportsbook import SqliteSportsbookRepository
+
+    with transaction(conn):
+        outcome = SqliteSportsbookRepository(conn).upsert_outcome(
+            sb_market_id=sb_market_id, outcome_name=normalized_key(provider_outcome_name),
+            provider_outcome_name=provider_outcome_name, outcome_role=outcome_role, point=point,
+        )
+    return outcome.sb_outcome_id
+
+
+def seed_sb_price(
+    conn: sqlite3.Connection, *, sb_outcome_id: str, price_american: int, observed_at: str = T0,
+) -> None:
+    from sports_quant.db.repositories.sportsbook import (
+        SqliteSportsbookRepository,
+        price_content_hash,
+    )
+
+    rid, rhash = raw_response(conn, marker=f"sbprice:{sb_outcome_id}:{price_american}:{observed_at}")
+    run = SqliteIngestionRunRepository(conn).start(
+        command="seed", provider="the_odds_api", operation="seed", args_json="{}",
+        started_monotonic_ns=0, tool_version="t")
+    with transaction(conn):
+        SqliteSportsbookRepository(conn).append_price_snapshot(
+            sb_outcome_id=sb_outcome_id, price_american=price_american, observed_at=observed_at,
+            raw_response_id=rid, raw_response_hash=rhash, run_id=run.run_id,
+            content_hash=price_content_hash(
+                price_american=price_american, point=None, bookmaker_last_update=None,
+                market_last_update=None, provider_timestamp=None),
+        )
+
+
 def seed_roster(
     conn: sqlite3.Connection,
     *,

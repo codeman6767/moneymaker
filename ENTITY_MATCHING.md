@@ -355,17 +355,23 @@ never a new game.
 
 ## 5. Sportsbook event matching
 
-> **Phase B status.** Ingestion is live but matching is **not** — Phase B
-> deliberately performs no fuzzy game matching. `sportsbook_events` stores the
-> provider's `home_team_raw` / `away_team_raw` verbatim with `game_id` left
-> NULL, and `league_id` is set from the static `sport_key` map only. The
-> structural parts below that need no name resolution *are* implemented:
-> `market_key` is stored as the provider enum, and `outcome_role`
-> (`home`/`away`/`over`/`under`/`draw`) is derived by comparing the normalized
-> outcome name against the resolved-from-raw team names — an unmatched name is
-> stored with `outcome_role = 'unknown'`, never dropped. Steps 1–5 below (team
-> resolution, venue-local date, the match tiers, and writing a decision row)
-> are Phase D, when `entity_match_decisions` exists.
+> **D5B1 status — built (mocked/offline).** Sportsbook-event matching is
+> implemented in `sports_quant/matching/sportsbook.py`. Already-ingested The Odds
+> API `sportsbook_events` resolve to canonical `games` using provider-scoped
+> (`the_odds_api`) team aliases and deterministic schedule/time evidence only —
+> **never** a price, implied probability, bookmaker count, final score, or settled
+> outcome (the module does not import or read `sportsbook_price_snapshots`). Tiers:
+> `schedule_key_exact` 0.95 (±90 min, direct), `schedule_key_window` 0.88 (±12 h,
+> direct), `schedule_key_swapped` 0.85 (neutral-site only, review-gated,
+> `DQ-MATCH-007`). A non-neutral reversed orientation is blocking (`DQ-MATCH-003`);
+> the provider event id never gets an official-key tier. Migration `d015` adds
+> `sportsbook_events.match_decision_id` (the exact accepted decision) and a typed
+> `orientation` (`direct`/`swapped`) — a neutral swapped match is never
+> orientation-approved pricing data (`is_orientation_approved()` returns False
+> until reviewed). Existing `market_key`/`outcome_role` are validated against the
+> accepted orientation; unknown/malformed outcomes are retained and surfaced via
+> `DQ-SB-OUTCOME-001`, never dropped or rewritten. Kalshi event/market matching
+> (§6) remains **unimplemented (D5B2)**.
 
 Inputs from The Odds API (already normalized by the existing
 `sports_quant/providers/odds_api.py`): `id`, `sport_key`, `commence_time`,

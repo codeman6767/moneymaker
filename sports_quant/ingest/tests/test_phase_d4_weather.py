@@ -282,7 +282,8 @@ async def _run(db: Database, clients: WeatherClients, **kwargs: Any) -> Any:
 # --------------------------------------------------------------------------- #
 def test_migration_v14_table_exists(db: Database) -> None:
     with db.connection() as conn:
-        assert conn.execute("SELECT MAX(version) FROM schema_versions").fetchone()[0] == 14
+        # d014 introduced the weather table; later migrations only add to the schema.
+        assert conn.execute("SELECT MAX(version) FROM schema_versions").fetchone()[0] >= 14
         names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert "weather_snapshots" in names
 

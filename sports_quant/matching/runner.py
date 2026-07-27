@@ -27,6 +27,7 @@ from ..db.repositories.matching import SqliteMatchingRepository
 from .model import MATCHER_VERSION
 from .players_service import MatchPlayersResult, MatchPlayersService
 from .service import MatchGamesResult, MatchGamesService, resolve_provider_for_sport
+from .sportsbook import MatchSportsbookResult, MatchSportsbookService, sport_key_for_arg
 
 Printer = Callable[[str], None]
 
@@ -53,22 +54,32 @@ def _db_ready(path: Path, out: Printer) -> Optional[int]:
 def run_match_games(
     settings: Optional[Settings] = None,
     *,
+    source: str = "official",
     sport: Optional[str] = None,
     provider: Optional[str] = None,
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
     provider_game_id: Optional[str] = None,
+    provider_event_id: Optional[str] = None,
+    unmatched_only: bool = False,
     database_path: Optional[Path] = None,
     dry_run: bool = False,
     as_json: bool = False,
     out: Printer = print,
 ) -> int:
-    """Resolve teams/venues/official games for a bounded local scope."""
+    """Resolve official games, or (``--source sportsbook``) sportsbook events, locally."""
 
     if settings is None:
         settings = load_settings()
     else:
         settings.enforce_read_only()
+
+    if source == "sportsbook":
+        return _run_sportsbook(
+            settings, sport=sport, from_date=from_date, to_date=to_date,
+            provider_event_id=provider_event_id, unmatched_only=unmatched_only,
+            database_path=database_path, dry_run=dry_run, as_json=as_json, out=out,
+        )
 
     resolved_provider = provider or (resolve_provider_for_sport(sport) if sport else None)
     if resolved_provider is None:
@@ -170,6 +181,112 @@ def _report(result: MatchGamesResult, provider: str, out: Printer, *, as_json: b
         f"unchanged: {c.canonical_entities_unchanged}"
     )
     out(f"  data-quality: {c.dq_issues} issues ({c.blocking_issues} blocking)")
+    status = "BLOCKED" if result.needs_failure_exit else result.status.upper()
+    out(f"[{status}] {result.status}")
+
+
+# --------------------------------------------------------------------------- #
+# match-games --source sportsbook (D5B1)
+# --------------------------------------------------------------------------- #
+def _run_sportsbook(
+    settings: Settings,
+    *,
+    sport: Optional[str],
+    from_date: Optional[str],
+    to_date: Optional[str],
+    provider_event_id: Optional[str],
+    unmatched_only: bool,
+    database_path: Optional[Path],
+    dry_run: bool,
+    as_json: bool,
+    out: Printer,
+) -> int:
+    sport_key = sport_key_for_arg(sport) if sport else None
+    if sport is not None and sport_key is None:
+        out(f"[FAILED ] unsupported --sport {sport!r} for sportsbook matching")
+        return EXIT_ACTIVE_FAILURE
+    effective_to = to_date if to_date is not None else from_date
+    path = database_path if database_path is not None else settings.resolved_database_path()
+    code = _db_ready(path, out)
+    if code is not None:
+        return code
+
+    database = Database(path)
+    with database.connection() as conn:
+        if dry_run:
+            result: MatchSportsbookResult = MatchSportsbookService(conn, dry_run=True).match_range(
+                sport_key=sport_key, from_date=from_date, to_date=effective_to,
+                provider_event_id=provider_event_id, unmatched_only=unmatched_only,
+            )
+        else:
+            try:
+                result = _run_sportsbook_persisted(
+                    conn, sport_key, from_date, effective_to, provider_event_id, unmatched_only)
+            except Exception as exc:  # noqa: BLE001 - surface as an active failure, roll back
+                out(f"[FAILED ] {type(exc).__name__}: {exc}")
+                return EXIT_ACTIVE_FAILURE
+
+    _report_sportsbook(result, out, as_json=as_json)
+    return EXIT_ACTIVE_FAILURE if result.needs_failure_exit else 0
+
+
+def _run_sportsbook_persisted(
+    conn,  # type: ignore[no-untyped-def]
+    sport_key: Optional[str],
+    from_date: Optional[str],
+    to_date: Optional[str],
+    provider_event_id: Optional[str],
+    unmatched_only: bool,
+) -> MatchSportsbookResult:
+    runs = SqliteIngestionRunRepository(conn)
+    started = time.monotonic_ns()
+    with transaction(conn):
+        run = runs.start(
+            command="match-games", provider="the_odds_api", operation="match_sportsbook",
+            args_json=json.dumps(
+                {"sport_key": sport_key, "from": from_date, "to": to_date,
+                 "provider_event_id": provider_event_id, "unmatched_only": unmatched_only},
+                sort_keys=True),
+            started_monotonic_ns=started, tool_version=MATCHER_VERSION,
+        )
+        result = MatchSportsbookService(conn, dry_run=False, run_id=run.run_id).match_range(
+            sport_key=sport_key, from_date=from_date, to_date=to_date,
+            provider_event_id=provider_event_id, unmatched_only=unmatched_only)
+        runs.complete(
+            run.run_id,
+            status="partially_succeeded" if result.needs_failure_exit else "succeeded",
+            duration_ns=time.monotonic_ns() - started,
+            records_updated=result.counters.event_links_applied)
+        result.run_id = run.run_id
+    return result
+
+
+def _report_sportsbook(
+    result: MatchSportsbookResult, out: Printer, *, as_json: bool
+) -> None:
+    if as_json:
+        out(json.dumps({
+            "command": "match-games", "source": "sportsbook", "provider": "the_odds_api",
+            "dry_run": result.dry_run, "status": result.status, "run_id": result.run_id,
+            **result.counters.as_dict(),
+        }, sort_keys=True))
+        return
+    c = result.counters
+    prefix = "[DRY-RUN] " if result.dry_run else ""
+    out(f"{prefix}match-games [sportsbook/the_odds_api]: {c.events_considered} events considered")
+    out(
+        f"  events: accepted {c.events_accepted} (direct {c.direct_orientation}, "
+        f"swapped-review {c.swapped_review_gated}), ambiguous {c.events_ambiguous}, "
+        f"no-candidate {c.events_no_candidate}, rejected {c.events_rejected}"
+    )
+    out(
+        f"  links applied: {c.event_links_applied}; outcomes checked: {c.outcome_rows_checked} "
+        f"(approved {c.outcome_roles_approved}, unknown {c.unknown_outcomes})"
+    )
+    out(
+        f"  data-quality: {c.dq_issues} issues ({c.blocking_issues} blocking); "
+        f"orientation conflicts: {c.blocking_orientation_conflicts}"
+    )
     status = "BLOCKED" if result.needs_failure_exit else result.status.upper()
     out(f"[{status}] {result.status}")
 

@@ -215,11 +215,12 @@ version 1 and collide. Applied so far:
 | 009 | `d009_provider_infra` *(Phase D1 — built)* | provider_team/player/game_references, venues, venue_aliases, entity_match_decisions, match_candidates, data_quality_issues, provider_capabilities |
 | 010 | `d010_provider_audit_integrity` *(Phase D1 — built)* | `provider_capabilities` evidence columns (`declared_state`/`observed_state`/`is_observed` + probe/endpoint/status/error/verified_at) separating declared from observed capabilities; partial unique index on `venue_aliases (provider, provider_venue_id)` pinning a provider venue id to one canonical venue; `data_quality_issues` resolution-only-update + no-delete triggers |
 | 011 | `d011_official_games_stats` *(Phase D2 — built)* | game_schedule/result snapshots, mlb_inning_lines, team/player_game_statistics, roster_snapshots, probable_pitcher_snapshots, lineup_snapshots, lineup_players — append-only, transition-aware, anchored on provider references (no second canonical game/team/player table) |
-| 012 | `d012_nba_specifics` *(planned)* | nba_quarter_lines, injury_snapshots, play_snapshots |
-| 013 | `d013_weather` *(planned)* | weather_snapshots |
+| 012 | `d012_nba_specifics` *(Phase D3 — built)* | nba_quarter_lines, injury_snapshots, play_snapshots |
+| 013 | `d013_nba_typed_repairs` *(Phase D3 — built)* | nba_game_results, nba_team_statistics, nba_player_statistics; injury return-estimate columns |
+| 014 | `d014_weather` *(Phase D4 — built)* | weather_snapshots (schema v14) |
+| 015 | `d015_sportsbook_matching` *(Phase D5B1 — built)* | adds `sportsbook_events.match_decision_id` + typed `orientation` (`direct`/`swapped`) with a link-integrity trigger (set-together, immutable-once-set) — schema v15; no price-history or Kalshi structures touched |
 
-Migrations 012–013 are **planned Phase D work, not yet built** (`d009`, `d010`,
-and `d011` are built); the authoritative
+The authoritative
 Phase D schema design is `PHASE_D_IMPLEMENTATION_PLAN.md` §2, and the earlier
 §3.7–§3.9 sketches below (injuries, lineups, probable pitchers, weather, match
 decisions, data quality) are the design targets those migrations will implement,

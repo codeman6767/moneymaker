@@ -194,7 +194,13 @@ Phase A landed the temporal foundations these rules rest on. What exists today:
 knowledge-bounded: a prior game supplies its venue timezone only when its accepted
 non-swapped game decision was `decided_at ≤ the target schedule observation
 cutoff`, so a game/venue matched (or a review approved) after the cutoff cannot
-influence an earlier game's local date. Sportsbook/Kalshi match decisions remain D5B |
+influence an earlier game's local date. **D5B1 (sportsbook events) built:** an
+event's `entity_match_decisions` row is bounded the same way; a current
+`sportsbook_events.game_id`/`orientation` is not itself PIT-safe, and
+`SqliteSportsbookRepository.is_orientation_approved(sb_event_id, as_of=cutoff)`
+returns False for a decision not yet decided (or a neutral swapped match not yet
+reviewed) as of the cutoff, so a pricing consumer never treats an unapproved or
+future orientation as historical truth. Kalshi match decisions remain D5B2 |
 | Weather forecast-vs-actual kept distinct (leakage vector) | ◧ **D4 built (schema v14)** — `weather_snapshots.weather_kind` separates `current_forecast` / `station_observation` / `historical_forecast` / `reanalysis`; `observed_at` is never backdated to a model-run time; an explicit `pit_eligible` (1/0/NULL) is set (a station observation / reanalysis is never PIT-eligible; a stitched historical forecast whose availability is unproven is `pit_eligible=NULL` + a `DQ-WX-PIT-001` note). Phase E must gate pregame weather features on `weather_kind='current_forecast' AND observed_at ≤ cutoff AND pit_eligible=1` — never on the endpoint of origin, and never a reanalysis/observation row |
 | Full `pit/asof.py`, `pit/dataset.py`, adversarial leak fixtures | ◻ Phase E |
 

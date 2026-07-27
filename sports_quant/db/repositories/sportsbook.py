@@ -34,6 +34,7 @@ from ..models import (
 )
 from ..schema import utc_now_iso
 from .base import Repository
+from .references import LinkOutcome
 
 
 def point_key(point: Optional[float]) -> str:
@@ -276,6 +277,130 @@ class SqliteSportsbookRepository(Repository):
 
     def count_events(self) -> int:
         return self._count("SELECT COUNT(*) FROM sportsbook_events")
+
+    # -- D5B1 matching reads/writes ------------------------------------------
+    def list_events_for_matching(
+        self,
+        *,
+        provider: Optional[str] = None,
+        league_id: Optional[str] = None,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        provider_event_id: Optional[str] = None,
+        unmatched_only: bool = False,
+    ) -> list[SportsbookEvent]:
+        """Bounded, deterministic list of events for a matching run.
+
+        Filters are ANDed; ``from_date``/``to_date`` bound the ``commence_time``
+        calendar date inclusively. Ordered by ``(commence_time, sb_event_id)`` so
+        a run is reproducible regardless of physical row order.
+        """
+
+        sql = f"SELECT {self._EVENT_COLUMNS} FROM sportsbook_events WHERE 1 = 1"  # noqa: S608
+        params: list[object] = []
+        if provider is not None:
+            sql += " AND provider = ?"
+            params.append(provider)
+        if league_id is not None:
+            sql += " AND league_id = ?"
+            params.append(league_id)
+        if provider_event_id is not None:
+            sql += " AND provider_event_id = ?"
+            params.append(provider_event_id)
+        if from_date is not None:
+            sql += " AND substr(commence_time, 1, 10) >= ?"
+            params.append(from_date)
+        if to_date is not None:
+            sql += " AND substr(commence_time, 1, 10) <= ?"
+            params.append(to_date)
+        if unmatched_only:
+            sql += " AND game_id IS NULL"
+        sql += " ORDER BY commence_time, sb_event_id"
+        return [self._to_event(r) for r in self._fetch_all(sql, tuple(params))]
+
+    def event_link(
+        self, sb_event_id: str
+    ) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        """``(game_id, match_decision_id, orientation)`` for an event, any may be None."""
+
+        row = self._fetch_one(
+            "SELECT game_id, match_decision_id, orientation FROM sportsbook_events "
+            "WHERE sb_event_id = ?",
+            (sb_event_id,),
+        )
+        if row is None:
+            return (None, None, None)
+        return (
+            self._opt_str(row, "game_id"),
+            self._opt_str(row, "match_decision_id"),
+            self._opt_str(row, "orientation"),
+        )
+
+    def events_linked_to_game(
+        self, game_id: str
+    ) -> list[tuple[str, Optional[str], Optional[str]]]:
+        """Every ``(sb_event_id, orientation, match_decision_id)`` linked to a game."""
+
+        rows = self._fetch_all(
+            "SELECT sb_event_id, orientation, match_decision_id FROM sportsbook_events "
+            "WHERE game_id = ? ORDER BY sb_event_id",
+            (game_id,),
+        )
+        return [
+            (str(r["sb_event_id"]), self._opt_str(r, "orientation"),
+             self._opt_str(r, "match_decision_id"))
+            for r in rows
+        ]
+
+    def link_game(
+        self, *, sb_event_id: str, game_id: str, match_decision_id: str, orientation: str
+    ) -> LinkOutcome:
+        """Link an event to a canonical game with its exact decision + orientation.
+
+        NULL -> value once (``LINKED``); an identical re-link is idempotent
+        (``ALREADY_LINKED``); a different game is a ``CONFLICT`` left untouched --
+        the d015 trigger enforces the same immutability at the database. Real
+        constraint/DB errors propagate (never swallowed).
+        """
+
+        current_game, _decision, _orient = self.event_link(sb_event_id)
+        if current_game is None:
+            self._conn.execute(
+                "UPDATE sportsbook_events SET game_id = ?, match_decision_id = ?, "
+                "orientation = ?, updated_at = ? WHERE sb_event_id = ?",
+                (game_id, match_decision_id, orientation, utc_now_iso(), sb_event_id),
+            )
+            return LinkOutcome.LINKED
+        if current_game == game_id:
+            return LinkOutcome.ALREADY_LINKED
+        return LinkOutcome.CONFLICT
+
+    def is_orientation_approved(self, sb_event_id: str, *, as_of: Optional[str] = None) -> bool:
+        """Whether an event's team-outcome orientation is canonically approved.
+
+        True only when the event is linked with ``orientation = 'direct'`` and its
+        supporting decision is ``accepted`` and not review-gated -- and, when
+        ``as_of`` is given, was ``decided_at <= as_of``. A neutral-site swapped
+        match (review-gated) is never approved. A pricing consumer uses this to
+        exclude unapproved or blocking orientation before interpreting any price.
+        """
+
+        row = self._fetch_one(
+            "SELECT e.orientation AS orientation, d.outcome AS outcome, "
+            "d.needs_manual_review AS review, d.decided_at AS decided_at "
+            "FROM sportsbook_events e JOIN entity_match_decisions d "
+            "ON e.match_decision_id = d.match_id WHERE e.sb_event_id = ?",
+            (sb_event_id,),
+        )
+        if row is None:
+            return False
+        if as_of is not None and str(row["decided_at"]) > as_of:
+            return False
+        return (
+            str(row["orientation"]) == "direct"
+            and str(row["outcome"]) == "accepted"
+            and int(row["review"]) == 0
+        )
 
     # -- Markets -------------------------------------------------------------
     def upsert_market(

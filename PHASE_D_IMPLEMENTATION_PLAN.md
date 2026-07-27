@@ -943,6 +943,23 @@ Model column = recommended driver.
 > optional crosswalk is an explicit checked skip, a conflicting link is blocking
 > (`DQ-MATCH-016`), and a real repository/constraint failure propagates to command
 > exit 1.
+>
+> **D5B1 — sportsbook-event matching (built, mocked/offline; migration d015,
+> schema v15).** `sports_quant/matching/sportsbook.py` resolves already-ingested
+> The Odds API `sportsbook_events` to canonical `games` via provider-scoped
+> (`the_odds_api`) team aliases + venue-aware schedule/time evidence, with NO
+> price/probability/bookmaker/score input (the module never imports
+> `sportsbook_price_snapshots`). Tiers: `schedule_key_exact` 0.95 (±90 min),
+> `schedule_key_window` 0.88 (±12 h), `schedule_key_swapped` 0.85 (neutral only,
+> review-gated `DQ-MATCH-007`); non-neutral reversed → blocking `DQ-MATCH-003`; no
+> official-key tier. `d015` adds `sportsbook_events.match_decision_id` + typed
+> `orientation` (link columns set together, immutable once set). Existing
+> h2h/spreads/totals outcomes are validated vs orientation; unknown/malformed →
+> `DQ-SB-OUTCOME-001` (retained, never dropped). `SqliteSportsbookRepository`
+> gains `link_game`, `list_events_for_matching`, `events_linked_to_game`,
+> `event_link`, `is_orientation_approved` (PIT-aware). CLI: `match-games --source
+> sportsbook`. **D5B2 (Kalshi `match-markets`, ticker/title/rules parsing,
+> `rules_hash`, Yes/No orientation) is NOT built; Phase E has not started.**
 
 - **Provider:** none (pure compute over ingested data).
 - **Create:** `matching/{__init__,normalize,teams,players,games,markets,decisions,

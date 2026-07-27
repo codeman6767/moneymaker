@@ -1654,9 +1654,15 @@ def main(argv: Optional[list[str]] = None) -> int:
                          help="Select the official provider by sport")
     mgscope.add_argument("--provider", choices=["mlb_statsapi", "balldontlie"], default=None,
                          help="Official provider to match")
+    matchg.add_argument("--source", choices=["official", "sportsbook"], default="official",
+                        help="Match official provider games (default) or The Odds API events")
     matchg.add_argument("--from", dest="from_date", default=None, metavar="YYYY-MM-DD")
     matchg.add_argument("--to", dest="to_date", default=None, metavar="YYYY-MM-DD")
     matchg.add_argument("--provider-game-id", dest="provider_game_id", default=None, metavar="ID")
+    matchg.add_argument("--provider-event-id", dest="provider_event_id", default=None, metavar="ID",
+                        help="Sportsbook: a single The Odds API event id")
+    matchg.add_argument("--unmatched-only", dest="unmatched_only", action="store_true",
+                        help="Sportsbook: only events not yet linked to a game")
     matchg.add_argument("--db", dest="database_path", type=Path, default=None, metavar="PATH")
     matchg.add_argument("--dry-run", action="store_true", help="Compute decisions; persist nothing")
     matchg.add_argument("--json", dest="as_json", action="store_true", help="Machine-readable output")
@@ -1799,11 +1805,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.command == "match-games":
         try:
             return run_match_games(
+                source=args.source,
                 sport=args.sport,
                 provider=args.provider,
                 from_date=args.from_date,
                 to_date=args.to_date,
                 provider_game_id=args.provider_game_id,
+                provider_event_id=args.provider_event_id,
+                unmatched_only=args.unmatched_only,
                 database_path=args.database_path,
                 dry_run=args.dry_run,
                 as_json=args.as_json,
