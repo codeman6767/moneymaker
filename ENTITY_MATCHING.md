@@ -490,7 +490,8 @@ missing data nobody notices.
 
 ## 6. Kalshi market matching
 
-> **D5B2 status — built (mocked/offline).** Deterministic Kalshi event and
+> **D5B2 status — built; mocked/offline plus a bounded public-contract audit and
+> parser smoke.** Deterministic Kalshi event and
 > supported **game-winner** market matching is implemented in
 > `sports_quant/matching/kalshi.py` with pure, versioned parsers in
 > `matching/kalshi_parse.py`. Already-ingested public MLB/NBA Kalshi events are
@@ -579,6 +580,20 @@ missing data nobody notices.
 > with no usable venue evidence or no ticker clock (NBA date-only) it falls back
 > conservatively to a date-only slate (`kalshi_date`, 0.92). The ticker clock and
 > a rules clock, when both present, must agree or the market is rejected.
+>
+> **D5B2 independent-review repair (uniform rules-hash invalidation).** For an
+> already-linked market, a current `rules_hash` differing from the accepted
+> decision's `matched_rules_hash` now raises the blocking `DQ-MATCH-004` and flags
+> that decision for review **before** any parse-dependent rejection, so the
+> invalidation is uniform whether the changed rules still parse, now *disagree*
+> (e.g. the Yes team flips), or no longer parse at all. Previously only a benign,
+> still-agreeing hash change reached the `DQ-MATCH-004` path (in `_accept_market`),
+> while a disagreeing/unparseable change was rejected at `_resolve_yes_and_rules`
+> with only a non-blocking `DQ-KAL-RULES-001` — which historical (`as_of`)
+> readiness does not honour, leaving a stale orientation wrongly approved as-of a
+> post-change cutoff. The matched hash and link are never rewritten;
+> `flag_for_review` sets `needs_manual_review=1` and leaves `reviewed_by`/
+> `reviewed_at` NULL.
 
 Hardest of the three, because Kalshi identifies markets by ticker and prose
 rather than by structured team fields.

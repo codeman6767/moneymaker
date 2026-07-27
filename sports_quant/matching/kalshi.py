@@ -348,6 +348,30 @@ class MatchKalshiService:
                          reason="league not configured", review=True)
             return
         league_id = league.league_id
+
+        # Rules-hash invalidation is detected uniformly for an ALREADY-LINKED
+        # market BEFORE any parse-dependent rejection can pre-empt it. Whether the
+        # changed rules still parse, now disagree, or no longer parse at all, a
+        # current rules_hash that differs from the accepted decision's matched hash
+        # invalidates the Yes orientation through ONE blocking DQ-MATCH-004 and
+        # flags that decision for review (task §11/§15). Without this hoist, a
+        # disagreeing/unparseable change would be rejected at
+        # `_resolve_yes_and_rules` with only a non-blocking DQ-KAL-RULES-001, which
+        # historical readiness does not honour -- leaving a stale orientation
+        # wrongly approved as-of a post-change cutoff, while a *benign* hash change
+        # (caught later in `_accept_market`) correctly blocks it.
+        if not self._dry_run:
+            cur_game, cur_dec, _cy, cur_hash, _cs = self._kal.market_link(kmk)
+            if (cur_game is not None and cur_hash is not None
+                    and market.rules_hash is not None and cur_hash != market.rules_hash):
+                result.counters.rules_hash_conflicts += 1
+                self._dq(result, "blocking", "DQ-MATCH-004", "kalshi_market", kmk, market,
+                         "market rules_hash changed since the accepted decision; "
+                         "orientation invalidated")
+                if cur_dec is not None:
+                    self._match.flag_for_review(cur_dec)
+                return
+
         codes = self._valid_codes(league_id)
 
         if market.event_ticker is None:
