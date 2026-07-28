@@ -4,6 +4,13 @@ This project is a **strictly read-only MLB and NBA betting *recommendation*
 engine**. It reads public data, produces recommendations, and does nothing
 else. It must never place, cancel, or manage a bet.
 
+> **Status (F0):** the point-in-time data foundation is complete through Phase E
+> (independently reviewed, schema v16). The recommendation model itself is not yet
+> implemented — its authoritative roadmap is `PHASE_F_RESEARCH_PLAN.md`
+> (companion: `PHASE_F_FEATURE_CONTRACT.md`). No Phase F corpus backfill, feature
+> engineering, model training, simulation, or recommendation output exists yet. The
+> read-only, GET-only, execution-quarantine guarantees below are already in force.
+
 ## What the system does — and does not — do
 
 - **The model only makes recommendations.** It consumes public market data and

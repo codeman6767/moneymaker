@@ -237,9 +237,12 @@ hides it.
 > work was performed.**
 >
 > **Phase E2 has independently passed its correctness review and is complete;
-> Phase E (E1 + E2) is complete. No later phase (feature engineering, modeling,
+> Phase E (E1 + E2) is complete. F0 (Phase F research planning) is complete — see
+> `PHASE_F_RESEARCH_PLAN.md` and `PHASE_F_FEATURE_CONTRACT.md`. No Phase F
+> implementation (corpus backfill, feature engineering, modeling, calibration,
 > simulation, recommendations, backtesting, paper trading, execution) has been
-> started.**
+> started; schema remains v16 and no live provider request or persisted ingestion
+> occurred during F0.**
 
 ## 3. As-of query pattern
 
