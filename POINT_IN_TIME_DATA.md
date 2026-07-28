@@ -250,8 +250,14 @@ hides it.
 > scheduled start. The corpus strategy is therefore a staged hybrid — a
 > forward-collected strict-PIT corpus (system of record) plus a separate, explicitly
 > non-PIT reconstructed-research corpus — and the live pilot is split into F1A
-> (request/credit controls, not yet built) then F1B and is NOT yet authorized. Schema
-> remains v16.**
+> (request/credit controls) then F1B and is NOT yet authorized. Schema
+> remains v16. **F1A is now implemented and locally validated (offline; request/
+> credit gate at the transport chokepoint, zero-network `--plan`, deterministic
+> manifests, atomic checkpoints + verified resume, scratch-DB isolation, CLI
+> wiring); its independent correctness review is still pending, F1B remains
+> unauthorized, reconstructed provenance is design-only
+> (`RECONSTRUCTED_CORPUS_PROVENANCE.md`), the strict E1/E2 builder is unchanged,
+> and no features or models have started.**
 
 ## 3. As-of query pattern
 

@@ -1434,6 +1434,61 @@ def run_ingest_weather(
     return EXIT_ACTIVE_FAILURE if result.needs_failure_exit else 0
 
 
+def _dispatch_f1a(args: Any, *, league: str) -> Optional[int]:
+    """Route an ingest command to F1A plan/pilot mode, or None for the legacy path.
+
+    ``--plan`` is zero-network. ``--pilot`` is the guarded live path. When neither
+    flag is set this returns ``None`` and the legacy ingestor path runs.
+    """
+
+    plan_mode = getattr(args, "plan", False)
+    pilot_mode = getattr(args, "pilot", False)
+    if not plan_mode and not pilot_mode:
+        return None
+    if plan_mode and pilot_mode:
+        print("[FAILED ] --plan and --pilot are mutually exclusive")
+        return 2
+    if args.from_date is None:
+        print("[FAILED ] --from is required for --plan/--pilot")
+        return 2
+    from .ingest.f1a import emit_plan, run_pilot_cli
+    includes = tuple(dict.fromkeys(args.includes))
+    if plan_mode:
+        return emit_plan(
+            league=league, from_date=args.from_date, to_date=args.to_date, includes=includes,
+            max_games=args.max_games, max_pages=args.max_pages, max_records=args.max_records,
+            request_cap=args.request_cap, credit_cap=args.credit_cap,
+            scratch_db=str(args.scratch_db or ""), checkpoint=str(args.checkpoint or ""),
+            as_json=args.as_json, manifest_out=args.manifest_out)
+    return run_pilot_cli(
+        league=league, from_date=args.from_date, to_date=args.to_date, includes=includes,
+        request_cap=args.request_cap, credit_cap=args.credit_cap, max_games=args.max_games,
+        max_pages=args.max_pages, max_records=args.max_records, scratch_db=args.scratch_db,
+        checkpoint=args.checkpoint, resume=args.resume, as_json=args.as_json)
+
+
+def _add_f1a_args(parser: Any) -> None:
+    """Attach the F1A request/credit-safety options to an ingest subparser."""
+
+    g = parser.add_argument_group("F1A request/credit safety")
+    g.add_argument("--plan", action="store_true",
+                   help="Zero-network: print a request plan + manifest and exit (no HTTP/DB)")
+    g.add_argument("--pilot", action="store_true",
+                   help="Guarded live pilot execution (requires caps + --scratch-db)")
+    g.add_argument("--request-cap", dest="request_cap", type=int, default=None, metavar="N",
+                   help="Hard maximum transport requests for the run (required for --pilot)")
+    g.add_argument("--credit-cap", dest="credit_cap", type=int, default=None, metavar="N",
+                   help="Hard maximum BALLDONTLIE credits (required for a live NBA pilot)")
+    g.add_argument("--max-games", dest="max_games", type=int, default=None, metavar="N")
+    g.add_argument("--max-pages", dest="max_pages", type=int, default=None, metavar="N")
+    g.add_argument("--max-records", dest="max_records", type=int, default=None, metavar="N")
+    g.add_argument("--scratch-db", dest="scratch_db", type=Path, default=None, metavar="PATH",
+                   help="Explicit isolated scratch database for a live pilot")
+    g.add_argument("--checkpoint", dest="checkpoint", type=Path, default=None, metavar="PATH")
+    g.add_argument("--resume", action="store_true", help="Resume from --checkpoint (verified)")
+    g.add_argument("--manifest-out", dest="manifest_out", type=Path, default=None, metavar="PATH")
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     """CLI dispatch.
 
@@ -1584,8 +1639,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         + ", ".join(VALID_INCLUDES),
     )
     mlb.add_argument("--db", dest="database_path", type=Path, default=None, metavar="PATH")
-    mlb.add_argument("--dry-run", action="store_true", help="Fetch + normalize but persist nothing")
+    mlb.add_argument("--dry-run", action="store_true",
+                     help="Legacy: fetch + normalize but persist nothing (STILL makes network "
+                          "requests; use --plan for a zero-network estimate)")
     mlb.add_argument("--json", dest="as_json", action="store_true", help="Machine-readable output")
+    _add_f1a_args(mlb)
 
     lineups = sub.add_parser(
         "ingest-lineups", help="Ingest posted lineups for a date or game (GET-only)"
@@ -1608,8 +1666,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=[], help="Optional group (repeatable): " + ", ".join(NBA_VALID_INCLUDES),
     )
     nba.add_argument("--db", dest="database_path", type=Path, default=None, metavar="PATH")
-    nba.add_argument("--dry-run", action="store_true", help="Fetch + normalize but persist nothing")
+    nba.add_argument("--dry-run", action="store_true",
+                     help="Legacy: fetch + normalize but persist nothing (STILL makes network "
+                          "requests; use --plan for a zero-network estimate)")
     nba.add_argument("--json", dest="as_json", action="store_true", help="Machine-readable output")
+    _add_f1a_args(nba)
 
     injuries = sub.add_parser(
         "ingest-injuries", help="Ingest current NBA player injuries from BALLDONTLIE (GET-only)"
@@ -1761,6 +1822,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 2
 
     if args.command == "ingest-mlb":
+        f1a = _dispatch_f1a(args, league="mlb")
+        if f1a is not None:
+            return f1a
         try:
             return run_ingest_mlb(
                 from_date=args.from_date,
@@ -1790,6 +1854,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 2
 
     if args.command == "ingest-nba":
+        f1a = _dispatch_f1a(args, league="nba")
+        if f1a is not None:
+            return f1a
         try:
             return run_ingest_nba(
                 from_date=args.from_date,

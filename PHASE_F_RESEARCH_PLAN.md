@@ -1,11 +1,37 @@
 # Phase F — Research & Recommendation Plan (authoritative)
 
-**Status:** F0 planning complete **and independently reviewed** (see §R). **No**
-Phase F implementation, corpus backfill, feature engineering, model training,
-calibration, simulation, EV evaluation, backtesting, or recommendation output has
-started. Schema remains **v16**. No live provider request or persisted ingestion has
-occurred. **The live F1 pilot is NOT authorized**; the next executable work is
-**F1A** (build request/credit controls), reviewed before any **F1B** live pilot.
+**Status:** F0 planning complete **and independently reviewed** (see §R). **F1A
+(request/credit safety controls) is now implemented and locally validated; its
+independent correctness review is still pending.** No corpus backfill, feature
+engineering, model training, calibration, simulation, EV evaluation, backtesting,
+or recommendation output has started. Schema remains **v16**. No live provider
+request or persisted ingestion has occurred (F1A is offline; all provider behavior
+is tested with mocked transports). **The live F1B pilot remains NOT authorized** —
+it may run only after F1A passes independent review (and the external
+prerequisites in §R.7 are met).
+
+> **F1A implementation (this pass) — offline, review pending.** A shared typed
+> request/credit control layer now gates the single transport chokepoint
+> (`sports_quant/providers/base_provider.py:_get`): every attempt (initial call,
+> each retry, each page) must reserve budget first, so a zero request budget makes
+> zero transport calls and a run halts *before* exceeding a request or credit cap
+> (`sports_quant/request_control.py`). Typed endpoint-cost policies
+> (`sports_quant/ingest/cost_policies.py`) meter BALLDONTLIE credits (unknown
+> endpoint → fail closed) and mark MLB StatsAPI credits *not applicable* (no
+> fabricated balance). A genuine zero-network `--plan` mode + deterministic,
+> secret-free request plans and pilot manifests with stable hashes
+> (`planning.py`, `manifest.py`); a versioned external checkpoint with an atomic
+> temp-file+replace write, a precise persist-commit consistency boundary, and
+> verified resume (`checkpoint.py`, `pilot.py`); scratch-database isolation that
+> classifies new/empty-v16/authorized-resumable/unsafe and never migrates or
+> mutates (`scratch_db.py`); and CLI wiring on `ingest-mlb`/`ingest-nba`
+> (`--plan`, `--pilot`, `--request-cap`, `--credit-cap`, `--max-games/pages/records`,
+> `--scratch-db`, `--checkpoint`, `--resume`, `--manifest-out`) whose invalid
+> combinations fail before any network or database work, with a distinct
+> budget-exhaustion exit code (`4`). Reconstructed-corpus provenance is specified
+> **design-only** in `RECONSTRUCTED_CORPUS_PROVENANCE.md` (no rows, no migration);
+> the strict E1/E2 builder is unchanged. **No live request, ingestion, backfill,
+> feature, model, simulation, recommendation, or execution work occurred.**
 
 **Baseline commit:** `631377a` (Phase E complete and independently reviewed; CI #54
 green); F0 delivered at `06e8c55` and reviewed here. This document is the

@@ -31,6 +31,7 @@ import httpx
 
 from ..http_policy import ReadOnlyHTTPPolicy, build_readonly_client
 from ..redaction import sanitize_url
+from ..request_control import RequestGate, RequestUnit
 from .capabilities import ProviderErrorKind, classify_http_status
 from .raw_exchange import RawExchange, build_exchange_from_parts
 
@@ -99,7 +100,15 @@ class BaseProviderClient:
         backoff_cap: float = 8.0,
         sleep: Any = asyncio.sleep,
         redact_values: Iterable[str] = (),
+        gate: Optional[RequestGate] = None,
+        league: str = "",
     ) -> None:
+        # F1A: an optional request/credit gate enforced at this single GET
+        # chokepoint. When present, EVERY transport attempt (initial call, each
+        # retry, each page) must reserve budget first; a reservation failure
+        # raises BudgetExhausted and the transport is never invoked.
+        self._gate = gate
+        self._league = league
         self._base_url = base_url
         # Secrets always stripped from every stored body (e.g. a header key that
         # a provider might echo). Never affects behaviour, only redaction.
@@ -137,6 +146,8 @@ class BaseProviderClient:
         params: Optional[Mapping[str, Any]] = None,
         secret: Optional[str] = None,
         secret_param: Optional[str] = None,
+        endpoint_family: Optional[str] = None,
+        request_unit: Optional[RequestUnit] = None,
     ) -> ProviderResponse:
         """Perform one GET, returning parsed JSON + a sanitized RawExchange.
 
@@ -144,6 +155,11 @@ class BaseProviderClient:
         uses a header instead, so it does not use these); the key is stripped
         from every stored field. Retries honour ``Retry-After`` and back off
         exponentially with jitterless, bounded delays.
+
+        When a request gate is attached (F1A), a budget reservation is taken
+        *before* every transport attempt; ``endpoint_family``/``request_unit``
+        label the call for accounting (a helper that passes neither is still
+        gated, via the cost policy's path classifier, so no transport escapes).
         """
 
         request_params: dict[str, Any] = dict(params or {})
@@ -152,8 +168,15 @@ class BaseProviderClient:
             request_params[secret_param] = secret
             secrets.append(secret)
 
+        # Secret-free unit for budget accounting (params here never hold the key).
+        gate_unit = request_unit or self._gate_unit(path, params, endpoint_family)
+
         attempt = 0
         while True:
+            if self._gate is not None:
+                # Reserve BEFORE any socket work; BudgetExhausted stops the run
+                # here and is never caught by the HTTP error handling below.
+                self._gate.reserve(gate_unit, is_retry=attempt > 0)
             requested_at = datetime.now(timezone.utc)
             started_ns = time.monotonic_ns()
             request = self._client.build_request("GET", path, params=request_params)
@@ -166,6 +189,8 @@ class BaseProviderClient:
                     await self._sleep(self._backoff(attempt))
                     attempt += 1
                     continue
+                if self._gate is not None:
+                    self._gate.record_failure()
                 raise ProviderError(
                     f"{self.provider_name} request failed: "
                     f"{sanitize_url(str(exc), secrets)}",
@@ -179,6 +204,8 @@ class BaseProviderClient:
             if oversized:
                 # No exchange, no body: an oversized response never reaches
                 # raw-response storage. Only a sanitized failure record survives.
+                if self._gate is not None:
+                    self._gate.record_failure()
                 raise ProviderError(
                     f"{self.provider_name} response exceeded the maximum body size "
                     f"(> {self._max_body_bytes} bytes) for {path}",
@@ -203,10 +230,46 @@ class BaseProviderClient:
                 continue
 
             if status_code >= 400:
+                if self._gate is not None:
+                    self._gate.record_failure()
                 self._raise_for_status(status_code, exchange)
 
-            self._check_content_type(response, exchange)
-            return ProviderResponse(data=self._parse_json(body, exchange), exchange=exchange)
+            try:
+                self._check_content_type(response, exchange)
+                data = self._parse_json(body, exchange)
+            except ProviderError:
+                if self._gate is not None:
+                    self._gate.record_failure()
+                raise
+            if self._gate is not None:
+                self._gate.record_success()
+            return ProviderResponse(data=data, exchange=exchange)
+
+    def _gate_unit(
+        self,
+        path: str,
+        params: Optional[Mapping[str, Any]],
+        endpoint_family: Optional[str],
+    ) -> RequestUnit:
+        """A secret-free :class:`RequestUnit` for budget accounting of one call.
+
+        ``params`` here never contains the injected API key (that is added
+        separately in ``_get``). The endpoint family is the caller-supplied label
+        or, failing that, the cost policy's path classifier -- so an unlabelled
+        helper call is still classified and gated (an unclassifiable path becomes
+        the ``unknown`` family, which fails closed under a credit cap).
+        """
+
+        family = endpoint_family
+        if family is None and self._gate is not None:
+            family = self._gate.cost_policy.classify(path)
+        safe = tuple(sorted((str(k), str(v)) for k, v in dict(params or {}).items()))
+        return RequestUnit(
+            provider=self.provider_name,
+            league=self._league,
+            endpoint_family=family or "unknown",
+            params=safe,
+        )
 
     async def _read_bounded(self, response: httpx.Response) -> tuple[str, bool]:
         """Read a streamed body, aborting once it exceeds the size cap.
