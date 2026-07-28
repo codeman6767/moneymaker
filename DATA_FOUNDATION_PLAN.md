@@ -66,7 +66,8 @@ no network request, retractable-roof games are conditionally applicable, and
 historical rows are not automatically point-in-time-safe. The controlled live
 NWS/Open-Meteo current-forecast audits and a bounded zero-persistence dry run have
 passed; no persisted weather ingestion or weather backfill has been performed. D5
-has not started.**
+is complete at schema v16 (D5A canonical + official-game, D5B1 sportsbook, and
+D5B2 Kalshi matching, each independently reviewed); Phase E has not started.**
 
 **Phase D provider selection and implementation design are complete; D1 provider
 infrastructure and D2 MLB ingestion code are complete (schema v11, migration

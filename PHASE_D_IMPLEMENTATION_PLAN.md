@@ -12,8 +12,9 @@ canonical matching.
 > conditionally applicable unless roof-open status is known; historical rows are
 > not automatically point-in-time-safe. The controlled live NWS/Open-Meteo
 > current-forecast audits and a bounded zero-persistence dry run have passed; no
-> persisted weather ingestion or weather backfill has been performed. D5 has not
-> started.**
+> persisted weather ingestion or weather backfill has been performed. D5 is complete at schema v16 (D5A canonical + official-game, D5B1
+> sportsbook, and D5B2 Kalshi matching, each independently reviewed); Phase E has
+> not started.**
 >
 > **Status: Phase D2 MLB ingestion code complete and its controlled live gate
 > passed on July 24, 2026. D3 NBA ingestion code is complete and correctness-
@@ -72,7 +73,8 @@ canonical matching.
 > (no live provider call was made). D3 (NBA ingestion) code + its mocked/offline
 > correctness repair are now complete at schema v13 (see the D3 build note below);
 > D4 (weather ingestion) code is complete at schema v14 (see the D4 status note);
-> D5 (canonical matching) remains unbuilt. This document is
+> D5 (canonical matching) is complete at schema v16 — D5A + D5B1 + D5B2, each
+> independently reviewed (see the D5 build/status notes below). This document is
 > the build contract; providers are chosen in `PHASE_D_PROVIDER_DECISIONS.md`
 > (doc-review date 2026-07-23).
 
@@ -878,7 +880,9 @@ Model column = recommended driver.
 
 ### D5 — Canonical matching  ·  model: **OpusPlan**
 
-> **Status: D5A complete (mocked/offline); D5B not started.** D5A shipped as the
+> **Status: D5 complete at schema v16 — D5A + D5B1 sportsbook + D5B2 Kalshi
+> matching, each independently reviewed (mocked/offline plus a bounded public
+> Kalshi contract audit and parser smoke); Phase E has not started.** D5A shipped as the
 > `sports_quant/matching/` package: deterministic team / player / venue resolvers
 > (exact-provider-id 1.00 / exact-alias 0.99 / normalized-scoped 0.95 / unscoped
 > 0.90), a venue-aware `game_date_local` helper (actual-venue tz → provider local
@@ -1056,7 +1060,7 @@ Model column = recommended driver.
 > `kmlb-2`; NBA had no open events (offseason), so its live evidence rests on the
 > audit + sanitized fixtures (`matching/tests/kalshi_fixtures.py`); parser
 > versions are golden-pinned so a provider change breaks loudly. Full suite:
-> 1284 passed / 1 skipped. Schema remains v16; no d017.
+> 1315 passed / 1 skipped. Schema remains v16; no d017.
 >
 > **D5B1 correctness repair (season / local-slate / conflict / outcome / DQ).**
 > Team resolution now uses the league-specific season (`season_year_for`): an NBA
