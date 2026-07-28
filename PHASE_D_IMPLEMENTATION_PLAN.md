@@ -929,8 +929,9 @@ Model column = recommended driver.
 > **exact** decision from the same attempt (not a "latest decision" lookup). PIT
 > reads use `decisions_for_source(..., as_of=cutoff)` — a current
 > `provider_*_references.*_id` link is not by itself PIT-safe (Phase E must consult
-> the decision timeline). **D5B (sportsbook `match-markets` + Kalshi market
-> matching) is NOT built; Phase E has not started.**
+> the decision timeline). **D5B1 sportsbook matching and D5B2 Kalshi
+> event/supported game-winner market matching are complete and independently
+> reviewed at schema version 16; Phase E has not started.**
 >
 > **D5A follow-up repair (season / slate / knowledge-time / link integrity).**
 > Season validity is now **league-specific** (`matching/season.py`): MLB uses the
