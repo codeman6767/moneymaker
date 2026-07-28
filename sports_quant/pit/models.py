@@ -20,6 +20,8 @@ __all__ = [
     "Observation",
     "MatchDecisionView",
     "LinkAsOf",
+    "GameScheduleState",
+    "MarketIdentity",
 ]
 
 
@@ -96,10 +98,13 @@ def _freeze(row: Mapping[str, Any]) -> Mapping[str, Any]:
 class Observation:
     """One immutable as-of observation row from an ``asof_filtered`` table.
 
-    ``fields`` is a read-only mapping of the selected columns; ``observed_at`` and
-    ``row_id`` are the transaction-time and stable tie-break identifier used to
-    select it. ``as_dict`` gives a plain, key-sorted dict for deterministic
-    serialization.
+    ``fields`` is a read-only mapping of the selected columns; ``observed_at`` is
+    the transaction time it was selected by. ``row_id`` is the row's PROVENANCE
+    identifier (a generated ULID) — it is NOT a semantic tie-break: equal-timestamp
+    rows are resolved by content-hash equality (identical content returns one
+    deterministically; conflicting content fails closed with an
+    ``AsOfAmbiguityError``), never by ULID/insertion order. ``as_dict`` gives a
+    plain, key-sorted dict for deterministic serialization.
     """
 
     table: str
@@ -154,6 +159,49 @@ class MatchDecisionView:
             "reviewed_by": self.reviewed_by,
             "reviewed_at": self.reviewed_at,
         }
+
+
+@dataclass(frozen=True)
+class GameScheduleState:
+    """The game's status AND scheduled start as of a cutoff, from ONE historical
+    ``game_status_history`` observation (task §2).
+
+    Both ``status`` and ``scheduled_start`` are mutable current-state on ``games``
+    and must never be read there directly; they are taken together from the same
+    as-of status observation so a historical status is never combined with today's
+    scheduled start. ``original_start`` (immutable) is not part of this view.
+    """
+
+    game_id: str
+    status: str
+    scheduled_start: str
+    observed_at: str
+    status_id: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"game_id": self.game_id, "status": self.status,
+                "scheduled_start": self.scheduled_start, "observed_at": self.observed_at,
+                "status_id": self.status_id}
+
+
+@dataclass(frozen=True)
+class MarketIdentity:
+    """The immutable STRUCTURAL identity of a sportsbook market (task §3).
+
+    Only the four columns that are set at creation and never revised: the mutable
+    title, provider update times, current raw-response provenance, and last-observed
+    fields are deliberately absent (they are current metadata, not historical
+    features).
+    """
+
+    sb_market_id: str
+    sb_event_id: str
+    bookmaker_key: str
+    market_key: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"sb_market_id": self.sb_market_id, "sb_event_id": self.sb_event_id,
+                "bookmaker_key": self.bookmaker_key, "market_key": self.market_key}
 
 
 @dataclass(frozen=True)

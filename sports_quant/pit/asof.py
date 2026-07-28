@@ -16,44 +16,97 @@ Closing lines are NOT here -- they live only in
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Optional
 
-from ..db.engine import Database
 from ..db.repositories.data_quality import DataQualityIssue, SqliteDataQualityRepository
 from ..db.repositories.games import GameStatusRecord, SqliteGameRepository
 from ..db.repositories.kalshi import SqliteKalshiRepository
 from ..db.repositories.matching import SqliteMatchingRepository
 from ..db.repositories.sportsbook import SportsbookPriceSnapshot, SqliteSportsbookRepository
-from .models import Cutoff, LinkAsOf, MatchDecisionView, Observation
-from .registry import require_asof
+from .models import (
+    Cutoff,
+    GameScheduleState,
+    LinkAsOf,
+    MarketIdentity,
+    MatchDecisionView,
+    Observation,
+)
+from .registry import assert_selectable, require_asof
 
 __all__ = [
     "read_only_connection",
     "latest_as_of",
     "AsOfReader",
+    "AsOfAmbiguityError",
     "deterministic_json",
 ]
 
 KALSHI_PUBLIC_PROVIDER = "kalshi_public"
 
 
-@contextmanager
-def read_only_connection(path: Path) -> Iterator[sqlite3.Connection]:
-    """Open the corpus for feature-facing reads with writes disabled.
+class AsOfAmbiguityError(RuntimeError):
+    """Raised when equal-``observed_at`` rows at one anchor carry MATERIALLY
+    DIFFERENT content (distinct ``content_hash``).
 
-    The engine has no native read-only mode, so this wraps the standard
-    connection and sets ``PRAGMA query_only = ON`` -- any INSERT/UPDATE/DELETE
-    raises at the SQLite level, guaranteeing feature-facing PIT reads cannot
-    mutate the corpus (task §12).
+    A generated ULID / insertion order is not a valid semantic winner across a
+    fresh rebuild, so a genuine conflict fails closed rather than silently picking
+    one. The table, anchor, and observed timestamp are reported; the conflicting
+    values are deliberately NOT exposed as a feature.
     """
 
-    conn = Database(path).connect()
+    def __init__(self, *, table: str, anchor: str, anchor_params: Sequence[Any],
+                 observed_at: str, distinct: int) -> None:
+        self.table = table
+        self.anchor = anchor
+        self.anchor_params = tuple(anchor_params)
+        self.observed_at = observed_at
+        super().__init__(
+            f"as-of ambiguity in {table!r} at observed_at={observed_at!r} for anchor "
+            f"{anchor!r} params={self.anchor_params!r}: {distinct} distinct content hashes share "
+            "the same maximum timestamp; refusing to pick a non-deterministic winner")
+
+
+# A public string WHERE fragment may only be a conjunction of `col <op> ?`/literal
+# comparisons. Anything that could open a JOIN, subquery, statement break, or
+# comment is rejected so a future caller cannot smuggle an unreviewed current-state
+# join through the generic surface (task §9).
+_FRAGMENT_BANNED = re.compile(r";|--|/\*|\*/|\(|\)|\bjoin\b|\bselect\b|\bunion\b", re.IGNORECASE)
+
+
+def _validate_fragment(fragment: str) -> None:
+    if _FRAGMENT_BANNED.search(fragment):
+        raise ValueError(
+            f"unsafe SQL fragment {fragment!r}: JOIN/subquery/semicolon/comment/parenthesis are "
+            "not permitted in an as-of WHERE fragment")
+
+
+@contextmanager
+def read_only_connection(path: Path) -> Iterator[sqlite3.Connection]:
+    """Open the corpus in TRUE SQLite read-only mode for feature-facing reads.
+
+    Opens ``file:<uri>?immutable=1`` (``uri=True``): the file must already exist
+    (a missing database raises and is NOT created, and no parent directory is
+    made); the database is treated as immutable so **no ``-wal`` / ``-shm`` /
+    journal sidecar is created and no journal mode is changed** (plain ``mode=ro``
+    would materialize ``-wal``/``-shm`` for a WAL-header database — hence
+    ``immutable=1`` for a checkpointed corpus snapshot). No write-capable
+    connection is opened first; ``PRAGMA query_only = ON`` is set as defense in
+    depth. Every INSERT/UPDATE/DELETE/DDL/writable-PRAGMA fails; the database bytes
+    and directory listing are unchanged after reads (task §6)."""
+
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"read-only corpus not found (not created): {p}")
+    uri = p.resolve().as_uri() + "?immutable=1"
+    conn = sqlite3.connect(uri, uri=True)
     try:
-        conn.execute("PRAGMA query_only = ON")
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON")  # defense in depth (writes already blocked)
         yield conn
     finally:
         conn.close()
@@ -66,19 +119,22 @@ def latest_as_of(
     cutoff: Cutoff,
     anchor_where: str,
     anchor_params: Sequence[Any] = (),
-    columns: str = "*",
     extra_where: Optional[str] = None,
     extra_params: Sequence[Any] = (),
 ) -> Optional[sqlite3.Row]:
     """The ONE canonical latest-as-of selection for append-only snapshot tables.
 
-    Contract (task §5): keep only rows whose transaction time ``observed_at`` is
-    ``<= cutoff``; take the maximum ``observed_at`` in that filtered set; break an
-    equal-timestamp tie with the table's stable monotonic id (descending); return
-    at most one row and never a future row. Ordering is always explicit; SQLite
-    insertion order is never relied upon. ``updated_at`` / ``created_at`` /
-    ``ingested_at`` / provider publication time are never used. The ``table`` must
-    be classified ``asof_filtered`` (fail-closed via the registry)."""
+    Contract (tasks §5, §4): keep only rows whose transaction time ``observed_at``
+    is ``<= cutoff``; take the maximum ``observed_at`` in that filtered set; among
+    the rows sharing that maximum timestamp at the anchor, resolve the tie by
+    CONTENT: if they all share one ``content_hash`` they are semantically identical
+    and one is returned deterministically (never chosen by ULID/rowid/insertion
+    order); if they carry different content it is a genuine conflict and raises
+    :class:`AsOfAmbiguityError` (fail-closed), never exposing either value. Never
+    returns a future row; ``updated_at``/``created_at``/``ingested_at``/provider
+    time are never used. ``table`` must be ``asof_filtered`` (fail-closed via the
+    registry). ``anchor_where``/``extra_where`` are validated (no JOIN/subquery/
+    semicolon/comment) and every value is a bound ``?`` parameter (task §9)."""
 
     entry = require_asof(table)
     obs = entry.observed_at_column
@@ -86,16 +142,31 @@ def latest_as_of(
         raise ValueError(
             f"{table!r} has no observed_at column; it is only reachable via its parent "
             f"({entry.via_parent}) as-of read")
+    if not entry.content_column:
+        raise ValueError(
+            f"{table!r} has no content-hash column; it is not readable via latest_as_of "
+            "(use its typed repository accessor)")
+    _validate_fragment(anchor_where)
+    if extra_where:
+        _validate_fragment(extra_where)
     where = f"({anchor_where}) AND {obs} <= ?"
     params: list[Any] = [*anchor_params, cutoff.iso]
     if extra_where:
         where += f" AND ({extra_where})"
         params.extend(extra_params)
-    sql = (  # noqa: S608 - table/columns come from the static registry, not user input
-        f"SELECT {columns} FROM {table} WHERE {where} "
-        f"ORDER BY {obs} DESC, {entry.id_column} DESC LIMIT 1"
-    )
-    return conn.execute(sql, params).fetchone()
+    max_row = conn.execute(  # noqa: S608 - table/obs come from the static registry
+        f"SELECT MAX({obs}) AS m FROM {table} WHERE {where}", params).fetchone()
+    max_obs = None if max_row is None else max_row["m"]
+    if max_obs is None:
+        return None
+    rows = conn.execute(  # noqa: S608 - identifiers are registry-sourced; values are bound
+        f"SELECT * FROM {table} WHERE {where} AND {obs} = ? ORDER BY {entry.id_column}",
+        [*params, max_obs]).fetchall()
+    distinct = {r[entry.content_column] for r in rows}
+    if len(distinct) > 1:
+        raise AsOfAmbiguityError(table=table, anchor=anchor_where, anchor_params=anchor_params,
+                                 observed_at=str(max_obs), distinct=len(distinct))
+    return rows[0]  # identical content -> any row serializes identically
 
 
 def deterministic_json(items: Any) -> str:
@@ -160,6 +231,20 @@ class AsOfReader:
 
         return self._games.status_as_of(game_id, self._cutoff.iso)
 
+    def game_schedule_state(self, game_id: str) -> Optional[GameScheduleState]:
+        """The game's status AND scheduled start as of cutoff, taken TOGETHER from
+        the same ``game_status_history`` observation (task §2). Both are mutable
+        current-state on ``games`` and are forbidden there; this never combines a
+        historical status with today's scheduled start, and a future reschedule
+        cannot leak into an earlier cutoff."""
+
+        rec = self._games.status_as_of(game_id, self._cutoff.iso)
+        if rec is None:
+            return None
+        return GameScheduleState(game_id=rec.game_id, status=rec.status,
+                                 scheduled_start=rec.scheduled_start, observed_at=rec.observed_at,
+                                 status_id=rec.status_id)
+
     def official_schedule(self, game_ref_id: str) -> Optional[Observation]:
         return self.observation("game_schedule_snapshots", anchor_where="game_ref_id = ?",
                                 anchor_params=(game_ref_id,))
@@ -222,16 +307,35 @@ class AsOfReader:
 
         return self._sb.price_as_of(sb_outcome_id, self._cutoff.iso)
 
+    def sportsbook_market_identity(self, sb_market_id: str) -> Optional[MarketIdentity]:
+        """The IMMUTABLE structural identity of a sportsbook market -- only the
+        allowlisted columns (task §3). Mutable title, provider update times, current
+        raw-response provenance, and last-observed fields are never returned."""
+
+        assert_selectable("sportsbook_markets",
+                          ["sb_market_id", "sb_event_id", "bookmaker_key", "market_key"])
+        row = self._conn.execute(
+            "SELECT sb_market_id, sb_event_id, bookmaker_key, market_key "
+            "FROM sportsbook_markets WHERE sb_market_id = ?", (sb_market_id,)).fetchone()
+        if row is None:
+            return None
+        return MarketIdentity(sb_market_id=str(row["sb_market_id"]),
+                              sb_event_id=str(row["sb_event_id"]),
+                              bookmaker_key=str(row["bookmaker_key"]),
+                              market_key=str(row["market_key"]))
+
     def sportsbook_event_game(self, sb_event_id: str) -> Optional[LinkAsOf]:
         """The canonical game a sportsbook event maps to, ONLY when its orientation
         is approved as of the cutoff (accepted direct-orientation decision +
-        DQ/review timeline). Neutral swapped / review-gated events are excluded;
-        the current ``sportsbook_events.game_id`` alone is never trusted."""
+        DQ/review timeline) AND any required manual review was validly completed by
+        the cutoff. Neutral swapped / review-gated / reviewed-after-cutoff events
+        are excluded; the current ``sportsbook_events.game_id`` alone is never
+        trusted."""
 
         if not self._sb.is_orientation_approved(sb_event_id, as_of=self._cutoff.iso):
             return None
         game_id, decision_id, orientation = self._sb.event_link(sb_event_id)
-        if game_id is None or decision_id is None:
+        if game_id is None or decision_id is None or not self._review_ok(decision_id):
             return None
         return LinkAsOf(game_id=game_id, match_decision_id=decision_id,
                         details=_as_mapping({"orientation": orientation}))
@@ -246,23 +350,23 @@ class AsOfReader:
                 kalshi_market_id, as_of=self._cutoff.iso):
             return None
         game_id, decision_id, yes_team_id, _hash, semantic = self._kal.market_link(kalshi_market_id)
-        if game_id is None or decision_id is None:
+        if game_id is None or decision_id is None or not self._review_ok(decision_id):
             return None
         return LinkAsOf(game_id=game_id, match_decision_id=decision_id,
                         details=_as_mapping({"yes_team_id": yes_team_id,
                                              "market_semantic": semantic}))
 
     def kalshi_event_game(self, kalshi_event_id: str) -> Optional[LinkAsOf]:
-        """The canonical game a Kalshi event maps to, only through an accepted event
-        decision with ``decided_at <= cutoff`` (order-book/trade reads stay
+        """The canonical game a Kalshi event maps to, only through a feature-usable
+        accepted event decision valid at the cutoff (order-book/trade reads stay
         separate from this identity read)."""
 
-        decision = self.accepted_decision(
-            source_provider=KALSHI_PUBLIC_PROVIDER, source_ref=kalshi_event_id,
-            entity_type="kalshi_event")
-        if decision is None or decision.matched_entity_id is None:
+        entity = self.matched_entity(source_provider=KALSHI_PUBLIC_PROVIDER,
+                                     source_ref=kalshi_event_id, entity_type="kalshi_event")
+        if entity is None:
             return None
-        return LinkAsOf(game_id=decision.matched_entity_id, match_decision_id=decision.match_id)
+        game_id, decision_id = entity
+        return LinkAsOf(game_id=game_id, match_decision_id=decision_id)
 
     # -- match decisions ---------------------------------------------------- #
     def decisions(self, *, source_provider: str, source_ref: str,
@@ -277,13 +381,59 @@ class AsOfReader:
 
     def accepted_decision(self, *, source_provider: str, source_ref: str,
                           entity_type: Optional[str] = None) -> Optional[MatchDecisionView]:
-        """The most recent accepted decision known by cutoff, or None (a decision
-        decided after the cutoff is invisible, so the source stays unresolved)."""
+        """RAW AUDIT view of the most recent accepted decision known by cutoff (a
+        decision decided after the cutoff is invisible). This may be displayed for
+        reporting but is NOT feature-safe identity -- use :meth:`matched_entity`,
+        which additionally enforces the review gate, for a feature-facing link."""
 
         accepted = [d for d in self.decisions(source_provider=source_provider,
                                               source_ref=source_ref, entity_type=entity_type)
                     if d.outcome == "accepted"]
         return accepted[-1] if accepted else None
+
+    def matched_entity(self, *, source_provider: str, source_ref: str,
+                       entity_type: Optional[str] = None) -> Optional[tuple[str, str]]:
+        """FEATURE-facing canonical identity ``(matched_entity_id, match_id)`` for a
+        provider source, or None. Returned only when an accepted decision is known
+        by the cutoff (``decided_at <= cutoff``) AND any required manual review was
+        validly completed by the cutoff (:meth:`_review_ok`). This is the single
+        gated path used for Kalshi-event and provider-reference identity, so
+        ``matched_entity_id`` is never exposed before a required review is valid."""
+
+        raw = [d for d in self._match.decisions_for_source(
+                   source_provider=source_provider, source_ref=source_ref,
+                   entity_type=entity_type, as_of=self._cutoff.iso)
+               if d.outcome == "accepted"]
+        if not raw:
+            return None
+        decision = raw[-1]
+        if decision.matched_entity_id is None or not self._review_ok_decision(decision):
+            return None
+        return decision.matched_entity_id, decision.match_id
+
+    def _review_ok(self, match_id: str) -> bool:
+        decision = self._match.get(match_id)
+        return decision is not None and self._review_ok_decision(decision)
+
+    def _review_ok_decision(self, decision: Any) -> bool:
+        """Conservative, timeline-based review gate (task §5).
+
+        Schema v16 cannot fully reconstruct whether a decision was originally
+        review-gated once the mutable review columns change, so the most
+        conservative supported rule is used:
+
+        * currently flagged (``needs_manual_review``) -> unavailable (a required
+          review is not validly completed);
+        * a recorded human review (``reviewed_by`` set) -> available only when its
+          ``reviewed_at`` transaction time is ``<= cutoff``;
+        * otherwise a clean accept that never required review -> available.
+        """
+
+        if decision.needs_manual_review:
+            return False
+        if decision.reviewed_by is not None:
+            return decision.reviewed_at is not None and decision.reviewed_at <= self._cutoff.iso
+        return True
 
     def _decision_view(self, d: Any) -> MatchDecisionView:  # d: MatchDecision
         cutoff_iso = self._cutoff.iso

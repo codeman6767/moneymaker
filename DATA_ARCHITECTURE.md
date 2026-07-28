@@ -1230,7 +1230,9 @@ sports_quant/
 ◻                         #   + mlb_ingestor.py nba_ingestor.py weather_ingestor.py (Phase D)
 ◻ matching/               # teams.py, players.py, games.py, markets.py, decisions.py
                           #   (imports db/normalize.py -- one normalizer only)  (Phase D)
-◧ pit/                    # asof.py, registry.py, evaluation_only.py, models.py DONE (E1);
+◧ pit/                    # asof.py, registry.py, evaluation_only.py, models.py built (E1,
+                          #   under focused repair): true read-only URI, content-hash fail-closed
+                          #   ties, games status+scheduled_start as-of, review-gated identity;
                           #   dataset.py = GameStateDataset row builder (Phase E2)
 ```
 

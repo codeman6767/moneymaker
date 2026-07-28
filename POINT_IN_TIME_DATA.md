@@ -121,8 +121,8 @@ hides it.
 
 ---
 
-> **Phase E1 status — point-in-time access + leakage guards complete.**
-> Phase E1 point-in-time access and leakage-guard foundations are complete
+> **Phase E1 status — built and under focused repair; independent review NOT yet
+> passed.** Phase E1 point-in-time access and leakage-guard foundations are built
 > (`sports_quant/pit/`, schema v16, no new migration). Every feature-facing
 > historical read requires an explicit UTC cutoff and uses transaction time,
 > never provider time or mutable current state. A fail-closed table registry
@@ -132,12 +132,38 @@ hides it.
 > Sportsbook/Kalshi canonical links and orientations are visible historically
 > only through accepted decisions and DQ/review timelines valid at the cutoff.
 > Pregame weather requires a current forecast observed by cutoff with
-> `pit_eligible=1`. Adversarial fixtures prove **DQ-PIT-001 through DQ-PIT-011**,
-> including future results, stats, lineups, injuries, prices, joins, match
-> decisions and unsafe weather rows. The final `GameStateDataset` row builder,
-> and the data-status and data-quality commands, remain **Phase E2**. No feature
+> `pit_eligible=1`. Adversarial fixtures prove **DQ-PIT-001 through DQ-PIT-011**.
+>
+> **Focused E1 repair (this pass).** Six correctness repairs: **(1)** both mutable
+> `games` columns — `status` AND `scheduled_start` (plus `updated_at`) — are
+> forbidden for direct feature reads; `AsOfReader.game_schedule_state` returns the
+> status and scheduled start TOGETHER from one `game_status_history` observation as
+> of the cutoff (never a historical status with today's start). **(2)**
+> `sportsbook_markets` is a MIXED table with an explicit structural allowlist
+> (`sb_market_id`, `sb_event_id`, `bookmaker_key`, `market_key`); the mutable
+> title, provider update times, current raw-response provenance, and
+> first/last-observed fields are forbidden and `SELECT *` is prohibited. **(3)**
+> Equal-`observed_at` rows are resolved by `content_hash`: a genuine conflict raises
+> a typed `AsOfAmbiguityError` (fail-closed) rather than picking a ULID/insertion
+> winner; `Observation.row_id` is provenance only, not a semantic tie-break. **(4)**
+> `read_only_connection` opens SQLite in TRUE read-only mode
+> (`file:…?immutable=1`, `uri=True`): a missing database is not created, no
+> `-wal`/`-shm`/journal sidecar is written, and every write/DDL fails. **(5)** Alias
+> tables (`team_aliases`, `player_aliases`, `venue_aliases`) are `unsupported` for
+> feature joins — resolver inputs, not predictors; a season window does not make
+> them feature-safe, and late alias curation cannot rewrite an earlier row.
+> **(6)** Feature-facing identity (`sportsbook_event_game`, `kalshi_*`,
+> `matched_entity`) fails closed for an accepted-but-review-gated decision until a
+> required audited review is validly completed by the cutoff; a review completed
+> after the cutoff is invisible earlier. The registry is programmatically verified
+> to cover every schema-v16 table exactly once; the generic as-of SQL surface
+> rejects JOIN/subquery/semicolon/comment fragments and validates columns.
+>
+> The final `GameStateDataset` row builder, and the data-status and data-quality
+> commands, remain **Phase E2**. Schema remains **version 16**. No feature
 > engineering, model training, live request, ingestion, backfill, recommendation
-> or execution work was performed.
+> or execution work was performed, and the independent E1 correctness review has
+> not yet passed.
 
 ## 3. As-of query pattern
 
@@ -267,7 +293,7 @@ complete historical snapshot; c008 retains only current + first provenance, so
 Phase E must read from the decision/DQ timelines and must not claim to reconstruct
 prior rules text/hash observations beyond that boundary |
 | Weather forecast-vs-actual kept distinct (leakage vector) | ◧ **D4 built (schema v14)** — `weather_snapshots.weather_kind` separates `current_forecast` / `station_observation` / `historical_forecast` / `reanalysis`; `observed_at` is never backdated to a model-run time; an explicit `pit_eligible` (1/0/NULL) is set (a station observation / reanalysis is never PIT-eligible; a stitched historical forecast whose availability is unproven is `pit_eligible=NULL` + a `DQ-WX-PIT-001` note). Phase E must gate pregame weather features on `weather_kind='current_forecast' AND observed_at ≤ cutoff AND pit_eligible=1` — never on the endpoint of origin, and never a reanalysis/observation row |
-| Full `pit/asof.py` + safe-join registry + evaluation-only isolation + adversarial leak fixtures | ✅ **E1 built (schema v16, no new migration)** — `sports_quant/pit/` ships the strict `Cutoff` type, the one canonical `latest_as_of` algorithm, the fail-closed table registry, feature-facing as-of accessors, `evaluation_only.closing_line_for_evaluation`, and adversarial fixtures proving **DQ-PIT-001..011**. `pit/dataset.py` (the `GameStateDataset` row builder) remains **E2** |
+| Full `pit/asof.py` + safe-join registry + evaluation-only isolation + adversarial leak fixtures | ◧ **E1 built + focused repair, independent review pending (schema v16, no new migration)** — `sports_quant/pit/` ships the strict `Cutoff` type, the canonical `latest_as_of` algorithm (content-hash fail-closed ties), the fail-closed table registry (with column policies + true read-only URI mode + review-gated identity), feature-facing as-of accessors, `evaluation_only.closing_line_for_evaluation`, and adversarial fixtures proving **DQ-PIT-001..011**. `pit/dataset.py` (the `GameStateDataset` row builder) remains **E2** |
 
 `GameRepository.status_as_of()` is the first working instance of the §3
 pattern, and its tests already cover the DQ-PIT-004 shape: a status observed at

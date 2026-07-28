@@ -11,8 +11,21 @@ not part of this package yet.
 
 from __future__ import annotations
 
-from .asof import AsOfReader, deterministic_json, latest_as_of, read_only_connection
-from .models import Cutoff, LinkAsOf, MatchDecisionView, Observation
+from .asof import (
+    AsOfAmbiguityError,
+    AsOfReader,
+    deterministic_json,
+    latest_as_of,
+    read_only_connection,
+)
+from .models import (
+    Cutoff,
+    GameScheduleState,
+    LinkAsOf,
+    MarketIdentity,
+    MatchDecisionView,
+    Observation,
+)
 from .registry import (
     TABLE_REGISTRY,
     ForbiddenColumnError,
@@ -22,6 +35,7 @@ from .registry import (
     UnknownTableError,
     assert_column_readable,
     assert_joinable,
+    assert_selectable,
     classify,
     registered_tables,
     require_asof,
@@ -32,7 +46,10 @@ __all__ = [
     "Observation",
     "MatchDecisionView",
     "LinkAsOf",
+    "GameScheduleState",
+    "MarketIdentity",
     "AsOfReader",
+    "AsOfAmbiguityError",
     "latest_as_of",
     "read_only_connection",
     "deterministic_json",
@@ -43,6 +60,7 @@ __all__ = [
     "require_asof",
     "assert_joinable",
     "assert_column_readable",
+    "assert_selectable",
     "registered_tables",
     "UnknownTableError",
     "ForbiddenJoinError",

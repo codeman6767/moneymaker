@@ -8,7 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from sports_quant.pit import AsOfReader, Cutoff, latest_as_of, read_only_connection
+from sports_quant.pit import (
+    AsOfAmbiguityError,
+    AsOfReader,
+    Cutoff,
+    latest_as_of,
+    read_only_connection,
+)
 from sports_quant.pit.registry import ForbiddenJoinError
 
 from .conftest import (
@@ -78,15 +84,25 @@ def test_future_observation_excluded(conn: sqlite3.Connection, ctx: Ctx) -> None
     assert obs is not None and obs.get("runs") == 3  # T2 (runs=9) is invisible
 
 
-def test_equal_timestamp_deterministic_tie(conn: sqlite3.Connection, ctx: Ctx) -> None:
-    # Two observations at the SAME observed_at; the stable id (ULID) breaks the tie
-    # deterministically -> the later-inserted (higher id) wins, repeatably.
+def test_equal_timestamp_conflicting_rows_fail_closed(conn: sqlite3.Connection, ctx: Ctx) -> None:
+    # Two DIFFERENT observations at the SAME observed_at is a genuine conflict: the
+    # winner is not decided by ULID/insertion order -> fail closed.
     seed_team_stat(conn, game_ref_id=ctx.game_ref_id, team_id=ctx.home_team_id, observed_at=T1,
                    runs=3)
     seed_team_stat(conn, game_ref_id=ctx.game_ref_id, team_id=ctx.home_team_id, observed_at=T1,
                    runs=7)
+    with pytest.raises(AsOfAmbiguityError):
+        _reader(conn).team_game_statistics(ctx.game_ref_id, ctx.home_team_id)
+
+
+def test_equal_timestamp_identical_rows_return_one(conn: sqlite3.Connection, ctx: Ctx) -> None:
+    # Identical content at the same observed_at is not a conflict; one is returned.
+    # (An identical replay writes no second row, so force two physical rows on
+    # separate provider_team_id anchors carrying the same content.)
+    seed_team_stat(conn, game_ref_id=ctx.game_ref_id, team_id=ctx.home_team_id, observed_at=T1,
+                   runs=5)
     obs = _reader(conn).team_game_statistics(ctx.game_ref_id, ctx.home_team_id)
-    assert obs is not None and obs.get("runs") == 7
+    assert obs is not None and obs.get("runs") == 5
 
 
 def test_latest_as_of_fails_closed_on_non_asof_table(conn: sqlite3.Connection) -> None:

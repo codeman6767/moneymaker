@@ -1062,7 +1062,7 @@ Model column = recommended driver.
 > audit + sanitized fixtures (`matching/tests/kalshi_fixtures.py`); parser
 > versions are golden-pinned so a provider change breaks loudly. Full suite:
 > 1315 passed / 1 skipped (Phase D). Schema remains v16; no d017. (Phase E1 later
-> adds the `sports_quant/pit/` suite; the current full-suite total is 1358 passed
+> adds the `sports_quant/pit/` suite; the current full-suite total is 1377 passed
 > / 1 skipped.)
 >
 > **D5B1 correctness repair (season / local-slate / conflict / outcome / DQ).**
