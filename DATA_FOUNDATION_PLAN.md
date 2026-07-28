@@ -25,7 +25,7 @@ accurate insert/update/dedup counters (including a new `ingestion_runs.records_u
 and a single validation path shared by persisted and dry-run ingestion. No
 Kalshi credential, private key, or signing is used anywhere; there is no
 account/balance/position/fill/order column in the schema. The suite passes under
-Ruff and mypy: 1377 passed / 1 skipped locally (optional PyArrow present); under
+Ruff and mypy: 1385 passed / 1 skipped locally (optional PyArrow present); under
 the standard `.[dev]` CI with PyArrow absent only the optional hoopR/PyArrow
 modules skip.
 
@@ -199,7 +199,7 @@ no persisted weather ingestion or backfill). D5A canonical team/player/venue/off
 | B | Raw responses, ingestion runs, sportsbook odds | ✅ Complete (schema v6, incl. `b006` integrity repair) |
 | C | Kalshi public events, markets, books, trades | ✅ Complete (schema v8, incl. `c008` integrity repair) |
 | D | Official providers, weather, canonical matching | ✅ **Complete (schema v16). D1 infra + D2 MLB ingestion complete (schema v11); D2 controlled live gate passed 2026-07-24 (no persisted ingestion/backfill); D3 NBA ingestion code complete + correctness-repaired against mocked BALLDONTLIE GOAT + offline hoopR fixtures (schema v13, `d012_nba_specifics` + `d013_nba_typed_repairs`); D4 complete (schema v14, `d014_weather`): controlled live NWS + Open-Meteo current-forecast audits + bounded zero-persistence dry run passed (station obs / historical forecasts / reanalysis remain mocked/offline; no persisted weather ingestion/backfill); **D5A complete** — deterministic canonical team/player/venue + official-game matching to the existing `games` table with full decision/candidate evidence (mocked/offline); **D5B1 complete** (schema v15, `d015_sportsbook_matching`): The Odds API sportsbook events matched to canonical games with typed direct/swapped orientation (mocked/offline); **D5B2 complete** (schema v16, `d016_kalshi_matching`): public MLB/NBA Kalshi events + game-winner markets matched to canonical games with venue-local ticker-time (MLB `kmlb-2`) / date-only (NBA `knba-1`) tiers, explicit Yes team + matched rules hash, and fail-closed as-of readiness (mocked/offline; bounded public-contract audit + parser smoke passed)** |
-| E | Point-in-time builder, quality rules, leakage tests | ◧ **E1 built + focused repair (independent review pending)** — point-in-time as-of accessors, fail-closed safe-join registry, evaluation-only closing-line isolation, adversarial DQ-PIT-001..011 guards, plus the current-state/deterministic-tie/review-gating/true-read-only repair (`sports_quant/pit/`, schema v16, no new migration). **E2 not started** (the `GameStateDataset` row builder + data-status/data-quality commands). |
+| E | Point-in-time builder, quality rules, leakage tests | ◧ **E1 complete — independently reviewed** — point-in-time as-of accessors, fail-closed safe-join registry (with feature-column allowlists + positive-allowlist SQL grammar), evaluation-only closing-line isolation, content-hash fail-closed ties, review-gated identity, true read-only URI mode, and adversarial DQ-PIT-001..011 guards (`sports_quant/pit/`, schema v16, no new migration). **E2 not started** (the `GameStateDataset` row builder + data-status/data-quality commands). |
 
 **D5A — deterministic canonical entity + official-game matching (complete,
 mocked/offline).** D5A team, player, venue, and official-game resolution is

@@ -1230,10 +1230,11 @@ sports_quant/
 ◻                         #   + mlb_ingestor.py nba_ingestor.py weather_ingestor.py (Phase D)
 ◻ matching/               # teams.py, players.py, games.py, markets.py, decisions.py
                           #   (imports db/normalize.py -- one normalizer only)  (Phase D)
-◧ pit/                    # asof.py, registry.py, evaluation_only.py, models.py built (E1,
-                          #   under focused repair): true read-only URI, content-hash fail-closed
-                          #   ties, games status+scheduled_start as-of, review-gated identity;
-                          #   dataset.py = GameStateDataset row builder (Phase E2)
+✅ pit/                    # asof.py, registry.py, evaluation_only.py, models.py (E1 complete,
+                          #   independently reviewed): true read-only URI, content-hash fail-closed
+                          #   ties, feature-column allowlists, positive-allowlist SQL grammar,
+                          #   games status+scheduled_start as-of, review-gated identity;
+                          #   dataset.py = GameStateDataset row builder (Phase E2, not started)
 ```
 
 `hashing.py` was not needed: `canonical_json` is imported directly from

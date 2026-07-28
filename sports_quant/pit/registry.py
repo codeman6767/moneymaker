@@ -34,7 +34,7 @@ Classifications
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Optional
 
@@ -92,6 +92,13 @@ class TableEntry:
     season_key: Optional[str] = None             # season_scoped
     forbidden_columns: frozenset[str] = field(default_factory=frozenset)
     allowed_columns: Optional[frozenset[str]] = None  # explicit structural allowlist
+    #: For an ``asof_filtered`` table, the ONLY columns an as-of ``Observation`` may
+    #: surface as features. It is a strict subset of the columns that feed the
+    #: table's ``content_hash`` (never provenance/audit/provider-time/id columns),
+    #: so a returned feature object is fully determined by the content hash and
+    #: therefore rebuild-stable. ``None`` => no policy yet => ``observation()`` fails
+    #: closed on that table.
+    feature_columns: Optional[frozenset[str]] = None
     via_parent: Optional[str] = None             # child rows filtered by a parent
 
 
@@ -233,7 +240,54 @@ _ENTRIES: tuple[TableEntry, ...] = (
           "weather_kind='current_forecast' AND pit_eligible=1."),
 )
 
-TABLE_REGISTRY: dict[str, TableEntry] = {e.table: e for e in _ENTRIES}
+# The feature-safe column allowlist for each as-of observation table. Each set is
+# a STRICT SUBSET of the columns hashed into that table's content_hash (the append
+# repository's ``content`` dict), with provider ids, provider timestamps,
+# raw-response / run / ingestion / created provenance, and the surrogate id
+# excluded. Anchor/identity columns the caller already supplies are omitted too.
+# A table absent here has no policy and is not readable via ``observation()``
+# (fail-closed). Kept in sync with the append content dicts so red-flag-6 holds:
+# a returned feature object is fully determined by content_hash.
+_FEATURE_COLUMNS: dict[str, frozenset[str]] = {
+    "game_status_history": frozenset({"status", "scheduled_start", "detail"}),
+    "game_schedule_snapshots": frozenset({
+        "season", "game_type", "game_date_local", "scheduled_start", "home_team_id",
+        "away_team_id", "venue_id"}),
+    "game_result_snapshots": frozenset({
+        "home_runs", "away_runs", "home_hits", "away_hits", "home_errors", "away_errors",
+        "innings_played", "winning_side", "mapped_status", "result_detail"}),
+    "mlb_inning_lines": frozenset({"inning", "side", "runs", "hits", "errors"}),
+    "team_game_statistics": frozenset({"home_away", "runs", "hits", "errors", "at_bats", "extra"}),
+    "player_game_statistics": frozenset({
+        "role", "is_starter", "batting_order", "position", "batting_stats", "pitching_stats",
+        "extra"}),
+    "roster_snapshots": frozenset({"roster_date", "roster_status", "jersey_number", "position"}),
+    "probable_pitcher_snapshots": frozenset({"side", "status"}),
+    "lineup_snapshots": frozenset({"home_away", "is_confirmed"}),
+    "injury_snapshots": frozenset({
+        "status", "description", "reason", "return_date", "return_estimate"}),
+    "nba_quarter_lines": frozenset({"period", "side", "points"}),
+    "play_snapshots": frozenset({
+        "period", "play_sequence", "clock", "event_type", "description", "is_substitution",
+        "extra"}),
+    "nba_game_results": frozenset({
+        "home_points", "away_points", "period", "winning_side", "mapped_status", "result_detail"}),
+    "nba_team_statistics": frozenset({"home_away", "points", "stats"}),
+    "nba_player_statistics": frozenset({
+        "stat_group", "position", "is_starter", "points", "stats"}),
+    "weather_snapshots": frozenset({
+        "weather_kind", "applicability", "forecast_mode", "valid_time", "forecast_target_time",
+        "model_reference_time", "lead_time_seconds", "pit_eligible", "roof_type_at_decision",
+        "temperature_c", "apparent_temperature_c", "dew_point_c", "relative_humidity_pct",
+        "wind_speed_ms", "wind_gust_ms", "wind_direction_deg", "precip_probability_pct",
+        "precip_amount_mm", "weather_code", "condition_text", "extra"}),
+}
+
+TABLE_REGISTRY: dict[str, TableEntry] = {
+    e.table: (replace(e, feature_columns=_FEATURE_COLUMNS[e.table])
+              if e.table in _FEATURE_COLUMNS else e)
+    for e in _ENTRIES
+}
 
 
 def registered_tables() -> tuple[str, ...]:

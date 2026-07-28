@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ..db.repositories.data_quality import DataQualityIssue, SqliteDataQualityRepository
-from ..db.repositories.games import GameStatusRecord, SqliteGameRepository
+from ..db.repositories.games import GameStatusRecord
 from ..db.repositories.kalshi import SqliteKalshiRepository
 from ..db.repositories.matching import SqliteMatchingRepository
 from ..db.repositories.sportsbook import SportsbookPriceSnapshot, SqliteSportsbookRepository
@@ -36,7 +36,7 @@ from .models import (
     MatchDecisionView,
     Observation,
 )
-from .registry import assert_selectable, require_asof
+from .registry import ForbiddenColumnError, assert_selectable, require_asof
 
 __all__ = [
     "read_only_connection",
@@ -71,18 +71,26 @@ class AsOfAmbiguityError(RuntimeError):
             "the same maximum timestamp; refusing to pick a non-deterministic winner")
 
 
-# A public string WHERE fragment may only be a conjunction of `col <op> ?`/literal
-# comparisons. Anything that could open a JOIN, subquery, statement break, or
-# comment is rejected so a future caller cannot smuggle an unreviewed current-state
-# join through the generic surface (task §9).
-_FRAGMENT_BANNED = re.compile(r";|--|/\*|\*/|\(|\)|\bjoin\b|\bselect\b|\bunion\b", re.IGNORECASE)
+# A public as-of WHERE fragment must be a positive-allowlist conjunction (AND-only)
+# of the exact comparison forms the typed accessors use: ``ident = ?`` /
+# ``ident = <int>`` / ``ident = '<literal>'`` / ``ident IS [NOT] NULL``. Anything
+# else -- OR, other operators (LIKE/GLOB/</>), quoted identifiers, functions,
+# parentheses/subqueries, commas, COLLATE, comments, statement breaks -- fails
+# closed, so a future caller cannot broaden the predicate or smuggle an unreviewed
+# join through the generic surface (task §9). A blocklist is deliberately NOT used
+# (it leaked OR/LIKE/quoted-identifier/comma bypasses).
+_IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
+_LITERAL = r"(?:\?|-?\d+|'[^']*')"
+_CONDITION = rf"(?:{_IDENT}\s*=\s*{_LITERAL}|{_IDENT}\s+IS(?:\s+NOT)?\s+NULL)"
+_ALLOWED_FRAGMENT = re.compile(
+    rf"^\s*{_CONDITION}(?:\s+AND\s+{_CONDITION})*\s*$", re.IGNORECASE)
 
 
 def _validate_fragment(fragment: str) -> None:
-    if _FRAGMENT_BANNED.search(fragment):
+    if _ALLOWED_FRAGMENT.fullmatch(fragment) is None:
         raise ValueError(
-            f"unsafe SQL fragment {fragment!r}: JOIN/subquery/semicolon/comment/parenthesis are "
-            "not permitted in an as-of WHERE fragment")
+            f"unsafe as-of WHERE fragment {fragment!r}: only an AND-conjunction of "
+            "`col = ?` / `col = <int>` / `col = '<literal>'` / `col IS [NOT] NULL` is permitted")
 
 
 @contextmanager
@@ -197,7 +205,6 @@ class AsOfReader:
     def __init__(self, conn: sqlite3.Connection, cutoff: Cutoff) -> None:
         self._conn = conn
         self._cutoff = cutoff
-        self._games = SqliteGameRepository(conn)
         self._sb = SqliteSportsbookRepository(conn)
         self._kal = SqliteKalshiRepository(conn)
         self._match = SqliteMatchingRepository(conn)
@@ -212,38 +219,76 @@ class AsOfReader:
         self, table: str, *, anchor_where: str, anchor_params: Sequence[Any] = (),
         extra_where: Optional[str] = None, extra_params: Sequence[Any] = (),
     ) -> Optional[Observation]:
-        """Latest as-of row of any ``asof_filtered`` table, wrapped immutably."""
+        """Latest as-of row of an ``asof_filtered`` table, projected to ONLY the
+        table's feature-safe columns (task red-flag-2).
+
+        ``Observation.fields`` exposes exactly ``entry.feature_columns`` -- a strict
+        subset of the content-hashed semantic columns -- so audit/provenance
+        columns (``ingested_at``/``created_at``/``run_id``/``raw_response_*``/the
+        surrogate id), provider identifiers, and provider timestamps are never
+        surfaced as features, and the result is fully determined by the content
+        hash (rebuild-stable, red-flag-6). A table with no feature policy fails
+        closed."""
 
         entry = require_asof(table)
+        if entry.feature_columns is None:
+            raise ForbiddenColumnError(
+                f"table {table!r} has no feature-column policy; it is not readable via "
+                "observation() (add an explicit feature allowlist first)")
         row = latest_as_of(self._conn, table=table, cutoff=self._cutoff,
                            anchor_where=anchor_where, anchor_params=anchor_params,
                            extra_where=extra_where, extra_params=extra_params)
         if row is None:
             return None
-        fields = {k: row[k] for k in row.keys()}
-        return Observation(table=table, observed_at=fields.get(entry.observed_at_column or ""),
-                           row_id=fields.get(entry.id_column or ""), fields=_as_mapping(fields))
+        available = set(row.keys())
+        fields = {c: row[c] for c in sorted(entry.feature_columns) if c in available}
+        obs_col = entry.observed_at_column or ""
+        return Observation(table=table, observed_at=row[obs_col] if obs_col in available else None,
+                           row_id=row[entry.id_column] if entry.id_column in available else None,
+                           fields=_as_mapping(fields))
 
     # -- game state / official results -------------------------------------- #
+    def _status_row(self, game_id: str) -> Optional[sqlite3.Row]:
+        """The status observation as of cutoff via the CONTENT-HASH fail-closed
+        path (not the repository's ULID tie-break): conflicting equal-``observed_at``
+        status rows (e.g. two providers disagreeing at the same instant) raise
+        :class:`AsOfAmbiguityError` instead of silently picking a generated-id
+        winner (red-flag-3)."""
+
+        return latest_as_of(self._conn, table="game_status_history", cutoff=self._cutoff,
+                            anchor_where="game_id = ?", anchor_params=(game_id,))
+
     def game_status(self, game_id: str) -> Optional[GameStatusRecord]:
         """Game status as of cutoff (via the append-only status log, never
-        ``games.status``)."""
+        ``games.status``), fail-closed on equal-time conflicts."""
 
-        return self._games.status_as_of(game_id, self._cutoff.iso)
+        row = self._status_row(game_id)
+        if row is None:
+            return None
+        return GameStatusRecord(
+            status_id=str(row["status_id"]), game_id=str(row["game_id"]),
+            status=str(row["status"]), scheduled_start=str(row["scheduled_start"]),
+            provider=str(row["provider"]), observed_at=str(row["observed_at"]),
+            ingested_at=str(row["ingested_at"]), content_hash=str(row["content_hash"]),
+            detail=row["detail"], provider_timestamp=row["provider_timestamp"],
+            raw_response_id=row["raw_response_id"], raw_response_hash=row["raw_response_hash"],
+            created_at=str(row["created_at"]))
 
     def game_schedule_state(self, game_id: str) -> Optional[GameScheduleState]:
         """The game's status AND scheduled start as of cutoff, taken TOGETHER from
-        the same ``game_status_history`` observation (task §2). Both are mutable
-        current-state on ``games`` and are forbidden there; this never combines a
-        historical status with today's scheduled start, and a future reschedule
-        cannot leak into an earlier cutoff."""
+        the same ``game_status_history`` observation (task §2), via the content-hash
+        fail-closed path. Both are mutable current-state on ``games`` and are
+        forbidden there; this never combines a historical status with today's
+        scheduled start, a future reschedule cannot leak into an earlier cutoff, and
+        an equal-time provider conflict fails closed rather than picking a ULID
+        winner."""
 
-        rec = self._games.status_as_of(game_id, self._cutoff.iso)
-        if rec is None:
+        row = self._status_row(game_id)
+        if row is None:
             return None
-        return GameScheduleState(game_id=rec.game_id, status=rec.status,
-                                 scheduled_start=rec.scheduled_start, observed_at=rec.observed_at,
-                                 status_id=rec.status_id)
+        return GameScheduleState(game_id=str(row["game_id"]), status=str(row["status"]),
+                                 scheduled_start=str(row["scheduled_start"]),
+                                 observed_at=str(row["observed_at"]), status_id=str(row["status_id"]))
 
     def official_schedule(self, game_ref_id: str) -> Optional[Observation]:
         return self.observation("game_schedule_snapshots", anchor_where="game_ref_id = ?",
