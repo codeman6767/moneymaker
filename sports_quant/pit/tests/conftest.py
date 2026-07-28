@@ -27,7 +27,10 @@ from sports_quant.db.repositories.games import SqliteGameRepository
 from sports_quant.db.repositories.ingestion_runs import SqliteIngestionRunRepository
 from sports_quant.db.repositories.lineups import LineupPlayerInput, SqliteLineupRepository
 from sports_quant.db.repositories.matching import CandidateInput, SqliteMatchingRepository
-from sports_quant.db.repositories.nba import SqliteInjurySnapshotRepository
+from sports_quant.db.repositories.nba import (
+    SqliteInjurySnapshotRepository,
+    SqliteNbaResultRepository,
+)
 from sports_quant.db.repositories.official_games import SqliteResultRepository
 from sports_quant.db.repositories.raw_responses import (
     SqliteRawResponseRepository,
@@ -130,7 +133,7 @@ def seed_status(conn: sqlite3.Connection, *, game_id: str, status: str, observed
 
 
 def seed_result(conn: sqlite3.Connection, *, game_ref_id: str, observed_at: str,
-                winning_side: str = "home", mapped_status: str = "final") -> None:
+                winning_side: Optional[str] = "home", mapped_status: str = "final") -> None:
     run_id, rid, rhash = _prov(conn)
     with transaction(conn):
         SqliteResultRepository(conn).append(
@@ -277,6 +280,46 @@ def seed_kalshi_linked(conn: sqlite3.Connection, *, game_id: str, yes_team_id: s
             market_semantic="game_winner")
         assert outcome is LinkOutcome.LINKED  # noqa: S101
     return kmk
+
+
+@dataclass(frozen=True)
+class NbaCtx:
+    game_id: str
+    game_ref_id: str
+    home_team_id: str
+    away_team_id: str
+
+
+def seed_nba_ctx(conn: sqlite3.Connection, *, provider_game_id: str = "NG1",
+                 game_date_local: str = "2026-07-14") -> NbaCtx:
+    """A fully wired canonical NBA game linked to a balldontlie provider reference
+    (via the shared official identity + a 'game' decision) with a schedule snapshot."""
+
+    home = seed_team(conn, league_code="NBA", abbreviation="LAL",
+                     canonical_name="Los Angeles Lakers", city="Los Angeles", nickname="Lakers")
+    away = seed_team(conn, league_code="NBA", abbreviation="BOS",
+                     canonical_name="Boston Celtics", city="Boston", nickname="Celtics")
+    game_ref = seed_schedule(conn, provider="balldontlie", provider_game_id=provider_game_id,
+                             home_provider_team_id="1610612747", away_provider_team_id="1610612738",
+                             scheduled_start=SCHED_START, season=2026,
+                             game_date_local=game_date_local)
+    game_id = _create_canonical(
+        conn, league_code="NBA", home_team_id=home, away_team_id=away,
+        scheduled_start=SCHED_START, game_date_local=game_date_local,
+        official_provider="balldontlie", official_game_key=provider_game_id)
+    return NbaCtx(game_id=game_id, game_ref_id=game_ref, home_team_id=home, away_team_id=away)
+
+
+def seed_nba_result(conn: sqlite3.Connection, *, game_ref_id: str, observed_at: str,
+                    winning_side: Optional[str] = "home", mapped_status: str = "final",
+                    provider_game_id: str = "NG1") -> None:
+    run_id, rid, rhash = _prov(conn)
+    with transaction(conn):
+        SqliteNbaResultRepository(conn).append(
+            game_ref_id=game_ref_id, provider="balldontlie", provider_game_id=provider_game_id,
+            observed_at=observed_at, ingested_at=observed_at, run_id=run_id, raw_response_id=rid,
+            raw_response_hash=rhash, mapped_status=mapped_status, home_points=110, away_points=100,
+            period=4, winning_side=winning_side)
 
 
 def seed_dq(conn: sqlite3.Connection, *, rule_code: str, entity_type: str, entity_id: str,

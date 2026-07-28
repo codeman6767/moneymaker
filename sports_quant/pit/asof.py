@@ -456,6 +456,32 @@ class AsOfReader:
             return None
         return decision.matched_entity_id, decision.match_id
 
+    def game_provider_reference(
+        self, *, game_id: str, official_provider: str, official_game_key: str,
+    ) -> Optional[str]:
+        """The provider game reference id (``provider_game_references.reference_id``,
+        the ``game_ref_id`` that observation tables key on) for a canonical game,
+        or None when the correspondence was not provably known by the cutoff.
+
+        The game<->provider-game correspondence is gated on the accepted
+        ``entity_type='game'`` decision (``source_provider=official_provider``,
+        ``source_ref=official_game_key``) via :meth:`matched_entity`: it is returned
+        only when that decision was decided by the cutoff and passed the review gate
+        (a link learned after the cutoff is invisible). Only the IMMUTABLE identity
+        columns (``reference_id`` keyed by the frozen ``UNIQUE(provider,
+        provider_game_id)``) are read -- never the mutable ``game_id`` link -- so
+        this is an identity resolver, not a current-state read."""
+
+        matched = self.matched_entity(source_provider=official_provider,
+                                     source_ref=official_game_key, entity_type="game")
+        if matched is None or matched[0] != game_id:
+            return None
+        row = self._conn.execute(  # immutable identity lookup; not the mutable game_id link
+            "SELECT reference_id FROM provider_game_references "
+            "WHERE provider = ? AND provider_game_id = ?",
+            (official_provider, official_game_key)).fetchone()
+        return None if row is None else str(row["reference_id"])
+
     def _review_ok(self, match_id: str) -> bool:
         decision = self._match.get(match_id)
         return decision is not None and self._review_ok_decision(decision)

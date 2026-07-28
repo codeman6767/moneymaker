@@ -54,7 +54,7 @@ canonical matching.
 > performed. D5A deterministic canonical + official-game matching is complete
 > (mocked/offline); D5B1 sportsbook + D5B2 Kalshi market matching complete
 > (schema v16, `d016_kalshi_matching`; mocked/offline plus a bounded public-contract
-> audit and parser smoke). Phase D is complete; Phase E1 (point-in-time foundation) is complete and Phase E2 has not started.** D1
+> audit and parser smoke). Phase D is complete; Phase E1 (point-in-time foundation) is complete and Phase E2 (dataset + quality commands) is implemented (independent review pending).** D1
 > (schema v10) built the
 > typed provider-capability system, the four provider clients over a shared
 > GET-only base, the tightened `http_policy` allow-lists, and the evidence-backed
@@ -128,7 +128,7 @@ canonical matching.
 > persisted NBA ingestion or historical backfill has been performed. D4 weather
 > ingestion code is complete at schema v14 and its controlled live NWS/Open-Meteo
 > current-forecast gate has passed (station observations, historical forecasts, and
-> reanalysis remain mocked/offline verified); D5A deterministic canonical + official-game matching is complete (mocked/offline); D5B1 sportsbook + D5B2 Kalshi market matching complete (schema v16; mocked/offline plus a bounded public-contract audit). Phase D is complete; Phase E1 (point-in-time foundation) is complete and Phase E2 has not started.**
+> reanalysis remain mocked/offline verified); D5A deterministic canonical + official-game matching is complete (mocked/offline); D5B1 sportsbook + D5B2 Kalshi market matching complete (schema v16; mocked/offline plus a bounded public-contract audit). Phase D is complete; Phase E1 (point-in-time foundation) is complete and Phase E2 (dataset + quality commands) is implemented (independent review pending).**
 
 Companion documents: `PHASE_D_PROVIDER_DECISIONS.md`, `DATA_ARCHITECTURE.md`,
 `POINT_IN_TIME_DATA.md`, `ENTITY_MATCHING.md`, `DATA_FOUNDATION_PLAN.md`.
@@ -832,7 +832,7 @@ Model column = recommended driver.
 > scratch database byte-for-byte unchanged and removed) have passed. NWS station
 > observations, Open-Meteo historical forecasts, and reanalysis remain
 > mocked/offline verified. No persisted weather ingestion or weather backfill has
-> been performed. D5A deterministic canonical + official-game matching is complete (mocked/offline); D5B1 sportsbook + D5B2 Kalshi market matching complete (schema v16; mocked/offline plus a bounded public-contract audit). Phase D is complete; Phase E1 (point-in-time foundation) is complete and Phase E2 has not started.**
+> been performed. D5A deterministic canonical + official-game matching is complete (mocked/offline); D5B1 sportsbook + D5B2 Kalshi market matching complete (schema v16; mocked/offline plus a bounded public-contract audit). Phase D is complete; Phase E1 (point-in-time foundation) is complete and Phase E2 (dataset + quality commands) is implemented (independent review pending).**
 
 - **Provider:** **NWS** primary (US, no key); **Open-Meteo** secondary + the
   historical-forecast/archive (no key). **No paid weather key at D1/D4.** Open-Meteo
@@ -882,7 +882,7 @@ Model column = recommended driver.
 
 > **Status: D5 complete at schema v16 — D5A + D5B1 sportsbook + D5B2 Kalshi
 > matching, each independently reviewed (mocked/offline plus a bounded public
-> Kalshi contract audit and parser smoke); Phase E1 (point-in-time foundation) is complete and Phase E2 has not started.** D5A shipped as the
+> Kalshi contract audit and parser smoke); Phase E1 (point-in-time foundation) is complete and Phase E2 (dataset + quality commands) is implemented (independent review pending).** D5A shipped as the
 > `sports_quant/matching/` package: deterministic team / player / venue resolvers
 > (exact-provider-id 1.00 / exact-alias 0.99 / normalized-scoped 0.95 / unscoped
 > 0.90), a venue-aware `game_date_local` helper (actual-venue tz → provider local
@@ -931,7 +931,7 @@ Model column = recommended driver.
 > `provider_*_references.*_id` link is not by itself PIT-safe (Phase E must consult
 > the decision timeline). **D5B1 sportsbook matching and D5B2 Kalshi
 > event/supported game-winner market matching are complete and independently
-> reviewed at schema version 16; Phase E1 (point-in-time foundation) is complete and Phase E2 has not started.**
+> reviewed at schema version 16; Phase E1 (point-in-time foundation) is complete and Phase E2 (dataset + quality commands) is implemented (independent review pending).**
 >
 > **D5A follow-up repair (season / slate / knowledge-time / link integrity).**
 > Season validity is now **league-specific** (`matching/season.py`): MLB uses the
@@ -1062,7 +1062,7 @@ Model column = recommended driver.
 > audit + sanitized fixtures (`matching/tests/kalshi_fixtures.py`); parser
 > versions are golden-pinned so a provider change breaks loudly. Full suite:
 > 1315 passed / 1 skipped (Phase D). Schema remains v16; no d017. (Phase E1 later
-> adds the `sports_quant/pit/` suite; the current full-suite total is 1385 passed
+> adds the `sports_quant/pit/` + `sports_quant/quality/` suites; the current full-suite total is 1422 passed
 > / 1 skipped.)
 >
 > **D5B1 correctness repair (season / local-slate / conflict / outcome / DQ).**

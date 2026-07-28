@@ -1716,6 +1716,23 @@ def main(argv: Optional[list[str]] = None) -> int:
     review.add_argument("--db", dest="database_path", type=Path, default=None, metavar="PATH")
     review.add_argument("--json", dest="as_json", action="store_true", help="Machine-readable output")
 
+    status = sub.add_parser(
+        "data-status", help="Offline read-only corpus status report (E2)")
+    status.add_argument("--league", choices=["mlb", "nba"], default=None)
+    status.add_argument("--since", dest="since", default=None, metavar="YYYY-MM-DD")
+    status.add_argument("--db", dest="database_path", type=Path, default=None, metavar="PATH")
+    status.add_argument("--json", dest="as_json", action="store_true", help="Machine-readable output")
+
+    dq = sub.add_parser(
+        "data-quality", help="Offline point-in-time corpus quality report (E2)")
+    dq.add_argument("--league", choices=["mlb", "nba"], default=None)
+    dq.add_argument("--rule", dest="rule_code", default=None, metavar="CODE")
+    dq.add_argument("--review", action="store_true", help="Group pending manual reviews")
+    dq.add_argument("--fail-on", dest="fail_on", choices=["blocking", "issue", "note"],
+                    default="blocking", help="Exit 1 when a finding at/above this severity exists")
+    dq.add_argument("--db", dest="database_path", type=Path, default=None, metavar="PATH")
+    dq.add_argument("--json", dest="as_json", action="store_true", help="Machine-readable output")
+
     args = parser.parse_args(argv)
 
     if args.command == "provider-audit":
@@ -1938,6 +1955,20 @@ def main(argv: Optional[list[str]] = None) -> int:
         except ReadOnlyStartupError as exc:
             print(str(exc))
             return 2
+
+    if args.command == "data-status":
+        from .status import run_data_status
+        return run_data_status(
+            league=args.league, since=args.since, database_path=args.database_path,
+            as_json=args.as_json,
+        )
+
+    if args.command == "data-quality":
+        from .quality.runner import run_data_quality
+        return run_data_quality(
+            league=args.league, rule_code=args.rule_code, review=args.review,
+            fail_on=args.fail_on, database_path=args.database_path, as_json=args.as_json,
+        )
 
     parser.error(f"unknown command: {args.command}")
     return 2  # unreachable; parser.error raises SystemExit

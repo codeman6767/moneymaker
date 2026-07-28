@@ -1234,7 +1234,9 @@ sports_quant/
                           #   independently reviewed): true read-only URI, content-hash fail-closed
                           #   ties, feature-column allowlists, positive-allowlist SQL grammar,
                           #   games status+scheduled_start as-of, review-gated identity;
-                          #   dataset.py = GameStateDataset row builder (Phase E2, not started)
+                          #   dataset.py = historical row builder (E2 implemented, review pending)
+◧ quality/                # rules.py, report.py, runner.py (E2): corpus PIT quality
+                          #   grading; data-status + data-quality CLI (offline, read-only)
 ```
 
 `hashing.py` was not needed: `canonical_json` is imported directly from
