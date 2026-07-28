@@ -541,10 +541,11 @@ missing data nobody notices.
 > rewrite an earlier answer). Title orientation is honoured: an `A at B` title
 > must match the ticker's away/home (a reversed `at` is rejected + review-flagged);
 > `A vs B` stays an unordered set match. When `no_sub_title` is present it must
-> name a **game participant** (the current public Kalshi contract sets it equal to
-> the Yes-subject team, verified by the live audit — never an unrelated team); an
-> unresolved or non-participant `no_sub_title` is rejected. When absent, both
-> binary participants are already proven by the authoritative ticker + rules. An
+> resolve to the **Yes-subject team** — the audited current public Kalshi contract
+> sets `no_sub_title == yes_sub_title` for both KXMLBGAME and KXNBAGAME game-winner
+> markets — so an opposing-team, unrelated, or unresolved value is rejected as a
+> contract disagreement. When absent, both binary participants are already proven
+> by the authoritative ticker + rules. An
 > automated rules-hash invalidation flags the
 > decision for review via `flag_for_review` (sets `needs_manual_review=1`, leaves
 > `reviewed_by`/`reviewed_at` NULL) — it is never recorded as a completed human
@@ -594,6 +595,33 @@ missing data nobody notices.
 > post-change cutoff. The matched hash and link are never rewritten;
 > `flag_for_review` sets `needs_manual_review=1` and leaves `reviewed_by`/
 > `reviewed_at` NULL.
+>
+> **D5B2 final parser-validation repair (calendar / title+sub-title / `no_sub_title`).**
+> Three narrowly-scoped correctness fixes: **(1) Real calendar validation.** Both
+> the ticker (`_parse_date_code`) and natural-language rules (`_parse_nl_date`)
+> dates now share one `datetime.date` validator, so leap days are accepted only in
+> leap years (Feb 29 2024 ok, 2025 rejected; ticker `24FEB29` ok, `25FEB29`
+> rejected), and April 31 / June 31 / Feb 30 / day 0 / impossible months are
+> rejected — replacing a hand-kept days-per-month table that hard-coded Feb=29 for
+> every year. The two-digit ticker year keeps its documented 2000–2099 reading.
+> **(2) Independent title *and* sub-title validation.** `_title_agrees` now checks
+> **every supplied pair-identity field** (the event title *and* its pair sub-title,
+> e.g. the audited `AZ vs PIT (Jul 27)` — a trailing decorative parenthetical is
+> stripped) against the ticker; each ordered `A at B` must match away/home and each
+> unordered `A vs B` must match the team set. A supplied field that is malformed or
+> conflicts is reviewable — one valid field can no longer hide a conflicting or
+> malformed second field — and the decision evidence records which fields were
+> supplied and each kind. The market `subtitle`/`yes_sub_title`/`no_sub_title` are
+> single-team Yes/No labels (audited), validated by the Yes-orientation logic, never
+> as a pair. **(3) Exact `no_sub_title` convention.** The bounded audit found that
+> both KXMLBGAME and KXNBAGAME game-winner markets set `no_sub_title` equal to the
+> **Yes-subject** team (`no_sub_title == yes_sub_title`), so a supplied
+> `no_sub_title` must resolve to the ticker Yes team; an opposing-team, unrelated,
+> or unresolved value is a contract disagreement and is rejected (no "either
+> participant" shortcut). Absent `no_sub_title` stays acceptable because the ticker
+> + authoritative rules already prove both binary participants; `yes_sub_title`,
+> `no_sub_title`, the market ticker suffix, and the rules Yes subject must all be
+> mutually consistent.
 
 Hardest of the three, because Kalshi identifies markets by ticker and prose
 rather than by structured team fields.

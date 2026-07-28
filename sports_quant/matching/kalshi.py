@@ -264,9 +264,12 @@ class MatchKalshiService:
         if teams is None:
             return
 
-        # Title cross-check: the ticker and title teams (and 'at' orientation) agree.
-        title_kind = self._title_agrees(event.title, event.sub_title, teams, league_id, season,
-                                        "kalshi_event", kev, event, result)
+        # Title cross-check: the ticker teams (and 'at' orientation) must agree with
+        # EVERY supplied pair-identity field -- the event title and its pair
+        # sub-title are validated independently (task §3).
+        title_kind = self._title_agrees(
+            [("title", event.title), ("sub_title", event.sub_title)], teams, league_id, season,
+            "kalshi_event", kev, event, result)
         if title_kind is None:
             return
 
@@ -416,8 +419,12 @@ class MatchKalshiService:
                                    result)
         if teams is None:
             return
-        title_kind = self._title_agrees(market.title, market.subtitle, teams, league_id, season,
-                                        "kalshi_market", kmk, market, result)
+        # Only the market TITLE is a pair-identity field. The market
+        # subtitle/yes_sub_title/no_sub_title are single-team Yes/No labels
+        # (audited), validated by the Yes-orientation logic below, never as a pair.
+        title_kind = self._title_agrees(
+            [("title", market.title)], teams, league_id, season,
+            "kalshi_market", kmk, market, result)
         if title_kind is None:
             return
 
@@ -493,14 +500,21 @@ class MatchKalshiService:
                 and pev.local_clock != rules.local_clock:
             reject("DQ-KAL-RULES-001", "rules scheduled clock disagrees with the ticker clock")
             return None, None, None
-        # `no_sub_title`, when present, must resolve to a game participant (current
-        # public Kalshi sets it to the Yes-subject team, not the opponent); an
-        # unresolved or unrelated team is rejected. Absent is acceptable because
-        # the authoritative ticker + rules already prove both binary participants.
+        # `no_sub_title`, when present, must repeat the YES-subject team. The
+        # bounded public audit found this exact convention for BOTH KXMLBGAME and
+        # KXNBAGAME game-winner markets (`no_sub_title == yes_sub_title`, the market
+        # subject), so an opposing-team, unrelated, or unresolved value is a
+        # contract disagreement and is rejected -- never accepted as "either
+        # participant". Absent is acceptable because the authoritative ticker +
+        # rules already prove both binary participants. If a future verified
+        # response shows a different (e.g. opposing-team) convention, encode it as a
+        # new fixture-backed parser version rather than loosening this check.
         if market.no_sub_title:
             no_id = self._resolve_name(market.no_sub_title, league_id, season)
-            if no_id is None or no_id not in (teams.away_id, teams.home_id):
-                reject("DQ-KAL-RULES-001", "no_sub_title does not name a game participant")
+            if no_id is None or no_id != yes_from_ticker:
+                reject("DQ-KAL-RULES-001",
+                       "no_sub_title does not repeat the Yes-subject team (audited "
+                       "KXMLBGAME/KXNBAGAME convention)")
                 return None, None, None
         local_clock = pev.local_clock if pev.local_clock is not None else rules.local_clock
         return yes_from_ticker, local_clock, rules.tz_abbrev
@@ -611,48 +625,67 @@ class MatchKalshiService:
         return _TeamsResolved(away_id=away_id, home_id=home_id,
                               by_code={away_code: away_id, home_code: home_id})
 
-    def _title_agrees(self, title, subtitle, teams, league_id, season, etype, entity_id, event,
+    def _title_agrees(self, fields, teams, league_id, season, etype, entity_id, event,
                       result):  # type: ignore[no-untyped-def]
-        """Cross-check the ticker teams against the title, honouring orientation.
+        """Cross-check the ticker teams against EVERY supplied pair-identity field.
 
-        Returns ``'ordered'`` (an ``A at B`` title whose away/home agree with the
-        ticker), ``'unordered'`` (a valid ``A vs B`` set match), or ``None`` when
-        the title is absent/one-sided/reversed/mismatched (rejected + review). An
-        ``at`` title with reversed away/home is a real orientation error and is
-        rejected, never silently reduced to an unordered set."""
+        ``fields`` is an ordered list of ``(name, text)`` pair-identity fields
+        (title, and for events the audited pair sub-title). Each SUPPLIED field is
+        validated independently against the ticker: an ordered ``A at B`` must match
+        the ticker away/home; an unordered ``A vs B`` must match the team set. A
+        supplied field that is malformed (names no clear pair) or that conflicts is
+        rejected + review-flagged -- one valid field can never hide a conflicting or
+        malformed second field. An absent/empty field is simply not supplied. At
+        least one field must name a valid pair. Because every supplied field is
+        checked against the same ticker teams, all supplied fields agree with each
+        other and a reversed ordered field is already rejected, so their
+        orientations cannot silently contradict. Returns a descriptor of which
+        fields were supplied and each kind (e.g. ``title=unordered;sub_title=ordered``)
+        for the decision evidence, or ``None`` on any rejection.
 
-        parsed = kp.parse_title_teams(title)
-        if not isinstance(parsed, kp.TitleTeams):
-            sub = kp.parse_title_teams(subtitle)
-            if isinstance(sub, kp.TitleTeams):
-                parsed = sub
-        if not isinstance(parsed, kp.TitleTeams):
-            reason = "title absent" if parsed is None else parsed.reason
-            self._dq(result, "issue", "DQ-KAL-TITLE-001", etype, entity_id, event,
-                     f"title does not name a clear game pair: {reason}")
-            self._record(result, etype, entity_id, "rejected", "title_unresolved", 0.0, None, [],
-                         reason=f"title unresolved: {reason}", review=True)
-            return None
-        if parsed.away_name is not None and parsed.home_name is not None:
-            # Ordered `A at B`: away/home must match the ticker's away/home.
-            away = self._resolve_name(parsed.away_name, league_id, season)
-            home = self._resolve_name(parsed.home_name, league_id, season)
-            if away != teams.away_id or home != teams.home_id:
+        The Kalshi market ``subtitle``/``yes_sub_title``/``no_sub_title`` are
+        single-team Yes/No labels (audited), NOT pair fields, so they are validated
+        by the Yes-orientation logic, never passed here as a pair."""
+
+        checked: dict[str, str] = {}
+        for name, text in fields:
+            parsed = kp.parse_title_teams(text)
+            if parsed is None:
+                continue  # field absent/empty -> not supplied
+            if isinstance(parsed, kp.ParseError):
                 self._dq(result, "issue", "DQ-KAL-TITLE-001", etype, entity_id, event,
-                         "ordered 'at' title orientation disagrees with the ticker away/home")
-                self._record(result, etype, entity_id, "rejected", "conflict", 0.0, None, [],
-                             reason="ticker/title orientation disagreement", review=True)
+                         f"{name} does not name a clear game pair: {parsed.reason}")
+                self._record(result, etype, entity_id, "rejected", "title_unresolved", 0.0, None,
+                             [], reason=f"{name} unresolved: {parsed.reason}", review=True)
                 return None
-            return "ordered"
-        # Unordered `A vs B`: only the team SET must match; no orientation claimed.
-        title_ids = {self._resolve_name(n, league_id, season) for n in parsed.names}
-        if None in title_ids or title_ids != {teams.away_id, teams.home_id}:
+            if parsed.away_name is not None and parsed.home_name is not None:
+                # Ordered `A at B`: away/home must match the ticker's away/home.
+                away = self._resolve_name(parsed.away_name, league_id, season)
+                home = self._resolve_name(parsed.home_name, league_id, season)
+                if away != teams.away_id or home != teams.home_id:
+                    self._dq(result, "issue", "DQ-KAL-TITLE-001", etype, entity_id, event,
+                             f"ordered 'at' {name} orientation disagrees with the ticker away/home")
+                    self._record(result, etype, entity_id, "rejected", "conflict", 0.0, None, [],
+                                 reason=f"ticker/{name} orientation disagreement", review=True)
+                    return None
+                checked[name] = "ordered"
+            else:
+                # Unordered `A vs B`: only the team SET must match; no orientation.
+                ids = {self._resolve_name(n, league_id, season) for n in parsed.names}
+                if None in ids or ids != {teams.away_id, teams.home_id}:
+                    self._dq(result, "issue", "DQ-KAL-TITLE-001", etype, entity_id, event,
+                             f"ticker and {name} team sets disagree")
+                    self._record(result, etype, entity_id, "rejected", "conflict", 0.0, None, [],
+                                 reason=f"ticker/{name} team disagreement", review=True)
+                    return None
+                checked[name] = "unordered"
+        if not checked:
             self._dq(result, "issue", "DQ-KAL-TITLE-001", etype, entity_id, event,
-                     "ticker and title team sets disagree")
-            self._record(result, etype, entity_id, "rejected", "conflict", 0.0, None, [],
-                         reason="ticker/title team disagreement", review=True)
+                     "no title or sub-title names a clear game pair")
+            self._record(result, etype, entity_id, "rejected", "title_unresolved", 0.0, None, [],
+                         reason="title absent", review=True)
             return None
-        return "unordered"
+        return ";".join(f"{k}={v}" for k, v in sorted(checked.items()))
 
     # -- canonical game matching (tiers §9/§11) ------------------------------ #
     def _match_game(self, league_id, teams, date_local, *, local_clock, tz_abbrev, cutoff,

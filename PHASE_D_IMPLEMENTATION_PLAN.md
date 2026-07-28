@@ -51,7 +51,9 @@ canonical matching.
 > historical forecasts and Open-Meteo reanalysis remain mocked/offline verified, not
 > live-ingestor verified. No persisted weather ingestion or weather backfill has been
 > performed. D5A deterministic canonical + official-game matching is complete
-> (mocked/offline); D5B market matching not started.** D1
+> (mocked/offline); D5B1 sportsbook + D5B2 Kalshi market matching complete
+> (schema v16, `d016_kalshi_matching`; mocked/offline plus a bounded public-contract
+> audit and parser smoke). Phase D is complete; Phase E has not started.** D1
 > (schema v10) built the
 > typed provider-capability system, the four provider clients over a shared
 > GET-only base, the tightened `http_policy` allow-lists, and the evidence-backed
@@ -124,7 +126,7 @@ canonical matching.
 > persisted NBA ingestion or historical backfill has been performed. D4 weather
 > ingestion code is complete at schema v14 and its controlled live NWS/Open-Meteo
 > current-forecast gate has passed (station observations, historical forecasts, and
-> reanalysis remain mocked/offline verified); D5A deterministic canonical + official-game matching is complete (mocked/offline); D5B market matching has not started.**
+> reanalysis remain mocked/offline verified); D5A deterministic canonical + official-game matching is complete (mocked/offline); D5B1 sportsbook + D5B2 Kalshi market matching complete (schema v16; mocked/offline plus a bounded public-contract audit). Phase D is complete; Phase E has not started.**
 
 Companion documents: `PHASE_D_PROVIDER_DECISIONS.md`, `DATA_ARCHITECTURE.md`,
 `POINT_IN_TIME_DATA.md`, `ENTITY_MATCHING.md`, `DATA_FOUNDATION_PLAN.md`.
@@ -828,7 +830,7 @@ Model column = recommended driver.
 > scratch database byte-for-byte unchanged and removed) have passed. NWS station
 > observations, Open-Meteo historical forecasts, and reanalysis remain
 > mocked/offline verified. No persisted weather ingestion or weather backfill has
-> been performed. D5A deterministic canonical + official-game matching is complete (mocked/offline); D5B market matching has not started.**
+> been performed. D5A deterministic canonical + official-game matching is complete (mocked/offline); D5B1 sportsbook + D5B2 Kalshi market matching complete (schema v16; mocked/offline plus a bounded public-contract audit). Phase D is complete; Phase E has not started.**
 
 - **Provider:** **NWS** primary (US, no key); **Open-Meteo** secondary + the
   historical-forecast/archive (no key). **No paid weather key at D1/D4.** Open-Meteo

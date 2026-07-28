@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import date as _date
 from typing import Optional
 
 from ..db.normalize import normalized_key
@@ -99,8 +100,20 @@ _FULL_MONTHS = {
     "JANUARY": 1, "FEBRUARY": 2, "MARCH": 3, "APRIL": 4, "MAY": 5, "JUNE": 6,
     "JULY": 7, "AUGUST": 8, "SEPTEMBER": 9, "OCTOBER": 10, "NOVEMBER": 11, "DECEMBER": 12,
 }
-_DAYS_IN_MONTH = {1: 31, 2: 29, 3: 31, 4: 30, 5: 31, 6: 30,
-                  7: 31, 8: 31, 9: 30, 10: 31, 11: 30, 12: 31}
+def _iso_date(year: int, month: int, day: int) -> Optional[str]:
+    """The single deterministic calendar validator for every Kalshi date.
+
+    Returns ``YYYY-MM-DD`` when ``(year, month, day)`` is a real calendar date
+    (``datetime.date`` enforces leap years, per-month lengths, day >= 1, and month
+    1-12), else ``None``. Used identically by the ticker (:func:`_parse_date_code`)
+    and natural-language rules (:func:`_parse_nl_date`) parsers so they can never
+    disagree -- no hand-maintained days-per-month table (a static Feb=29 wrongly
+    accepted Feb 29 in non-leap years)."""
+
+    try:
+        return _date(year, month, day).isoformat()
+    except ValueError:
+        return None
 
 _MLB_EVENT_RE = re.compile(
     r"^KXMLBGAME-(?P<date>\d{2}[A-Z]{3}\d{2})(?P<clock>\d{4})(?P<teams>[A-Z]{4,10})$")
@@ -120,10 +133,8 @@ def _parse_date_code(code: str) -> Optional[str]:
     month = _MONTHS.get(mon)
     if month is None:
         return None
-    day = int(dd)
-    if not (1 <= day <= _DAYS_IN_MONTH[month]):
-        return None
-    return f"20{yy}-{month:02d}-{day:02d}"
+    # Two-digit ticker year is the documented 2000-2099 interpretation.
+    return _iso_date(2000 + int(yy), month, int(dd))
 
 
 def _parse_ticker_clock(code: str) -> Optional[str]:
@@ -223,16 +234,19 @@ class TitleTeams:
 
 
 # An optional ``Game N:`` (or ``Game N -``) prefix, then ``A at B`` (ordered) or
-# ``A vs B`` / ``A vs. B`` (unordered). A trailing ``Winner?`` (market titles) is
-# stripped. The series contract documents ``at`` as away-then-home.
+# ``A vs B`` / ``A vs. B`` (unordered). A trailing ``Winner?`` (market titles) and a
+# trailing decorative parenthetical (the audited event sub-title ``AZ vs PIT
+# (Jul 27)``) are stripped. The series contract documents ``at`` as away-then-home.
 _GAME_PREFIX_RE = re.compile(r"^\s*game\s+\d+\s*[:\-]\s*", re.IGNORECASE)
 _TITLE_SUFFIX_RE = re.compile(r"\s+winner\??\s*$", re.IGNORECASE)
+_TITLE_PAREN_RE = re.compile(r"\s*\([^)]*\)\s*$")
 _TITLE_AT_RE = re.compile(r"^\s*(?P<a>.+?)\s+at\s+(?P<b>.+?)\s*$", re.IGNORECASE)
 _TITLE_VS_RE = re.compile(r"^\s*(?P<a>.+?)\s+vs\.?\s+(?P<b>.+?)\s*$", re.IGNORECASE)
 
 
 def _strip_title(text: str) -> str:
-    return _TITLE_SUFFIX_RE.sub("", _GAME_PREFIX_RE.sub("", text.strip()))
+    body = _TITLE_SUFFIX_RE.sub("", _GAME_PREFIX_RE.sub("", text.strip()))
+    return _TITLE_PAREN_RE.sub("", body).strip()
 
 
 def parse_title_teams(text: Optional[str]) -> TitleTeams | ParseError | None:
@@ -304,10 +318,7 @@ def _parse_nl_date(text: str) -> Optional[str]:
     month = _MONTHS.get(mon[:3]) if mon[:3] in _MONTHS else _FULL_MONTHS.get(mon)
     if month is None:
         return None
-    day, year = int(m.group(2)), int(m.group(3))
-    if not (1 <= day <= _DAYS_IN_MONTH[month]):
-        return None
-    return f"{year:04d}-{month:02d}-{day:02d}"
+    return _iso_date(int(m.group(3)), month, int(m.group(2)))
 
 
 def _parse_nl_clock(text: str) -> Optional[str]:

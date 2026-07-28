@@ -15,9 +15,11 @@ from sports_quant.db.repositories.matching import SqliteMatchingRepository
 from sports_quant.matching import kalshi_parse as kp
 from sports_quant.matching.kalshi import _local_clock_to_utc
 
-from .conftest import seed_kalshi_event, set_kalshi_market_rules
+from . import kalshi_fixtures as fx
+from .conftest import seed_kalshi_event, seed_kalshi_market, set_kalshi_market_rules
 from .test_phase_d5a_matching import _create_canonical
 from .test_phase_d5b2_kalshi import (
+    _MLB_EVENT,
     _MLB_RULES,
     KALSHI,
     MLB_SERIES,
@@ -232,3 +234,153 @@ def test_disagreeing_rules_change_blocks_historical_readiness(conn: sqlite3.Conn
     assert not repo.is_kalshi_market_orientation_approved(kmk)  # current
     assert not repo.is_kalshi_market_orientation_approved(
         kmk, as_of="2030-01-01T00:00:00.000000Z")  # historical, after the change
+
+
+# --------------------------------------------------------------------------- #
+# §2 real calendar-date validation (ticker + rules share ONE validator)
+# --------------------------------------------------------------------------- #
+def test_leap_day_accepted_only_in_leap_years() -> None:
+    assert kp._parse_nl_date("Feb 29, 2024") == "2024-02-29"   # leap year
+    assert kp._parse_nl_date("Feb 29, 2025") is None           # non-leap
+    assert kp._parse_date_code("24FEB29") == "2024-02-29"      # ticker leap year
+    assert kp._parse_date_code("25FEB29") is None              # ticker non-leap
+
+
+def test_impossible_calendar_dates_rejected() -> None:
+    for code in ("26APR31", "26JUN31", "26FEB30", "26JUL00"):  # Apr/Jun 31, Feb 30, day 0
+        assert kp._parse_date_code(code) is None, code
+    for nl in ("Apr 31, 2026", "Jun 31, 2026", "Feb 30, 2026", "Jul 0, 2026"):
+        assert kp._parse_nl_date(nl) is None, nl
+
+
+def test_valid_dates_and_month_names_accepted() -> None:
+    assert kp._parse_date_code("26DEC31") == "2026-12-31"
+    assert kp._parse_nl_date("December 31, 2026") == "2026-12-31"   # full month name
+    assert kp._parse_nl_date("Dec 31, 2026") == "2026-12-31"       # abbreviation
+
+
+def test_ticker_and_rules_date_validators_agree() -> None:
+    # (ticker YYMONDD, natural-language date) must yield the SAME ISO or both None.
+    cases = [
+        ("24FEB29", "Feb 29, 2024", "2024-02-29"),
+        ("25FEB29", "Feb 29, 2025", None),
+        ("26APR31", "Apr 31, 2026", None),
+        ("26DEC31", "Dec 31, 2026", "2026-12-31"),
+        ("26JAN01", "Jan 1, 2026", "2026-01-01"),
+        ("99DEC31", "Dec 31, 2099", "2099-12-31"),  # documented 2000-2099 window
+    ]
+    for code, nl, want in cases:
+        assert kp._parse_date_code(code) == want, code
+        assert kp._parse_nl_date(nl) == want, nl
+
+
+# --------------------------------------------------------------------------- #
+# §3 title AND subtitle validated independently (event has both pair fields)
+# --------------------------------------------------------------------------- #
+_T_TITLE = "San Diego Padres vs Los Angeles Dodgers"   # unordered, agrees w/ ticker
+_T_ORDERED = "San Diego Padres at Los Angeles Dodgers"  # ordered away=SD home=LAD (ok)
+_T_REVERSED = "Los Angeles Dodgers at San Diego Padres"  # reversed orientation
+_T_ONE_TEAM = "San Diego Padres"                        # malformed (one team)
+_T_UNRELATED = "New York Yankees vs Boston Red Sox"      # different teams
+
+
+def _event_result(conn: sqlite3.Connection, *, title: str, sub_title):  # type: ignore[no-untyped-def]
+    _dodgers_home_setup(conn)
+    seed_kalshi_event(conn, event_ticker=_MLB_EVENT, series_ticker=MLB_SERIES,
+                      title=title, sub_title=sub_title)
+    return _kal(conn, series_ticker=MLB_SERIES)
+
+
+def test_title_only_valid_accepts(conn: sqlite3.Connection) -> None:
+    r = _event_result(conn, title=_T_TITLE, sub_title=None)
+    assert r.counters.events_accepted == 1
+
+
+def test_subtitle_only_valid_accepts(conn: sqlite3.Connection) -> None:
+    # Title absent (empty) -> the pair sub-title alone proves the teams.
+    r = _event_result(conn, title="", sub_title="SD vs LAD (Jul 4)")  # decorated codes
+    assert r.counters.events_accepted == 1
+
+
+def test_matching_title_and_subtitle_accepts(conn: sqlite3.Connection) -> None:
+    r = _event_result(conn, title=_T_TITLE, sub_title="SD vs LAD (Jul 4)")
+    assert r.counters.events_accepted == 1
+
+
+def test_ordered_title_plus_equivalent_unordered_subtitle_accepts(
+        conn: sqlite3.Connection) -> None:
+    r = _event_result(conn, title=_T_ORDERED, sub_title=_T_TITLE)
+    assert r.counters.events_accepted == 1
+
+
+def test_valid_title_reversed_subtitle_rejected(conn: sqlite3.Connection) -> None:
+    r = _event_result(conn, title=_T_TITLE, sub_title=_T_REVERSED)
+    assert r.counters.events_accepted == 0 and r.counters.events_rejected >= 1
+
+
+def test_reversed_title_valid_subtitle_rejected(conn: sqlite3.Connection) -> None:
+    r = _event_result(conn, title=_T_REVERSED, sub_title=_T_TITLE)
+    assert r.counters.events_accepted == 0 and r.counters.events_rejected >= 1
+
+
+def test_valid_title_unrelated_subtitle_rejected(conn: sqlite3.Connection) -> None:
+    r = _event_result(conn, title=_T_TITLE, sub_title=_T_UNRELATED)
+    assert r.counters.events_accepted == 0 and r.counters.events_rejected >= 1
+
+
+def test_two_ordered_fields_conflicting_orientation_rejected(conn: sqlite3.Connection) -> None:
+    r = _event_result(conn, title=_T_ORDERED, sub_title=_T_REVERSED)
+    assert r.counters.events_accepted == 0 and r.counters.events_rejected >= 1
+
+
+def test_malformed_supplied_subtitle_is_reviewable_not_ignored(conn: sqlite3.Connection) -> None:
+    # A supplied one-team sub-title is reviewable even though the title is valid.
+    r = _event_result(conn, title=_T_TITLE, sub_title=_T_ONE_TEAM)
+    assert r.counters.events_accepted == 0 and r.counters.events_rejected >= 1
+
+
+# --------------------------------------------------------------------------- #
+# §4/§6 audited no_sub_title convention: repeats the YES team (MLB + NBA)
+# --------------------------------------------------------------------------- #
+def test_mlb_no_sub_title_opposing_team_rejected(conn: sqlite3.Connection) -> None:
+    # Yes team is the Dodgers (ticker suffix LAD); no_sub_title naming the OPPOSING
+    # participant (Padres) violates the audited convention and must reject.
+    _dodgers_home_setup(conn)
+    _seed_event_and_market(conn, no_sub="San Diego Padres")
+    r = _kal(conn, series_ticker=MLB_SERIES)
+    assert r.counters.markets_accepted == 0 and r.counters.markets_rejected >= 1
+
+
+def _seed_nba(conn: sqlite3.Connection, *, no_sub: str):  # type: ignore[no-untyped-def]
+    nyk = _team(conn, league="NBA", abbr="NYK", name="New York", code="NYK")
+    sas = _team(conn, league="NBA", abbr="SAS", name="San Antonio", code="SAS")
+    _create_canonical(conn, league_code="NBA", home_team_id=sas, away_team_id=nyk,
+                      scheduled_start="2026-06-14T00:00:00Z", game_date_local="2026-06-13",
+                      official_provider="balldontlie", official_game_key="NG1",
+                      decided_at="2026-06-01T00:00:00.000000Z")
+    kev = seed_kalshi_event(conn, event_ticker=fx.NBA_NYK_SAS.event_ticker,
+                            series_ticker=NBA_SERIES, title=fx.NBA_NYK_SAS.title)
+    seed_kalshi_market(conn, market_ticker=fx.NBA_NYK_SAS.market_ticker,
+                       event_ticker=fx.NBA_NYK_SAS.event_ticker, series_ticker=NBA_SERIES,
+                       kalshi_event_id=kev, title=fx.NBA_NYK_SAS.title,
+                       yes_sub_title=fx.NBA_NYK_SAS.yes_sub_title, no_sub_title=no_sub,
+                       rules_primary=fx.NBA_NYK_SAS.rules_primary)
+    return _kal(conn, series_ticker=NBA_SERIES)
+
+
+def test_nba_no_sub_title_equals_yes_accepted(conn: sqlite3.Connection) -> None:
+    r = _seed_nba(conn, no_sub="San Antonio")  # audited: == Yes-subject team
+    assert r.counters.markets_accepted == 1
+
+
+def test_nba_no_sub_title_opposing_team_rejected(conn: sqlite3.Connection) -> None:
+    r = _seed_nba(conn, no_sub="New York")  # opposing participant -> reject
+    assert r.counters.markets_accepted == 0 and r.counters.markets_rejected >= 1
+
+
+def test_yes_sub_title_disagreeing_with_ticker_rejected(conn: sqlite3.Connection) -> None:
+    # Mutual consistency: yes_sub_title must equal the ticker Yes subject.
+    _dodgers_home_setup(conn)
+    _seed_event_and_market(conn, yes_sub="San Diego Padres")  # ticker Yes = Dodgers
+    r = _kal(conn, series_ticker=MLB_SERIES)
+    assert r.counters.markets_accepted == 0 and r.counters.markets_rejected >= 1
