@@ -1230,7 +1230,8 @@ sports_quant/
 ◻                         #   + mlb_ingestor.py nba_ingestor.py weather_ingestor.py (Phase D)
 ◻ matching/               # teams.py, players.py, games.py, markets.py, decisions.py
                           #   (imports db/normalize.py -- one normalizer only)  (Phase D)
-◻ pit/                    # asof.py, dataset.py  (Phase E)
+◧ pit/                    # asof.py, registry.py, evaluation_only.py, models.py DONE (E1);
+                          #   dataset.py = GameStateDataset row builder (Phase E2)
 ```
 
 `hashing.py` was not needed: `canonical_json` is imported directly from

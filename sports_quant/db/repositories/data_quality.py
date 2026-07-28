@@ -111,6 +111,78 @@ class SqliteDataQualityRepository(Repository):
             )
         return [self._to_model(r) for r in rows]
 
+    def _filtered(
+        self,
+        *,
+        base_where: str,
+        base_params: list[object],
+        rule_code: Optional[str],
+        severity: Optional[str],
+        entity_type: Optional[str],
+        provider: Optional[str],
+        entity_id: Optional[str],
+        limit: int,
+    ) -> list[DataQualityIssue]:
+        clauses = [base_where]
+        params: list[object] = list(base_params)
+        for column, value in (
+            ("rule_code", rule_code), ("severity", severity), ("entity_type", entity_type),
+            ("provider", provider), ("entity_id", entity_id),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        where = " AND ".join(clauses)
+        params.append(limit)
+        rows = self._fetch_all(
+            f"SELECT {self._COLUMNS} FROM data_quality_issues WHERE {where} "  # noqa: S608
+            "ORDER BY detected_at, issue_id LIMIT ?",
+            tuple(params),
+        )
+        return [self._to_model(r) for r in rows]
+
+    def find_open(
+        self,
+        *,
+        rule_code: Optional[str] = None,
+        severity: Optional[str] = None,
+        entity_type: Optional[str] = None,
+        provider: Optional[str] = None,
+        entity_id: Optional[str] = None,
+        limit: int = 200,
+    ) -> list[DataQualityIssue]:
+        """Currently-open issues, filterable by rule/severity/entity/provider/id.
+
+        Deterministically ordered ``(detected_at, issue_id)``."""
+
+        return self._filtered(
+            base_where="resolved_at IS NULL", base_params=[], rule_code=rule_code,
+            severity=severity, entity_type=entity_type, provider=provider, entity_id=entity_id,
+            limit=limit)
+
+    def list_active_at(
+        self,
+        *,
+        as_of: str,
+        rule_code: Optional[str] = None,
+        severity: Optional[str] = None,
+        entity_type: Optional[str] = None,
+        provider: Optional[str] = None,
+        entity_id: Optional[str] = None,
+        limit: int = 200,
+    ) -> list[DataQualityIssue]:
+        """Issues that were ACTIVE at a historical cutoff (task §11): detected by
+        ``as_of`` and not yet resolved by ``as_of`` -- ``detected_at <= as_of AND
+        (resolved_at IS NULL OR resolved_at > as_of)``. Uses only the recorded
+        transaction-time timeline (never today's mutable resolution state applied
+        retroactively), so a resolution recorded after the cutoff still counts the
+        issue as active at that cutoff. Deterministically ordered."""
+
+        return self._filtered(
+            base_where="detected_at <= ? AND (resolved_at IS NULL OR resolved_at > ?)",
+            base_params=[as_of, as_of], rule_code=rule_code, severity=severity,
+            entity_type=entity_type, provider=provider, entity_id=entity_id, limit=limit)
+
     def count(self) -> int:
         return self._count("SELECT COUNT(*) FROM data_quality_issues")
 

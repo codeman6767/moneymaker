@@ -94,6 +94,7 @@ testpaths = [
     "sports_quant/db/tests",
     "sports_quant/ingest/tests",
     "sports_quant/matching/tests",
+    "sports_quant/pit/tests",
     "streaming/tests",
     "state/tests",
     "tracking/tests",

@@ -121,6 +121,24 @@ hides it.
 
 ---
 
+> **Phase E1 status — point-in-time access + leakage guards complete.**
+> Phase E1 point-in-time access and leakage-guard foundations are complete
+> (`sports_quant/pit/`, schema v16, no new migration). Every feature-facing
+> historical read requires an explicit UTC cutoff and uses transaction time,
+> never provider time or mutable current state. A fail-closed table registry
+> classifies every future dataset join as immutable, season-scoped,
+> as-of-filtered, evaluation-only, forbidden-current-state or unsupported.
+> Closing lines are structurally isolated in an evaluation-only module.
+> Sportsbook/Kalshi canonical links and orientations are visible historically
+> only through accepted decisions and DQ/review timelines valid at the cutoff.
+> Pregame weather requires a current forecast observed by cutoff with
+> `pit_eligible=1`. Adversarial fixtures prove **DQ-PIT-001 through DQ-PIT-011**,
+> including future results, stats, lineups, injuries, prices, joins, match
+> decisions and unsafe weather rows. The final `GameStateDataset` row builder,
+> and the data-status and data-quality commands, remain **Phase E2**. No feature
+> engineering, model training, live request, ingestion, backfill, recommendation
+> or execution work was performed.
+
 ## 3. As-of query pattern
 
 The canonical shape, implemented once in `sports_quant/pit/asof.py` and reused
@@ -249,7 +267,7 @@ complete historical snapshot; c008 retains only current + first provenance, so
 Phase E must read from the decision/DQ timelines and must not claim to reconstruct
 prior rules text/hash observations beyond that boundary |
 | Weather forecast-vs-actual kept distinct (leakage vector) | ◧ **D4 built (schema v14)** — `weather_snapshots.weather_kind` separates `current_forecast` / `station_observation` / `historical_forecast` / `reanalysis`; `observed_at` is never backdated to a model-run time; an explicit `pit_eligible` (1/0/NULL) is set (a station observation / reanalysis is never PIT-eligible; a stitched historical forecast whose availability is unproven is `pit_eligible=NULL` + a `DQ-WX-PIT-001` note). Phase E must gate pregame weather features on `weather_kind='current_forecast' AND observed_at ≤ cutoff AND pit_eligible=1` — never on the endpoint of origin, and never a reanalysis/observation row |
-| Full `pit/asof.py`, `pit/dataset.py`, adversarial leak fixtures | ◻ Phase E |
+| Full `pit/asof.py` + safe-join registry + evaluation-only isolation + adversarial leak fixtures | ✅ **E1 built (schema v16, no new migration)** — `sports_quant/pit/` ships the strict `Cutoff` type, the one canonical `latest_as_of` algorithm, the fail-closed table registry, feature-facing as-of accessors, `evaluation_only.closing_line_for_evaluation`, and adversarial fixtures proving **DQ-PIT-001..011**. `pit/dataset.py` (the `GameStateDataset` row builder) remains **E2** |
 
 `GameRepository.status_as_of()` is the first working instance of the §3
 pattern, and its tests already cover the DQ-PIT-004 shape: a status observed at
