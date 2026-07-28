@@ -25,6 +25,17 @@ month and build the corpus" design for strict-PIT *feature* rows. This section i
 authoritative and supersedes the earlier §3/§10 F1/F2 text where they conflict; the
 superseded parts below are annotated.
 
+> **Second review pass (at `44fcaf3`).** A follow-up independent offline review
+> re-traced the `observed_at` code path and re-audited the request/credit controls at
+> HEAD `44fcaf3` (no source changed since E2 — the ingest lane is docs-only across
+> `06e8c55` and `44fcaf3`) and **re-confirmed both blockers and every resolution
+> below verbatim**: `raw_exchange.py:75,105` still stamp
+> `received_at=datetime.now(timezone.utc)` on both the buffered and streaming HTTP
+> capture paths, and the E2 cutoff guard still excludes retrospectively-observed
+> schedules. This pass additionally added the optional **MLB-only scope analysis
+> (§13)**. No new code, migration, live request, or ingestion; schema remains v16;
+> the live pilot remains **unauthorized**.
+
 ### R.1 Knowledge-time finding — retrospective backfill cannot produce strict-PIT feature rows (CONFIRMED)
 
 `observed_at` is the wall-clock time this system *received the provider bytes*, and
@@ -691,8 +702,9 @@ justified against this baseline.
 - Created: `PHASE_F_RESEARCH_PLAN.md` (this file), `PHASE_F_FEATURE_CONTRACT.md`.
 - Phase E behavior unchanged; **no migration**; schema remains **v16**.
 - No feature, model, backfill, command, or recommendation output implemented.
-- No live provider request or persisted ingestion occurred during F0 **or during the
-  F0 independent review**.
+- No live provider request or persisted ingestion occurred during F0 **or during
+  either F0 independent-review pass** (findings re-confirmed at `44fcaf3`; §13 MLB-only
+  scope option added).
 
 ---
 
@@ -746,3 +758,74 @@ strict-PIT data.
 - **Stop immediately if:** any cap is hit, `provider-audit` fails, unexpected auth/
   tier errors occur, rejections exceed a threshold, or the scratch-DB isolation check
   fails.
+
+---
+
+## 13. Optional future scope: MLB-only (explicit option, NOT a decision)
+
+The project scope remains **MLB and NBA** (§0); the repository records no MLB-only
+decision, so this section is an **explicit scope option**, not a change. It exists so
+the consequences are understood if NBA is later deferred (e.g. to avoid the paid GOAT
+subscription until MLB proves the approach).
+
+### 13.1 BALLDONTLIE prerequisites that disappear
+- **Gate G2 (paid BALLDONTLIE GOAT subscription + `NBA_DATA_API_KEY` /
+  `NBA_DATA_TIER=goat`)** is no longer needed — this is the only strictly *paid,
+  user-action* data prerequisite in the MVP, so MLB-only removes the sole mandatory
+  purchase for corpus data.
+- The **NBA half of Gate G3** (verifying BALLDONTLIE historical depth/coverage) drops;
+  only MLB StatsAPI historical depth needs the F1B capability check.
+- NBA-specific licensing questions (BALLDONTLIE terms) drop; MLB StatsAPI licensing
+  (G4) still applies.
+
+### 13.2 Code and documentation that remain harmlessly dormant
+No code is removed. The following stays in the tree, compiled, typed, and tested, but
+is simply never invoked under an MLB-only run: `sports_quant/ingest/nba_ingestor.py`,
+`sports_quant/providers/balldontlie.py`, `sports_quant/ingest/hoopr_import.py`, the
+NBA repositories (`db/repositories/nba.py`: results/team-stats/player-stats/quarter-
+lines/plays/injuries), the NBA-specific schema tables (migrations `d012`/`d013`, which
+stay present and **empty** — schema still v16, no migration to remove them), NBA
+matching (Kalshi `KXNBAGAME` series), and the NBA branches of the probability feature/
+dataset scaffolding. Ingestion code only issues requests when its CLI command is run,
+so dormant NBA code incurs **zero** runtime, request, or credit cost.
+
+### 13.3 Can MLB progress independently?
+**Yes, fully.** The MLB lane depends only on MLB StatsAPI (keyless public), The Odds
+API (MLB odds), Kalshi (`KXMLBGAME`), and weather (Open-Meteo/NWS) — none of which
+touch BALLDONTLIE. `build_historical_dataset(conn, league="mlb")` and every downstream
+subphase are already league-parameterized, so the MLB corpus (forward strict-PIT +
+reconstructed research), features, baselines, calibration, EV, and backtest can
+complete end-to-end with no NBA data present.
+
+### 13.4 Effect of canceling NBA data access
+Canceling the GOAT subscription affects **only future NBA ingestion** (a BALLDONTLIE
+call would return `403` → handled as `TIER_RESTRICTED` / capability-unavailable, not a
+crash). It does **not** touch stored code, the schema, or any already-persisted data;
+NBA tables simply remain empty. No code deletion or migration is warranted — NBA can be
+resumed later by restoring access, with no repository change.
+
+### 13.5 Phase F gates that remain necessary for MLB-only
+- **G1 (historical odds):** still applies — MLB sportsbook EV needs PIT-timestamped
+  historical odds, which the current Odds API path cannot supply; else MLB sportsbook
+  EV is forward-only (Kalshi `KXMLBGAME` EV unaffected).
+- **PIT provenance (§R.1/R.4):** applies identically — retrospective MLB backfill is
+  **not** strict-PIT; the forward + reconstructed corpus split is unchanged.
+- **Licensing (G4):** MLB StatsAPI commercial/redistribution terms still need a
+  decision before a large backfill.
+- **Weather:** MLB is the weather-relevant league (outdoor venues); Open-Meteo
+  (CC-BY non-commercial) / NWS licensing and PIT-eligibility gates remain. (NBA is
+  indoor, so dropping NBA removes nothing here.)
+- **Request controls (F1A):** still required — a rich MLB month is ~1,350–1,800
+  requests with no per-run cap today. MLB StatsAPI is keyless, so the *credit-budget*
+  portion is not needed for MLB, but the hard **request** cap, budget-halt, true
+  no-network dry-run, resumability, and usage reporting are still mandatory before any
+  live MLB pilot.
+- **G5 (lineup/probable availability at T−60):** partially applies — MLB probable
+  pitchers and lineups are the relevant availability-gated families.
+
+### 13.6 Net
+MLB-only is a clean, reversible sequencing option that removes the only paid data
+prerequisite (GOAT) and the NBA capability/licensing checks, while leaving all NBA
+code/schema dormant and intact. It does **not** reduce the knowledge-time, PIT-
+provenance, historical-odds, licensing, weather, or request-control gates for MLB
+itself. Adopt it only if the repository is updated to record the decision.
