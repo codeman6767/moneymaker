@@ -7,6 +7,22 @@ must satisfy. It is a companion to `PHASE_F_RESEARCH_PLAN.md`; read that first.
 Schema remains **v16**. Nothing here is implemented during F0. Every rule below
 is a *requirement on future code*, not a description of current behavior.
 
+> **Corpus provenance (per `PHASE_F_RESEARCH_PLAN.md` §R).** The F0 independent
+> review established that ordinary retrospective backfill **cannot** produce strict
+> point-in-time feature rows (observations receive today's `observed_at`, which the
+> E2 cutoff guard excludes). Features therefore come from one of two corpora, and the
+> manifest **must** record which: (1) the **forward strict-PIT** corpus (honest
+> receipt `observed_at`; the only corpus valid for live-replay/deployment/economic
+> claims); or (2) the **reconstructed-research** corpus (retrospective, built under
+> conservative provider-documented availability rules, explicitly **non-PIT**, for
+> early baseline/feature research only). A feature family is reconstruction-eligible
+> **only** if it is a pure function of *prior completed games* with a documented
+> availability rule (families 1, 2, 5, 8, 11 below, and 12 only with a PIT-timestamped
+> odds source); the fast-changing same-day families (3, 6, 7, 9, 10, 13) are
+> reconstruction-ineligible. Add a `corpus_provenance` (`forward_pit` |
+> `reconstructed`) and, for reconstructed features, an `availability_rule` field to
+> the per-feature schema in §2.2.
+
 ---
 
 ## 1. Why a contract before code

@@ -1,16 +1,174 @@
 # Phase F — Research & Recommendation Plan (authoritative)
 
-**Status:** F0 planning complete. **No** Phase F implementation, corpus backfill,
-feature engineering, model training, calibration, simulation, EV evaluation,
-backtesting, or recommendation output has started. Schema remains **v16**. No live
-provider request or persisted ingestion occurred while producing this plan.
+**Status:** F0 planning complete **and independently reviewed** (see §R). **No**
+Phase F implementation, corpus backfill, feature engineering, model training,
+calibration, simulation, EV evaluation, backtesting, or recommendation output has
+started. Schema remains **v16**. No live provider request or persisted ingestion has
+occurred. **The live F1 pilot is NOT authorized**; the next executable work is
+**F1A** (build request/credit controls), reviewed before any **F1B** live pilot.
 
 **Baseline commit:** `631377a` (Phase E complete and independently reviewed; CI #54
-green). This document is the authoritative roadmap for turning the completed
-point-in-time (PIT) data foundation into a rigorously validated, **pregame**
-MLB/NBA game-winner recommendation model.
+green); F0 delivered at `06e8c55` and reviewed here. This document is the
+authoritative roadmap for turning the completed point-in-time (PIT) data foundation
+into a rigorously validated, **pregame** MLB/NBA game-winner recommendation model.
 
 Companion: `PHASE_F_FEATURE_CONTRACT.md` (feature registry + manifest contract).
+
+---
+
+## R. F0 independent-review outcome (authoritative)
+
+An independent offline review of F0 (at `06e8c55`) audited the point-in-time
+semantics of the proposed historical pilot and the F1 request/credit controls. It
+found **two blockers** that invalidate the original F1→F2 "download a historical
+month and build the corpus" design for strict-PIT *feature* rows. This section is
+authoritative and supersedes the earlier §3/§10 F1/F2 text where they conflict; the
+superseded parts below are annotated.
+
+### R.1 Knowledge-time finding — retrospective backfill cannot produce strict-PIT feature rows (CONFIRMED)
+
+`observed_at` is the wall-clock time this system *received the provider bytes*, and
+it is never backdated. Exact code path:
+
+- `sports_quant/providers/raw_exchange.py:75,105` — `received_at =
+  datetime.now(timezone.utc)` at HTTP receipt (the **only** source of the timestamp;
+  no provider/game field is ever substituted).
+- `sports_quant/ingest/mlb_ingestor.py:1207` (and the NBA/odds/kalshi/weather/venues
+  equivalents) — `raw_repo.store(..., received_at=to_iso(exchange.received_at))`,
+  which returns that receipt time as the raw tuple's third element.
+- every observation write unpacks that value into `observed_at=` (e.g.
+  `mlb_ingestor.py:896` `sched_observed`, `:1006/1047/1095/1166` `observed`;
+  `nba_ingestor.py:1244/1346/…` `observed`; `odds_ingestor.py:360`
+  `observed_at = raw_response.received_at`; `kalshi_ingestor.py:528`; the injuries
+  path even uses `to_iso(_now())` directly, `nba_ingestor.py:1607`).
+
+Consequence, proven against the E2 builder:
+
+- A historical game's schedule downloaded **today** gets `observed_at = today`. The
+  feature-cutoff guard `_feature_cutoff` (`sports_quant/pit/dataset.py:261-262`)
+  returns `None` whenever the earliest schedule `observed_at` is **after** the
+  `scheduled_start`. For any past game, `today > scheduled_start` → **the row is
+  excluded**. `build_historical_dataset` therefore yields **0 feature-ready rows**
+  from an ordinary retrospective backfill, for both leagues.
+- Prior-game rolling features are equally unavailable: their observations also carry
+  `observed_at = today`, which is after a later game's historical cutoff.
+- **Labels are recoverable** (a completed game's final result is unambiguous and is
+  trivially known by dataset-build time), **but a recoverable label does not make
+  the associated feature state point-in-time valid.**
+- Provider timestamps, game dates, publication/update times **cannot** be
+  substituted for `observed_at` without redefining the project's transaction-time
+  semantics; backdating `observed_at` would violate the E1/E2 guarantees and the
+  E2 visibility guard above. The code correctly fails closed — this is a **plan
+  deficiency in F0's corpus-acquisition design, not a code defect.**
+
+### R.2 Request/credit-control finding — no hard caps; live pilot unsafe (CONFIRMED)
+
+Audit of the F1-capable commands found:
+
+- `provider-audit` is inherently bounded (≤5 MLB, ≤9 BALLDONTLIE requests) — safe.
+- `ingest-mlb`: schedule is one range call; **box, results/inning (per-game), and
+  rosters (per team-date)** multiply — a rich MLB month ≈ **1,350–1,800 requests**.
+- `ingest-nba`: games (paginated), box (per-date), and **player-stats, advanced,
+  plays, lineups (per-game, paginated)** multiply — a rich NBA month ≈ **2,800
+  requests nominal**, and up to **~17,500+** (plays capped at 50 pages/game ×
+  ~350 games) before ×4 retry multiplication.
+- **ABSENT:** any per-run request-count cap; any provider-credit budget; any
+  halt-before-budget; BALLDONTLIE credit-header reading (credit accounting exists
+  only for the out-of-scope Odds API).
+- **`--dry-run` still performs every network GET** (it only skips DB persistence) —
+  it is **not** a safe cost pre-flight.
+- Pagination has **per-call** bounds only (`DEFAULT_MAX_PAGES=50`,
+  `DEFAULT_MAX_RECORDS=10_000`, `nba_ingestor.py:104-105`), hardcoded and not
+  CLI-exposed; there is **no per-run aggregate ceiling**.
+- Runs are **idempotent** (content-hash append-only, no duplicate rows) but **not
+  resumable** (a re-run re-issues every network call).
+
+Because hard request/credit caps and a budget-halt are absent and dry-run is not
+network-free, **the live pilot must not run yet.**
+
+### R.3 Decision: split F1 into F1A (controls) and F1B (capability pilot)
+
+- **F1A — request/credit safety + reconstructed-corpus provenance (offline build +
+  independent review).** No live requests.
+- **F1B — controlled live *capability* pilot**, only after F1A passes. F1B is a
+  **capability/coverage/credit test**, explicitly **not** a strict-PIT data build
+  (per R.1 it cannot be).
+
+The original §10 "F1 pilot" and §3 "F2 build the accepted corpus (feature rows)"
+are **superseded** by R.3 + R.4; see the revised §10.
+
+### R.4 Corpus strategy (selected): staged hybrid (Option E)
+
+Retrospective backfill cannot yield strict-PIT feature rows (R.1), no first-party
+historical archive exists, and historical sportsbook odds are not obtainable
+as-built (Gate G1). The rigorous, feasible, fastest-to-evidence path is a **staged
+hybrid**:
+
+1. **Forward-collected strict-PIT corpus (system of record for all live-replay and
+   profitability claims).** Begin capturing pregame snapshots now (schedule, market
+   quotes, lineups/injuries/probables/weather at the T−60 cutoff). `observed_at` is
+   honest receipt time; rows are strict-PIT by construction. This is the only corpus
+   permitted to support live-replay, calibration-for-deployment, and any economic
+   claim. Maturity: a usable single-season sample accrues across one MLB (~Apr–Sep)
+   or NBA (~Oct–Apr) season; **multiple seasons** are required before out-of-sample
+   / profitability claims.
+2. **Reconstructed-research corpus (explicitly NOT strict-PIT).** A separate,
+   clearly-labeled corpus built from retrospective data under **conservative,
+   provider-documented source-availability rules** (e.g. a prior game's final result
+   is treated as available the morning after that game; opening lines per posting
+   norms). It may drive **early baseline/feature/calibration-methodology research
+   only** — never live-replay or profitability claims — and must carry an explicit
+   provenance + reliability classification, be validated separately with sensitivity
+   analysis, and never be silently mixed with the forward corpus. Reconstruction is
+   defensible **only** for features that are pure functions of *prior completed
+   games* with an unambiguous availability rule (ratings, opponent-adjusted form,
+   rest/travel/schedule, venue/home, and market-implied *if* a PIT-timestamped odds
+   source exists); fast-changing same-day families (lineups, injuries, probables,
+   weather) are **excluded** from reconstruction unless a defensible availability
+   rule is documented.
+
+Permitted conclusions: the **reconstructed** corpus may establish relative feature
+value, baseline model structure, calibration methodology, and approximate effect
+sizes (with sensitivity analysis). It may **not** support strict out-of-sample
+performance, deployment calibration, live-replay, or any profitability claim — those
+require the **forward** corpus at multi-season maturity.
+
+### R.5 Schema implication (no migration now)
+
+The forward corpus needs **no** schema change — it is strict-PIT by construction on
+schema v16. The **reconstructed** corpus eventually needs a provenance/availability
+concept the schema lacks today (an explicit availability-time and a
+provenance/reliability classification, kept in separate columns/tables so it can
+**never** be confused with `observed_at`). This is a **future, separately-reviewed
+migration**; it is **not** designed or implemented in this review, and schema
+remains **v16**.
+
+### R.6 Label semantics (see §3, revised)
+
+Retrospective labels are usable but must never be read as evidence of retrospective
+feature availability. Full policy in the revised §3.
+
+### R.7 Prerequisite classification (F0 gates G1–G5)
+
+- **Already satisfied:** MLB StatsAPI keyless public access + NBA GOAT endpoint
+  *access* were probe-verified (2026-07-24); the read-only/GET-only/execution-
+  quarantine invariants hold.
+- **Claude can verify without exposing secrets:** a future `provider-audit` can
+  confirm GOAT *access* and per-endpoint reachability (it reads no secret into
+  output). Historical *depth* (G3) is measurable only by the F1B pilot.
+- **User decision required before F1B:** confirm an active BALLDONTLIE **GOAT**
+  subscription (G2); approve a per-run request/credit **budget**.
+- **User decision required before F2 / large backfill:** licensing/retention (G4 —
+  MLB StatsAPI commercial terms; Open-Meteo CC-BY non-commercial).
+- **Purchase/subscription that may be required:** The Odds API **historical** plan
+  (G1) or an alternative PIT-timestamped historical odds source; otherwise sportsbook
+  EV is forward-only.
+- **Unverified historical products:** MLB StatsAPI and BALLDONTLIE historical
+  *depth/coverage* (G3); any commercial PIT historical dataset (Option C) — each
+  requires an audited sample before acceptance, never accepted on advertisement.
+
+The user currently expects GOAT access; this review neither exposes nor validates the
+key — a future `provider-audit` confirms access safely.
 
 ---
 
@@ -115,8 +273,19 @@ delay committing this plan; it is a reason not to start the dependent subphase.
 
 ## 3. Subphase F1–F2 — Corpus acquisition and acceptance
 
+> **Revised by §R.** There are now **two** corpora (R.4): the **forward-collected
+> strict-PIT** corpus (system of record for all live-replay/economic claims) and the
+> **reconstructed-research** corpus (early baseline/feature research only, never
+> strict-PIT). The season targets (§3.1) and acceptance gates (§3.2) apply to
+> whichever corpus is being accepted, with the reconstructed corpus additionally
+> carrying a provenance/reliability classification and sensitivity analysis, and
+> being barred from live-replay/profitability claims. "Backfill" (§3.3) refers to
+> building the **reconstructed** corpus and to forward-capture batches — never to
+> conjuring strict-PIT feature rows from retrospective downloads (impossible, R.1).
+
 The model is **not** declared viable until real-corpus gates pass. No profitability
-or accuracy claim may precede a corpus that clears the acceptance gates below.
+or accuracy claim may precede a **forward** corpus that clears the acceptance gates
+below at multi-season maturity.
 
 ### 3.1 Required seasons and minimum usable samples (provisional pending G3)
 
@@ -149,21 +318,54 @@ or accuracy claim may precede a corpus that clears the acceptance gates below.
 
 ### 3.3 Backfill order, credit control, and run discipline
 
-- **F1 pilot before F2 backfill.** F1 ingests a **bounded** slice (one recent
-  season-month per league) to measure real historical coverage (resolves G3),
-  verify matching, and estimate per-season request-credit cost — *before* any large
-  backfill.
-- Backfill order: **oldest → newest, provider by provider, one league at a time**,
-  official data (games/schedule/results) first, then stats/rosters/probables/
-  lineups/injuries/weather, then market data.
-- **Credit budget caps** per run (Odds API `CreditHeaders`, BALLDONTLIE tier
-  limits); a run halts and reports when a budget cap is hit rather than exceeding it.
-- **Restartability & idempotency:** every backfill run is resumable, idempotent
-  (re-ingesting produces no duplicate observations), correction-aware (append-only),
-  and **bounded** (explicit date range + record cap; a truncated sweep is reported).
-- A fresh **`provider-audit` must pass immediately before** each backfill stage.
-- **Independent correctness review after F1 and after F2** (coverage, leakage,
-  determinism, DQ grade) before proceeding.
+> **Corrected by §R.2.** The controls below are **requirements on F1A**, not current
+> behavior. Today the ingest path has **no** per-run request cap, **no** credit
+> budget, **no** budget-halt, and `--dry-run` still makes every network GET; runs are
+> idempotent but **not** resumable. These must be built and reviewed in **F1A**
+> before any live batch.
+
+- **F1A controls before any live run.** No live requests until F1A ships: request
+  estimation, a hard per-run request/credit cap, a budget-halt that stops *before*
+  exceeding a user-defined budget, a true no-network dry-run (cost preview without
+  GETs), credit/usage reporting (requests + remaining credits + truncation + failed
+  families), resumable checkpointing, and safe scratch-DB handling.
+- Order (reconstructed corpus / forward batches): **oldest → newest, provider by
+  provider, one league at a time**, official data (games/schedule/results) first,
+  then stats/rosters/probables/lineups/injuries/weather, then market data.
+- **Bounded runs:** explicit date range + record cap; a truncated sweep is reported
+  (NBA already reports truncation; MLB truncation reporting is an F1A gap to close).
+- **Idempotency** is already present (content-hash append-only, no duplicate rows);
+  **resumability** is an F1A requirement (a re-run currently re-issues every call).
+- A fresh **`provider-audit` must pass immediately before** each live stage.
+- **Independent correctness review after F1A and after each acquisition stage**
+  (coverage, leakage, determinism, DQ grade, credit accounting) before proceeding.
+
+### 3.4 Label semantics (four times; policy per corpus)
+
+Distinguish four timestamps: **(t0)** the real-world outcome time; **(t1)** the time
+the provider recorded/corrected the result; **(t2)** the time this system received it
+(`observed_at`); **(t3)** dataset-build time. Labels stay physically isolated from
+feature state (E2), and a recoverable label **never** implies feature availability.
+
+- **Strict forward-collected replay:** label = the final result with `observed_at`
+  (t2) **strictly after** the T−60 feature cutoff and invisible at the cutoff
+  (current E2 rule). This is the only label class admissible for live-replay/economic
+  claims.
+- **Retrospective reconstructed research:** label = the final result known by t3
+  (unambiguous once the game is complete). Availability is trivially satisfied for
+  the *label*; it says nothing about *feature* availability. Marked provenance =
+  reconstructed; barred from live-replay claims.
+- **Corrected results:** append-only, correction-aware; use the latest correction as
+  of the policy time (forward: as-of the settlement horizon; reconstructed: the final
+  corrected value by t3), flagged `is_correction`.
+- **Results later overturned/amended:** recorded as a further append-only correction;
+  a closed forward evaluation is **not** silently rewritten by a later amendment — the
+  evaluation label is fixed as of a defined settlement horizon, and the amendment is
+  retained with provenance for audit.
+- **Abandoned / postponed / suspended / tied:** no home/away winner → **excluded**
+  from moneyline labels (never fabricated). Postponement → the rescheduled game is a
+  distinct cutoff; suspended-then-completed → label from completion; ties (MLB rare;
+  effectively none in NBA) → excluded.
 
 ---
 
@@ -360,25 +562,73 @@ None of these are deleted or rewritten during F0.
 For each subphase: **G**oal, **S**cope, **F**iles, **I/O**, **T**ests, **D**ata,
 **Live**, **P**rereqs, **Gate**, **Review**, **Prohibited**, **`/clear`**.
 
-### F1 — Historical corpus pilot & capability verification
-- **G:** measure real historical coverage/credit-cost; resolve G3.
-- **S:** bounded date-ranged ingest of one recent season-month per league; run
-  matching on it; measure coverage/latency/credit.
-- **F:** none new in the research lane; uses existing ingestors/CLI. A pilot report
-  doc only.
-- **I/O:** in = provider APIs (bounded); out = pilot coverage report + populated dev DB slice.
-- **T:** coverage/idempotency/restartability assertions on the pilot slice.
-- **D:** one season-month, both leagues. **Live:** **yes, bounded** (first allowed live requests; provider-audit must pass first).
-- **P:** G2 (NBA GOAT key), passing `provider-audit`. **Gate:** measured per-family coverage documented; determinism holds. **Review:** independent. **Prohibited:** large backfill, features, models. **`/clear`:** yes before F1.
+### F1A — Request/credit controls + reconstructed-corpus provenance (OFFLINE)
+- **G:** make live ingestion budget-safe and define the reconstructed-corpus
+  provenance model — **before** any live request. Closes the R.2 blocker.
+- **S:** implement (with tests) a hard per-run request/credit cap, a budget-halt that
+  stops *before* exceeding a user-defined budget, a **true no-network dry-run**
+  (request estimate without GETs), credit/usage reporting (requests, remaining
+  credits, truncation, failed families) for MLB+NBA, resumable checkpointing, safe
+  scratch-DB handling, and a pilot manifest. Specify (not implement) the
+  reconstructed-corpus provenance/availability classification (R.5).
+- **F:** ingestor/CLI request-control code + tests; a reconstructed-corpus design note.
+- **I/O:** in = existing ingest code; out = budget-safe ingest path + estimator.
+- **T:** cap halts before budget; dry-run issues **zero** network calls; resume after
+  interrupt re-issues no already-fetched call; idempotent rerun; usage/credit report
+  fields present. All offline (mocked transports).
+- **D:** none (offline). **Live:** **no.** **P:** none. **Gate:** all controls tested
+  + independently reviewed. **Review:** independent. **Prohibited:** any live request,
+  ingestion, features, models. **`/clear`:** yes before F1A. *(No schema migration.)*
 
-### F2 — Controlled persisted backfill
-- **G:** build the accepted MLB/NBA corpus.
-- **S:** date-ranged backfill oldest→newest per §3.3; run matching; produce
-  `data-quality` grade.
-- **F:** none new (existing ingest/match CLI). **I/O:** out = persisted corpus + DQ report.
-- **T:** §3.2 acceptance gates; PIT determinism; leakage scan (`data-quality`).
-- **D:** target seasons (§3.1). **Live:** **yes, bounded + credit-capped.**
-- **P:** F1 passed; G1/G4 licensing decision; credit budget. **Gate:** §3.2 all pass, `corpus_valid=true`. **Review:** independent. **Prohibited:** features/models. **`/clear`:** yes.
+### F1B — Controlled live capability pilot (NOT a strict-PIT build)
+- **G:** verify real provider coverage, credit cost, and matching on a tiny live
+  slice; resolve G3. This is a **capability test only** — per R.1 it cannot and does
+  not produce strict-PIT feature rows.
+- **S:** budget-capped, date-ranged skeleton-then-rich ingest of one active-season
+  month per league (§5 pilot spec) into a **separate scratch DB**; run matching;
+  `data-status`/`data-quality`; idempotent + interrupted-recovery checks.
+- **F:** pilot report only. **I/O:** out = coverage/credit report + scratch DB.
+- **T:** the §5 pilot checks (row counts, rejections, resumability, no production-DB
+  modification).
+- **D:** one active-season month/league. **Live:** **yes — bounded, credit-capped,
+  first allowed live requests**, only after F1A + a fresh `provider-audit` pass.
+- **P:** **F1A passed**; G2 (NBA GOAT key). **Gate:** measured coverage/credit within
+  budget; controls behaved. **Review:** independent. **Prohibited:** large backfill,
+  treating pilot data as strict-PIT, features, models. **`/clear`:** yes.
+
+### F1C — Begin forward strict-PIT collection (parallel, ongoing)
+- **G:** start the forward strict-PIT corpus (R.4 system of record) accruing now.
+- **S:** scheduled T−60 pregame captures (schedule, market quotes, available
+  lineups/injuries/probables/weather) with honest receipt `observed_at`.
+- **F:** a bounded scheduled-capture runner (reuses F1A controls). **I/O:** out =
+  growing strict-PIT corpus. **T:** each capture is strict-PIT, bounded, idempotent.
+- **D:** live current slates. **Live:** **yes, bounded/credit-capped.** **P:** F1A.
+  **Gate:** captures validate as strict-PIT. **Review:** independent. **Prohibited:**
+  claiming multi-season sufficiency early. **`/clear`:** yes.
+
+### F2 — Reconstructed-research corpus (explicitly NOT strict-PIT)
+- **G:** build the clearly-labeled reconstructed corpus for early baseline/feature
+  research (R.4), under conservative provider-documented availability rules.
+- **S:** date-ranged retrospective ingest → reconstructed rows carrying a
+  provenance/reliability classification (per the F1A design; **eventual** schema
+  change, separately reviewed — **not** in this subphase); run matching; produce a
+  `data-quality` grade **for the reconstructed corpus**.
+- **F:** reconstruction builder + tests (no strict-PIT `build_historical_dataset`
+  change). **I/O:** out = reconstructed corpus + provenance + DQ report.
+- **T:** §3.2 gates; determinism; **explicit non-PIT labeling**; never mixed with the
+  forward corpus; sensitivity analysis harness.
+- **D:** target seasons (§3.1). **Live:** **yes, bounded + credit-capped** (F1A path).
+- **P:** F1A/F1B passed; G1/G4 licensing decision. **Gate:** §3.2 pass on the
+  reconstructed corpus, provenance classified, sensitivity plan defined. **Review:**
+  independent. **Prohibited:** representing it as strict-PIT; profitability claims;
+  features/models. **`/clear`:** yes.
+
+> **Corpus scope for F3–F9 (per §R.4).** F3–F6 baseline/feature/calibration/EV
+> **research** run on the **reconstructed** corpus (early evidence only, non-PIT,
+> with sensitivity analysis). F7 realistic backtesting and F9 shadow evaluation, and
+> any deployment-calibration or profitability claim, require the **forward strict-PIT**
+> corpus at multi-season maturity (F1C). Results from the two corpora are reported
+> separately and never conflated.
 
 ### F3 — Feature specification & implementation
 - **G:** implement the feature registry + manifest per `PHASE_F_FEATURE_CONTRACT.md`.
@@ -441,4 +691,58 @@ justified against this baseline.
 - Created: `PHASE_F_RESEARCH_PLAN.md` (this file), `PHASE_F_FEATURE_CONTRACT.md`.
 - Phase E behavior unchanged; **no migration**; schema remains **v16**.
 - No feature, model, backfill, command, or recommendation output implemented.
-- No live provider request or persisted ingestion occurred during F0.
+- No live provider request or persisted ingestion occurred during F0 **or during the
+  F0 independent review**.
+
+---
+
+## 12. F1B live capability-pilot specification (authorized only AFTER F1A)
+
+**Not authorized yet. Do not execute.** This runs only after F1A ships the request/
+credit controls and passes independent review, and a fresh `provider-audit` passes.
+It is a **capability/coverage/credit** test — per §R.1 it does **not** create
+strict-PIT data.
+
+- **MLB date range:** a **current in-season** month (MLB regular season runs ~Apr–Sep;
+  today 2026-07-28 is in-season, so a recent completed 30-day window is valid and
+  minimizes credit while covering real games).
+- **NBA date range:** a **past regular-season** month (NBA runs ~Oct–Apr; it is
+  off-season now, so pick a completed in-season month, e.g. a month of the most recent
+  regular season). Rationale: box/plays/lineups only exist for played regular-season
+  games; a capability test needs real games, and NBA has none in July.
+- **Why active-season ranges:** out-of-season windows return empty slates and cannot
+  test per-game family coverage or credit cost.
+- **Skeleton stage (first):** schedule/games only — MLB ≈ **1 request**, NBA ≈ **~4**.
+  Verifies canonical-game creation + matching with near-zero credit.
+- **Rich stage (second):** add box/results/inning + rosters (MLB) and box/player-stats/
+  advanced/plays/lineups (NBA).
+- **Expected games:** MLB ~400–450/month; NBA ~300–450/month.
+- **Estimated requests:** MLB skeleton ~1, rich ~**1,350–1,800**; NBA skeleton ~4,
+  rich ~**2,800 nominal**, worst-case **~17,500+** (plays 50 pages/game) — hence the
+  hard cap is mandatory.
+- **Estimated BALLDONTLIE credit usage:** derive from the F1A estimator per request;
+  **stop at the user budget**.
+- **Explicit hard-stop limits:** a per-run request cap and a credit cap (F1A);
+  the run **halts before** exceeding either; a truncated sweep is reported.
+- **Separate scratch DB:** a dedicated `--db` path (e.g. `data/pilot_scratch.db`),
+  never the production/dev corpus.
+- **Init & pre-run checks:** `db-init` the scratch DB; record pre-run table
+  row-counts + a schema-version check (must be v16) and a file hash.
+- **Provider audit immediately before each stage.**
+- **Dry-run before persistence:** F1A's **true no-network** dry-run to preview the
+  request/credit estimate; only then the live stage.
+- **Post-run:** row counts, rejection/failed-family summaries, credit consumed +
+  remaining, request count, truncations.
+- **Matching sequence:** run canonical + reference matching on the scratch DB.
+- **`data-status` then `data-quality`** on the scratch DB; record grade + open DQ.
+- **Idempotent rerun:** re-run one stage; assert no duplicate observations.
+- **Interrupted-run recovery:** kill mid-run; assert resume re-issues no already-
+  fetched call and leaves no partial corruption.
+- **Isolation proof:** confirm the production/existing user DB is untouched (hash/
+  row-count unchanged).
+- **Retention policy:** scratch DB and its raw responses are retained only for the
+  review, then deleted (or explicitly archived with provenance); never promoted to a
+  strict-PIT corpus.
+- **Stop immediately if:** any cap is hit, `provider-audit` fails, unexpected auth/
+  tier errors occur, rejections exceed a threshold, or the scratch-DB isolation check
+  fails.

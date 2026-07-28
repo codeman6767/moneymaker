@@ -242,7 +242,16 @@ hides it.
 > implementation (corpus backfill, feature engineering, modeling, calibration,
 > simulation, recommendations, backtesting, paper trading, execution) has been
 > started; schema remains v16 and no live provider request or persisted ingestion
-> occurred during F0.**
+> occurred during F0. F0 has since been independently reviewed
+> (`PHASE_F_RESEARCH_PLAN.md` §R): ordinary retrospective provider backfill cannot
+> produce strict point-in-time feature rows, because every observation receives
+> today's receipt `observed_at` and the E2 feature-cutoff guard
+> (`sports_quant/pit/dataset.py:261`) excludes any schedule first observed after its
+> scheduled start. The corpus strategy is therefore a staged hybrid — a
+> forward-collected strict-PIT corpus (system of record) plus a separate, explicitly
+> non-PIT reconstructed-research corpus — and the live pilot is split into F1A
+> (request/credit controls, not yet built) then F1B and is NOT yet authorized. Schema
+> remains v16.**
 
 ## 3. As-of query pattern
 
