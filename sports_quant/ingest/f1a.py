@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
@@ -33,14 +34,19 @@ from ..request_control import (
 )
 from .checkpoint import CheckpointError, load_checkpoint
 from .cost_policies import build_balldontlie_policy, build_mlb_policy
-from .manifest import PilotManifest, build_manifest
+from .manifest import (
+    ManifestError,
+    PilotManifest,
+    build_manifest,
+    load_and_validate,
+    plan_hash,
+)
 from .pilot import UnitDone, run_pilot
 from .planning import Bounds, build_plan
 from .scratch_db import (
     ScratchClass,
     ScratchDbError,
     classify_scratch_db,
-    fingerprint_of,
 )
 
 #: Distinct, stable exit code for a controlled budget/credit exhaustion --
@@ -53,6 +59,26 @@ EXIT_BUDGET_EXHAUSTED = 4
 _MLB_RICH = {"results", "box", "inning", "rosters"}
 _NBA_RICH = {"box", "stats", "advanced", "plays", "lineups"}
 
+#: F1B (live pilot) is DISABLED by default. A future controlled authorization is a
+#: separate, reviewed step; this env var only lets tests exercise the mocked
+#: guarded path. It never enables real network here (transports are mocked).
+_F1B_AUTHORIZED_ENV = "MONEYMAKER_F1B_AUTHORIZED"
+
+
+def _f1b_authorized() -> bool:
+    return os.environ.get(_F1B_AUTHORIZED_ENV) == "1"
+
+
+def _provider_for(league: str) -> str:
+    return "mlb_statsapi" if league == "mlb" else "balldontlie"
+
+
+def _parse_date_range(date_range: str) -> tuple[str, Optional[str]]:
+    if ".." in date_range:
+        a, b = date_range.split("..", 1)
+        return a, b
+    return date_range, None
+
 
 def _families_and_stage(league: str, includes: tuple[str, ...]) -> tuple[tuple[str, ...], str]:
     rich = _MLB_RICH if league == "mlb" else _NBA_RICH
@@ -60,6 +86,21 @@ def _families_and_stage(league: str, includes: tuple[str, ...]) -> tuple[tuple[s
     rich_present = sorted(set(includes) & rich)
     families = (skeleton, *rich_present)
     return families, ("rich" if rich_present else "skeleton")
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Atomically write ``text`` to ``path`` (temp + replace), refusing a symlink."""
+
+    path = Path(path)
+    if path.is_symlink():
+        raise ScratchDbError(f"refusing to write through a symlink: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}-{os.urandom(4).hex()}")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
 
 
 def _build_plan_and_manifest(
@@ -115,7 +156,8 @@ def emit_plan(
     payload["network_occurred"] = False
     payload["database_touched"] = False
     if manifest_out is not None:
-        Path(manifest_out).write_text(manifest.canonical(), encoding="utf-8")
+        # The only file write permitted in zero-network plan mode: atomic + no symlink.
+        _atomic_write_text(Path(manifest_out), manifest.canonical())
         payload["manifest_written_to"] = str(manifest_out)
     if as_json:
         out(json.dumps(payload, sort_keys=True))
@@ -144,13 +186,23 @@ def emit_plan(
 # Guarded live pilot execution (F1B)
 # --------------------------------------------------------------------------- #
 class _IngestorExecutor:
-    """One-unit-per-stage executor that runs the real ingestor under the gate.
+    """Stage-level executor that runs the real ingestor under the gate.
 
     The whole (schedule/games [+ rich]) ingestion for the range is one semantic
-    unit whose consistency boundary is the ingestor's committed run; the gate
-    (wired into the transport) enforces the budget on every underlying call, so a
-    mid-run exhaustion truncates safely. A completed unit is skipped on resume
-    with zero transport.
+    checkpoint unit whose consistency boundary is the ingestor's committed run;
+    the gate (wired into the transport) enforces the budget on every underlying
+    call, so a mid-run exhaustion truncates safely, and a completed unit is
+    skipped on resume with zero transport. NBA pagination bounds (max_pages /
+    max_records) from the reviewed manifest are passed through to ``ingest_nba``.
+
+    KNOWN LIMITATION (F1A review, tracked): resume granularity is the STAGE, not
+    the individual request/page/game -- resuming an interrupted rich stage re-runs
+    the ingestor (idempotent on rows via content hash, but it re-issues completed
+    requests). Finer request-level resumability requires making the D2/D3 bulk
+    ingestors request-addressable and is deferred to a dedicated, separately
+    reviewed change; it does NOT weaken the hard budget stop (the gate still caps
+    the aggregate spend). ``max_games`` is likewise not yet honored by the bulk
+    ingestors.
     """
 
     def __init__(
@@ -163,6 +215,8 @@ class _IngestorExecutor:
         to_date: Optional[str],
         includes: tuple[str, ...],
         stage: str,
+        max_pages: Optional[int] = None,
+        max_records: Optional[int] = None,
     ) -> None:
         self._league = league
         self._database = database
@@ -171,6 +225,8 @@ class _IngestorExecutor:
         self._to = to_date
         self._includes = includes
         self._stage = stage
+        self._max_pages = max_pages
+        self._max_records = max_records
 
     def _unit(self) -> RequestUnit:
         rng = self._from if not self._to or self._to == self._from else f"{self._from}..{self._to}"
@@ -195,10 +251,15 @@ class _IngestorExecutor:
                         database=self._database, client=client, from_date=self._from,
                         to_date=self._to, includes=self._includes, dry_run=False)
                 from ..providers.capabilities import BalldontlieTier
+                nba_kwargs: dict[str, Any] = {}
+                if self._max_pages is not None:
+                    nba_kwargs["max_pages"] = self._max_pages
+                if self._max_records is not None:
+                    nba_kwargs["max_records"] = self._max_records
                 return await ingest_nba(
                     database=self._database, client=client, from_date=self._from,
                     to_date=self._to, includes=self._includes,
-                    tier=BalldontlieTier.GOAT, dry_run=False)
+                    tier=BalldontlieTier.GOAT, dry_run=False, **nba_kwargs)
             finally:
                 await client.aclose()
 
@@ -222,48 +283,12 @@ def _make_gate(*, league: str, request_cap: int, credit_cap: Optional[int]) -> R
         cost_policy=build_balldontlie_policy())
 
 
-def _validate_live(
-    *, league: str, plan: Any, manifest: PilotManifest, request_cap: Optional[int],
-    credit_cap: Optional[int], scratch_db: Optional[Path], resume: bool,
-    checkpoint: Optional[Path],
-) -> Optional[str]:
-    """Return an error message when a live combination is unsafe (else None)."""
-
-    if request_cap is None:
-        return "live execution requires an explicit --request-cap"
-    if league == "nba" and credit_cap is None:
-        return "BALLDONTLIE execution requires an explicit --credit-cap"
-    if not plan.executable():
-        return ("plan has unbounded contingent fan-out; bound it with "
-                f"--max-games/--max-pages: {', '.join(plan.unresolved_bounds())}")
-    rc = plan.required_request_cap()
-    if rc is not None and rc > request_cap:
-        return f"--request-cap {request_cap} is below the plan's conservative maximum {rc}"
-    if league == "nba":
-        cc = plan.required_credit_cap()
-        if cc is not None and credit_cap is not None and cc > credit_cap:
-            return f"--credit-cap {credit_cap} is below the plan's conservative maximum {cc}"
-    if scratch_db is None:
-        return "pilot execution requires an explicit --scratch-db"
-    if resume and checkpoint is None:
-        return "--resume requires --checkpoint"
-    return None
-
-
 def run_pilot_cli(
     *,
     league: str,
-    from_date: str,
-    to_date: Optional[str],
-    includes: tuple[str, ...],
-    request_cap: Optional[int],
-    credit_cap: Optional[int] = None,
-    max_games: Optional[int] = None,
-    max_pages: Optional[int] = None,
-    max_records: Optional[int] = None,
-    max_retries: int = 3,
+    manifest_path: Optional[Path],
     scratch_db: Optional[Path],
-    checkpoint: Optional[Path],
+    checkpoint: Optional[Path] = None,
     resume: bool = False,
     as_json: bool = False,
     code_version: str = "",
@@ -271,29 +296,67 @@ def run_pilot_cli(
     client_factory: Optional[Callable[[RequestGate], Any]] = None,
     forbidden_paths: tuple[Path, ...] = (),
 ) -> int:
-    """Guarded F1B live pilot. All guards fail before any client/DB work."""
+    """Guarded F1B live pilot, GOVERNED BY A REVIEWED MANIFEST.
 
-    bounds = Bounds(max_games=max_games, max_pages=max_pages, max_records=max_records,
-                    max_retries=max_retries)
-    families, stage = _families_and_stage(league, includes)
-    plan, manifest = _build_plan_and_manifest(
-        league=league, from_date=from_date, to_date=to_date, includes=includes, bounds=bounds,
-        scratch_db=str(scratch_db or ""), checkpoint=str(checkpoint or ""),
-        request_cap=request_cap, credit_cap=credit_cap)
+    Execution never generates or overrides its own plan: it loads and validates a
+    manifest produced earlier by ``--plan --manifest-out`` and drives exactly that.
+    Every guard fails before any client/DB work: F1B authorization (off by
+    default), manifest presence/validity/policy-consistency/executability, request
+    cap, explicit scratch DB, and resume/checkpoint/db-identity matching.
+    """
 
-    err = _validate_live(league=league, plan=plan, manifest=manifest, request_cap=request_cap,
-                         credit_cap=credit_cap, scratch_db=scratch_db, resume=resume,
-                         checkpoint=checkpoint)
-    if err is not None:
-        out(f"[FAILED ] {err}")
+    # 1. F1B authorization boundary (disabled by default; separate reviewed step).
+    if not _f1b_authorized():
+        out("[FAILED ] F1B live pilot is not authorized. Completing F1A does not "
+            "authorize F1B; a separate, reviewed authorization is required "
+            f"(dev/test only: set {_F1B_AUTHORIZED_ENV}=1).")
         return EXIT_USAGE
-    # _validate_live guarantees these are set once we pass the guards above.
-    assert request_cap is not None and scratch_db is not None
 
-    # Resume must match the exact manifest (fails before any DB read).
+    # 2. A reviewed manifest is REQUIRED; execution cannot self-generate one.
+    if manifest_path is None:
+        out("[FAILED ] --pilot requires --manifest PATH (generate it with "
+            "'--plan --manifest-out PATH' and review it first)")
+        return EXIT_USAGE
+    if scratch_db is None:
+        out("[FAILED ] pilot execution requires an explicit --scratch-db")
+        return EXIT_USAGE
+    if resume and checkpoint is None:
+        out("[FAILED ] --resume requires --checkpoint")
+        return EXIT_USAGE
+
+    try:
+        manifest = load_and_validate(
+            Path(manifest_path), expected_league=league,
+            expected_provider=_provider_for(league))
+    except ManifestError as exc:
+        out(f"[FAILED ] manifest rejected: {exc}")
+        return EXIT_USAGE
+
+    # 3. Policy-consistency: rebuild the plan from the manifest's own fields and
+    #    require its hash to match; a manifest from a different planner/policy
+    #    version must be explicitly regenerated and re-reviewed.
+    from_date, to_date = _parse_date_range(manifest.date_range)
+    includes = tuple(f for f in manifest.families if f not in ("schedule", "games"))
+    bounds = Bounds(max_games=manifest.max_games, max_pages=manifest.max_pages,
+                    max_records=manifest.max_records, max_retries=manifest.max_retries)
+    rebuilt = build_plan(league=league, from_date=from_date, to_date=to_date,
+                         families=manifest.families, stage=manifest.stage, bounds=bounds)
+    if plan_hash(rebuilt) != manifest.computed_plan_hash():
+        out("[FAILED ] manifest was generated under a different planner/policy "
+            "version; regenerate and re-review it ('--plan --manifest-out')")
+        return EXIT_USAGE
+    if not manifest.executable:
+        out("[FAILED ] manifest is non-executable: "
+            f"{', '.join(manifest.unresolved_bounds) or 'unbounded/unknown cost'}")
+        return EXIT_USAGE
+    if manifest.request_cap is None:
+        out("[FAILED ] manifest has no request cap")
+        return EXIT_USAGE
+
+    # 4. Resume must match the exact manifest (before any DB read).
     expected_fp: Optional[str] = None
     if resume:
-        assert checkpoint is not None  # guarded: resume requires --checkpoint
+        assert checkpoint is not None
         try:
             ck = load_checkpoint(Path(checkpoint))
         except CheckpointError as exc:
@@ -304,7 +367,7 @@ def run_pilot_cli(
             return EXIT_USAGE
         expected_fp = ck.scratch_fingerprint
 
-    # Scratch-database isolation (read-only classification; never mutates a DB).
+    # 5. Scratch-database isolation (read-only classification; never mutates a DB).
     try:
         classification = classify_scratch_db(
             scratch_db, resume=resume, expected_fingerprint=expected_fp,
@@ -327,22 +390,26 @@ def run_pilot_cli(
     database = Database(Path(scratch_db))
 
     def _fingerprint() -> str:
+        # Recompute the strong content digest immediately (used at each checkpoint
+        # boundary so resume can prove the DB is exactly as the checkpoint left it).
         c = classify_scratch_db(scratch_db, resume=True, expected_fingerprint=None,
                                 forbidden_paths=forbidden_paths)
-        return fingerprint_of(c.row_counts, c.schema_version)
+        return c.fingerprint or ""
 
     if client_factory is None:
         client_factory = _default_client_factory(league)
 
     executor = _IngestorExecutor(
         league=league, database=database, client_factory=client_factory,
-        from_date=from_date, to_date=to_date, includes=includes, stage=stage)
+        from_date=from_date, to_date=to_date, includes=includes, stage=manifest.stage,
+        max_pages=manifest.max_pages, max_records=manifest.max_records)
 
     result = run_pilot(
-        manifest=manifest, gate=_make_gate(league=league, request_cap=request_cap,
-                                           credit_cap=credit_cap),
-        executor=executor, checkpoint_path=Path(checkpoint) if checkpoint else Path(
-            f"{scratch_db}.ckpt"),
+        manifest=manifest,
+        gate=_make_gate(league=league, request_cap=manifest.request_cap,
+                        credit_cap=manifest.credit_cap),
+        executor=executor,
+        checkpoint_path=Path(checkpoint) if checkpoint else Path(f"{scratch_db}.ckpt"),
         scratch_fingerprint=classification.fingerprint or "",
         resume=resume, code_version=code_version, fingerprint_fn=_fingerprint)
 

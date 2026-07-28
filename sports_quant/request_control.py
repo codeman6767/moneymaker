@@ -225,9 +225,14 @@ class UsageReport:
     planned_requests: int = 0
     estimated_requests_min: int = 0
     estimated_requests_max: int = 0
-    attempted_requests: int = 0
-    successful_responses: int = 0
-    failed_responses: int = 0
+    # Staged accounting (each reserved attempt reaches exactly one terminal state):
+    reserved_attempts: int = 0        # a budget slot was taken (may never send)
+    attempted_requests: int = 0       # alias of reserved_attempts (back-compat)
+    transport_starts: int = 0         # an actual transport send was attempted
+    responses_received: int = 0       # a complete HTTP response body was received
+    parse_successes: int = 0          # the body parsed as JSON
+    successful_responses: int = 0     # a fully-successful ProviderResponse returned
+    failed_responses: int = 0         # a terminal failure (network/status/parse/oversize)
     retry_attempts: int = 0
     pages_fetched: int = 0
     skipped_on_resume: int = 0
@@ -346,18 +351,40 @@ class RequestGate:
                     raise exc
                 self.usage.reserved_credits += cost
 
-            # Commit the request slot only after both checks pass.
-            self.usage.attempted_requests += 1
-            self.usage.network_occurred = True
+            # Commit the RESERVATION only after both checks pass. A reservation is
+            # not yet a transport call: `network_occurred`/`transport_starts` are
+            # recorded by mark_transport() from the GET chokepoint when a send is
+            # actually attempted, so a reserved-but-never-sent attempt never falsely
+            # reports network activity.
+            self.usage.reserved_attempts += 1
+            self.usage.attempted_requests = self.usage.reserved_attempts
             if is_retry:
                 self.usage.retry_attempts += 1
-            if unit.page and unit.page > 0:
-                self.usage.pages_fetched += 1
 
     def _credit_remaining(self) -> Optional[int]:
         if not self._credit.applicable or self._credit.max_credits is None:
             return None
         return max(0, self._credit.max_credits - self.usage.reserved_credits)
+
+    # -- staged transport recording -----------------------------------------
+    def mark_transport(self, *, page: bool = False) -> None:
+        """A real transport send was attempted (distinct from a reservation)."""
+
+        with self._lock:
+            self.usage.network_occurred = True
+            self.usage.transport_starts += 1
+            if page:
+                self.usage.pages_fetched += 1
+
+    def record_response(self) -> None:
+        """A complete HTTP response body was received (any status)."""
+
+        with self._lock:
+            self.usage.responses_received += 1
+
+    def record_parse_success(self) -> None:
+        with self._lock:
+            self.usage.parse_successes += 1
 
     # -- outcome recording ---------------------------------------------------
     def record_success(self) -> None:

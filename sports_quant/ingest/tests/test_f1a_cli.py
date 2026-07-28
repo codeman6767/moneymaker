@@ -1,4 +1,9 @@
-"""F1A CLI + guarded-pilot integration tests (offline; sockets sentineled)."""
+"""F1A CLI + guarded-pilot integration tests (offline; sockets sentineled).
+
+Covers the repaired contract: legacy ungated ingestion is quarantined; --pilot is
+governed by a reviewed --manifest; F1B is disabled by default; and manifest
+tampering / unsupported versions / duplicate keys / conflicting args fail closed.
+"""
 
 from __future__ import annotations
 
@@ -11,15 +16,18 @@ import pytest
 
 from sports_quant.cli import main
 from sports_quant.db.init import initialize_database
-from sports_quant.ingest.f1a import EXIT_BUDGET_EXHAUSTED, run_pilot_cli
+from sports_quant.ingest.f1a import (
+    _F1B_AUTHORIZED_ENV,
+    EXIT_BUDGET_EXHAUSTED,
+    emit_plan,
+    run_pilot_cli,
+)
 from sports_quant.providers.mlb_statsapi import MlbStatsApiClient
 from sports_quant.request_control import RequestGate
 
 
 @pytest.fixture
 def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Any real socket use raises immediately (mocked transports are unaffected)."""
-
     def boom(*_a: object, **_k: object):  # type: ignore[no-untyped-def]
         raise AssertionError("network access attempted in an offline test")
 
@@ -27,10 +35,24 @@ def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(socket, "getaddrinfo", boom)
 
 
+@pytest.fixture
+def f1b_authorized(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(_F1B_AUTHORIZED_ENV, "1")
+
+
 def _scratch(tmp_path: Path, name: str = "scratch.db") -> Path:
     path = tmp_path / name
     initialize_database(path)
     return path
+
+
+def _mlb_manifest(tmp_path: Path, name: str = "m.json") -> Path:
+    """Generate a real, executable MLB skeleton manifest via zero-network --plan."""
+
+    out = tmp_path / name
+    emit_plan(league="mlb", from_date="2026-07-01", to_date="2026-07-01", includes=(),
+              manifest_out=out, out=lambda _s: None)
+    return out
 
 
 def _mlb_factory(calls: list[int]):
@@ -54,124 +76,163 @@ def test_plan_mode_makes_no_network(no_network, capsys: pytest.CaptureFixture) -
     assert payload["network_occurred"] is False
     assert payload["executable"] is True
     assert payload["expected_schema_version"] == 16
-    assert "manifest_hash" in payload
 
 
-def test_plan_mode_nba_needs_bounds(no_network, capsys: pytest.CaptureFixture) -> None:
+def test_plan_mode_nba_non_executable_unknown_cost(no_network, capsys) -> None:
     rc = main(["ingest-nba", "--plan", "--from", "2026-01-05", "--to", "2026-01-05",
-               "--include", "plays", "--json"])
+               "--max-pages", "5", "--json"])
     assert rc == 0
     payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
-    assert payload["executable"] is False  # per-game plays unbounded without --max-games/pages
-    assert payload["unresolved_bounds"]
+    assert payload["executable"] is False  # unknown BALLDONTLIE credit cost
+    assert any("unknown_credit_cost" in b for b in payload["unresolved_bounds"])
 
 
-def test_plan_hash_deterministic(no_network, capsys: pytest.CaptureFixture) -> None:
-    args = ["ingest-nba", "--plan", "--from", "2026-01-05", "--to", "2026-01-05",
-            "--max-pages", "5", "--json"]
-    main(args)
-    h1 = json.loads(capsys.readouterr().out.strip().splitlines()[-1])["manifest_hash"]
-    main(args)
-    h2 = json.loads(capsys.readouterr().out.strip().splitlines()[-1])["manifest_hash"]
-    assert h1 == h2
+def test_plan_manifest_out_deterministic(no_network, tmp_path: Path) -> None:
+    a, b = tmp_path / "a.json", tmp_path / "b.json"
+    emit_plan(league="mlb", from_date="2026-07-01", to_date="2026-07-01", includes=(),
+              manifest_out=a, out=lambda _s: None)
+    emit_plan(league="mlb", from_date="2026-07-01", to_date="2026-07-01", includes=(),
+              manifest_out=b, out=lambda _s: None)
+    assert a.read_text() == b.read_text()  # byte-identical canonical manifest
 
 
-# --- guard failures (before any client/DB) --------------------------------- #
-def test_pilot_requires_request_cap(tmp_path: Path) -> None:
-    rc = run_pilot_cli(league="mlb", from_date="2026-07-01", to_date="2026-07-02",
-                       includes=(), request_cap=None, scratch_db=_scratch(tmp_path),
-                       checkpoint=None, out=lambda _s: None)
-    assert rc == 2
+# --- legacy quarantine + programmatic bypass ------------------------------- #
+def test_legacy_ingest_mlb_blocked_by_default() -> None:
+    rc = main(["ingest-mlb", "--from", "2026-07-01"])  # no --plan/--pilot
+    assert rc == 2  # quarantined
 
 
-def test_nba_pilot_requires_credit_cap(tmp_path: Path) -> None:
-    rc = run_pilot_cli(league="nba", from_date="2026-01-05", to_date="2026-01-05",
-                       includes=(), request_cap=100, credit_cap=None, max_pages=5,
-                       scratch_db=_scratch(tmp_path), checkpoint=None, out=lambda _s: None)
-    assert rc == 2
+def test_legacy_ingest_nba_dry_run_blocked_by_default() -> None:
+    rc = main(["ingest-nba", "--from", "2026-01-05", "--dry-run"])
+    assert rc == 2  # networked dry-run is still quarantined
 
 
-def test_pilot_rejects_unbounded_fanout(tmp_path: Path) -> None:
-    rc = run_pilot_cli(league="nba", from_date="2026-01-05", to_date="2026-01-05",
-                       includes=("plays",), request_cap=100, credit_cap=100,
-                       scratch_db=_scratch(tmp_path), checkpoint=None, out=lambda _s: None)
-    assert rc == 2  # per-game plays unbounded
+def test_real_mlb_client_without_gate_refuses_transport() -> None:
+    # Programmatic bypass: a self-owned real MLB client with no gate must refuse.
+    import asyncio
+
+    from sports_quant.providers.base_provider import ProviderError
+
+    async def go() -> None:
+        c = MlbStatsApiClient()  # real transport, no gate
+        with pytest.raises(ProviderError):
+            await c._get("/schedule")
+        await c.aclose()
+
+    asyncio.run(go())
 
 
-def test_pilot_rejects_cap_below_max(tmp_path: Path) -> None:
-    rc = run_pilot_cli(league="nba", from_date="2026-01-05", to_date="2026-01-05",
-                       includes=(), request_cap=1, credit_cap=100, max_pages=5,
-                       scratch_db=_scratch(tmp_path), checkpoint=None, out=lambda _s: None)
-    assert rc == 2  # required cap (5*retry) exceeds 1
+# --- F1B authorization boundary -------------------------------------------- #
+def test_f1b_disabled_by_default(tmp_path: Path) -> None:
+    rc = run_pilot_cli(league="mlb", manifest_path=_mlb_manifest(tmp_path),
+                       scratch_db=_scratch(tmp_path), out=lambda _s: None)
+    assert rc == 2  # F1B not authorized
 
 
-def test_pilot_requires_scratch_db() -> None:
-    rc = run_pilot_cli(league="mlb", from_date="2026-07-01", to_date="2026-07-02",
-                       includes=(), request_cap=100, scratch_db=None, checkpoint=None,
+# --- manifest-governed guards (F1B authorized for the mocked path) --------- #
+def test_pilot_requires_manifest(tmp_path: Path, f1b_authorized) -> None:
+    rc = run_pilot_cli(league="mlb", manifest_path=None, scratch_db=_scratch(tmp_path),
                        out=lambda _s: None)
     assert rc == 2
 
 
-def test_resume_requires_checkpoint(tmp_path: Path) -> None:
-    rc = run_pilot_cli(league="mlb", from_date="2026-07-01", to_date="2026-07-02",
-                       includes=(), request_cap=100, scratch_db=_scratch(tmp_path),
-                       checkpoint=None, resume=True, out=lambda _s: None)
+def test_pilot_requires_scratch_db(tmp_path: Path, f1b_authorized) -> None:
+    rc = run_pilot_cli(league="mlb", manifest_path=_mlb_manifest(tmp_path), scratch_db=None,
+                       out=lambda _s: None)
     assert rc == 2
 
 
-def test_new_scratch_db_rejected(tmp_path: Path) -> None:
-    rc = run_pilot_cli(league="mlb", from_date="2026-07-01", to_date="2026-07-02",
-                       includes=(), request_cap=100, scratch_db=tmp_path / "missing.db",
-                       checkpoint=tmp_path / "c.ckpt", out=lambda _s: None)
-    assert rc == 2  # must db-init first; ingestion never migrates
+def test_new_scratch_db_rejected(tmp_path: Path, f1b_authorized) -> None:
+    rc = run_pilot_cli(league="mlb", manifest_path=_mlb_manifest(tmp_path),
+                       scratch_db=tmp_path / "missing.db", checkpoint=tmp_path / "c.ckpt",
+                       out=lambda _s: None)
+    assert rc == 2
 
 
-# --- guarded live pilot (mocked transport; sockets sentineled) ------------- #
-def test_pilot_cap_below_min_rejected_zero_transport(tmp_path: Path) -> None:
-    # request_cap below the plan's conservative maximum is a usage error, caught
-    # BEFORE any client/DB work -> exit 2, transport never reached.
+def test_nba_manifest_non_executable_refused(tmp_path: Path, f1b_authorized) -> None:
+    out = tmp_path / "nba.json"
+    emit_plan(league="nba", from_date="2026-01-05", to_date="2026-01-05", includes=(),
+              max_pages=5, manifest_out=out, out=lambda _s: None)
+    rc = run_pilot_cli(league="nba", manifest_path=out, scratch_db=_scratch(tmp_path),
+                       out=lambda _s: None)
+    assert rc == 2  # unknown credit cost -> non-executable
+
+
+def test_tampered_manifest_rejected(tmp_path: Path, f1b_authorized) -> None:
+    m = _mlb_manifest(tmp_path)
+    text = m.read_text(encoding="utf-8")
+    m.write_text(" " + text, encoding="utf-8")  # leading space -> non-canonical
+    rc = run_pilot_cli(league="mlb", manifest_path=m, scratch_db=_scratch(tmp_path),
+                       out=lambda _s: None)
+    assert rc == 2
+
+
+def test_unsupported_manifest_version_rejected(tmp_path: Path, f1b_authorized) -> None:
+    m = _mlb_manifest(tmp_path)
+    body = json.loads(m.read_text(encoding="utf-8"))
+    body["manifest_format_version"] = "f1a-manifest-v999"
+    m.write_text(json.dumps(body, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+    rc = run_pilot_cli(league="mlb", manifest_path=m, scratch_db=_scratch(tmp_path),
+                       out=lambda _s: None)
+    assert rc == 2
+
+
+def test_duplicate_keys_manifest_rejected(tmp_path: Path, f1b_authorized) -> None:
+    m = tmp_path / "dup.json"
+    m.write_text('{"a": 1, "a": 2}', encoding="utf-8")
+    rc = run_pilot_cli(league="mlb", manifest_path=m, scratch_db=_scratch(tmp_path),
+                       out=lambda _s: None)
+    assert rc == 2
+
+
+def test_provider_mismatch_manifest_rejected(tmp_path: Path, f1b_authorized) -> None:
+    # An MLB manifest supplied to an NBA pilot must fail.
+    rc = run_pilot_cli(league="nba", manifest_path=_mlb_manifest(tmp_path),
+                       scratch_db=_scratch(tmp_path), out=lambda _s: None)
+    assert rc == 2
+
+
+# --- guarded happy path + resume (mocked transport) ------------------------ #
+def test_pilot_happy_path_and_completed_resume_zero_calls(tmp_path: Path, f1b_authorized) -> None:
     calls: list[int] = []
     db = _scratch(tmp_path)
     ckpt = tmp_path / "p.ckpt"
-    rc = run_pilot_cli(league="mlb", from_date="2026-07-01", to_date="2026-07-01",
-                       includes=(), request_cap=0, scratch_db=db, checkpoint=ckpt,
+    m = _mlb_manifest(tmp_path)
+    rc = run_pilot_cli(league="mlb", manifest_path=m, scratch_db=db, checkpoint=ckpt,
                        out=lambda _s: None, client_factory=_mlb_factory(calls))
-    assert rc == 2
-    assert calls == []  # transport never reached
+    assert rc == 0
+    assert sum(calls) >= 1
+    calls2: list[int] = []
+    rc2 = run_pilot_cli(league="mlb", manifest_path=m, scratch_db=db, checkpoint=ckpt,
+                        resume=True, out=lambda _s: None, client_factory=_mlb_factory(calls2))
+    assert rc2 == 0
+    assert calls2 == []  # completed resume performs zero transport
 
 
-def test_truncated_run_maps_to_budget_exit_code(tmp_path: Path, monkeypatch) -> None:
-    # A runtime truncation (actual exceeded the cap) maps to EXIT_BUDGET_EXHAUSTED.
+def test_truncated_run_maps_to_budget_exit_code(tmp_path: Path, f1b_authorized, monkeypatch) -> None:
     from sports_quant.ingest import f1a as f1a_mod
     from sports_quant.ingest.pilot import PilotResult
 
     def fake_run_pilot(**_kw):  # type: ignore[no-untyped-def]
         return PilotResult(success=False, truncated=True, completed=1, skipped=0,
-                           exhaustion={"limit_type": "request", "cap": 4}, usage={
-                               "attempted_requests": 4}, checkpoint_state="truncated",
+                           exhaustion={"limit_type": "request", "cap": 4},
+                           usage={"attempted_requests": 4}, checkpoint_state="truncated",
                            network_occurred=True, database_mutated=True)
 
     monkeypatch.setattr(f1a_mod, "run_pilot", fake_run_pilot)
-    rc = run_pilot_cli(league="mlb", from_date="2026-07-01", to_date="2026-07-01",
-                       includes=(), request_cap=10, scratch_db=_scratch(tmp_path),
-                       checkpoint=tmp_path / "p.ckpt", out=lambda _s: None,
-                       client_factory=_mlb_factory([]))
+    rc = run_pilot_cli(league="mlb", manifest_path=_mlb_manifest(tmp_path),
+                       scratch_db=_scratch(tmp_path), checkpoint=tmp_path / "p.ckpt",
+                       out=lambda _s: None, client_factory=_mlb_factory([]))
     assert rc == EXIT_BUDGET_EXHAUSTED
 
 
-def test_pilot_happy_path_completes(tmp_path: Path) -> None:
-    calls: list[int] = []
-    db = _scratch(tmp_path)
-    ckpt = tmp_path / "p.ckpt"
-    rc = run_pilot_cli(league="mlb", from_date="2026-07-01", to_date="2026-07-01",
-                       includes=(), request_cap=10, scratch_db=db, checkpoint=ckpt,
-                       out=lambda _s: None, client_factory=_mlb_factory(calls))
-    assert rc == 0
-    assert sum(calls) >= 1  # schedule was fetched via the mocked transport
-    # A completed resume performs zero transport calls.
-    calls2: list[int] = []
-    rc2 = run_pilot_cli(league="mlb", from_date="2026-07-01", to_date="2026-07-01",
-                        includes=(), request_cap=10, scratch_db=db, checkpoint=ckpt,
-                        resume=True, out=lambda _s: None, client_factory=_mlb_factory(calls2))
-    assert rc2 == 0
-    assert calls2 == []  # nothing re-fetched on completed resume
+# --- CLI dispatch: --pilot arg validation (before any work) ---------------- #
+def test_cli_pilot_conflicting_args_rejected(tmp_path: Path, f1b_authorized) -> None:
+    rc = main(["ingest-mlb", "--pilot", "--manifest", str(_mlb_manifest(tmp_path)),
+               "--scratch-db", str(_scratch(tmp_path)), "--from", "2026-07-01"])
+    assert rc == 2  # --from conflicts with the governing manifest
+
+
+def test_cli_pilot_requires_manifest(tmp_path: Path, f1b_authorized) -> None:
+    rc = main(["ingest-mlb", "--pilot", "--scratch-db", str(_scratch(tmp_path))])
+    assert rc == 2

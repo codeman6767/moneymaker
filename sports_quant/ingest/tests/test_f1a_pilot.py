@@ -14,10 +14,10 @@ from typing import Iterator
 import pytest
 
 from sports_quant.ingest.checkpoint import CheckpointError, load_checkpoint
-from sports_quant.ingest.cost_policies import build_balldontlie_policy
 from sports_quant.ingest.manifest import build_manifest
 from sports_quant.ingest.pilot import UnitDone, run_pilot
 from sports_quant.ingest.planning import Bounds, build_plan
+from sports_quant.ingest.tests.f1a_support import known_cost_policy
 from sports_quant.request_control import (
     CreditBudget,
     RequestBudget,
@@ -33,10 +33,12 @@ def _manifest(max_pages: int = 4, scratch: str = "data/pilot_scratch.db"):
 
 
 def _gate(max_requests: int, max_credits: int = 100) -> RequestGate:
+    # Runner-mechanism tests use a TEST metered policy with known costs (the real
+    # BALLDONTLIE policy is intentionally unknown/fail-closed and tested elsewhere).
     return RequestGate(
         request_budget=RequestBudget(max_requests=max_requests),
         credit_budget=CreditBudget(applicable=True, max_credits=max_credits),
-        cost_policy=build_balldontlie_policy(),
+        cost_policy=known_cost_policy(),
     )
 
 

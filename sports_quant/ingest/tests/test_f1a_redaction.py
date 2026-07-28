@@ -9,7 +9,7 @@ from pathlib import Path
 import httpx
 
 from sports_quant.ingest.checkpoint import Checkpoint, write_checkpoint
-from sports_quant.ingest.cost_policies import build_balldontlie_policy
+from sports_quant.ingest.tests.f1a_support import known_cost_policy
 from sports_quant.providers.balldontlie import BalldontlieClient
 from sports_quant.request_control import CreditBudget, RequestBudget, RequestGate
 
@@ -17,10 +17,12 @@ _SECRET = "bdl_SECRET_key_do_not_leak_9c1f"
 
 
 def _gate() -> RequestGate:
+    # Known-cost TEST policy so the request proceeds and we can assert the secret
+    # is redacted from the body/usage/checkpoint.
     return RequestGate(
         request_budget=RequestBudget(max_requests=10),
         credit_budget=CreditBudget(applicable=True, max_credits=100),
-        cost_policy=build_balldontlie_policy(),
+        cost_policy=known_cost_policy(),
     )
 
 

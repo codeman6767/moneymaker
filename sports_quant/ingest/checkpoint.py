@@ -18,11 +18,28 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
 CHECKPOINT_FORMAT_VERSION = "f1a-checkpoint-v1"
+
+# Serialize checkpoint writes to the same path across threads/tasks: a temp+replace
+# is atomic, but concurrent replaces onto one target race (notably on Windows). A
+# per-path lock makes concurrent writers serialized rather than corrupting.
+_LOCKS_GUARD = threading.Lock()
+_PATH_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _lock_for(path: Path) -> threading.Lock:
+    key = str(Path(path).resolve())
+    with _LOCKS_GUARD:
+        lock = _PATH_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _PATH_LOCKS[key] = lock
+        return lock
 
 
 class CheckpointError(RuntimeError):
@@ -85,32 +102,90 @@ class Checkpoint:
         return identity in set(self.completed_identities)
 
 
-def write_checkpoint(path: Path, checkpoint: Checkpoint) -> None:
-    """Atomically write the checkpoint: temp file in the same dir, then replace.
+#: Hard cap on a checkpoint file we will parse (defends against a hostile,
+#: maliciously-huge JSON). A real checkpoint is a few KB.
+_MAX_CHECKPOINT_BYTES = 4 * 1024 * 1024
 
-    The temp+replace makes a torn write impossible -- a reader sees either the
-    prior checkpoint or the new one, never a partial file.
+
+def write_checkpoint(path: Path, checkpoint: Checkpoint) -> None:
+    """Atomically and durably write the checkpoint: unique temp, fsync, replace.
+
+    The temp file name is unique per process AND per call (pid + random suffix)
+    so concurrent writers/tasks never collide. The file is fsynced, replaced
+    atomically, and the containing directory is fsynced so the rename is durable
+    across a crash -- a reader always sees either the prior or the new valid
+    checkpoint, never a torn file, and a completed write cannot silently roll back.
+    A symlinked target is refused (isolation).
     """
 
     path = Path(path)
+    if path.is_symlink():
+        raise CheckpointError(f"refusing to write a checkpoint through a symlink: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
     text = checkpoint.canonical()
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(text)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, path)  # atomic on POSIX and Windows
+    with _lock_for(path):  # serialize writers to this path (no racing replaces)
+        tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}-{os.urandom(6).hex()}")
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)  # atomic on POSIX and Windows
+            _fsync_dir(path.parent)
+        finally:
+            if tmp.exists():  # a failure before replace must leave no stray temp
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+
+
+def _fsync_dir(directory: Path) -> None:
+    """Best-effort directory fsync so an atomic rename is durable (POSIX)."""
+
+    try:
+        fd = os.open(str(directory), os.O_RDONLY)
+    except OSError:
+        return  # not supported on this platform (e.g. Windows dir fsync); skip
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    seen: dict[str, Any] = {}
+    for k, v in pairs:
+        if k in seen:
+            raise CheckpointError(f"duplicate JSON key in checkpoint: {k!r}")
+        seen[k] = v
+    return seen
 
 
 def load_checkpoint(path: Path) -> Checkpoint:
     path = Path(path)
-    if not path.exists():
+    if path.is_symlink():
+        raise CheckpointError(f"refusing to read a checkpoint through a symlink: {path}")
+    if not path.is_file():
         raise CheckpointError(f"no checkpoint at {path}")
-    data = json.loads(path.read_text(encoding="utf-8"))
+    if path.stat().st_size > _MAX_CHECKPOINT_BYTES:
+        raise CheckpointError(f"checkpoint too large (> {_MAX_CHECKPOINT_BYTES} bytes)")
+    text = path.read_text(encoding="utf-8")
+    try:
+        data = json.loads(text, object_pairs_hook=_reject_duplicate_keys)
+    except json.JSONDecodeError as exc:
+        raise CheckpointError(f"checkpoint is not valid JSON: {exc}") from None
+    if not isinstance(data, dict):
+        raise CheckpointError("checkpoint root must be a JSON object")
     if data.get("checkpoint_format_version") != CHECKPOINT_FORMAT_VERSION:
         raise CheckpointError(
             f"unsupported checkpoint format {data.get('checkpoint_format_version')!r}")
+    for req in ("manifest_hash", "plan_version", "provider", "league", "date_range",
+                "families", "scratch_db", "scratch_fingerprint", "schema_version"):
+        if req not in data:
+            raise CheckpointError(f"checkpoint missing required field: {req}")
     return Checkpoint(
         manifest_hash=data["manifest_hash"],
         plan_version=data["plan_version"],

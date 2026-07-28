@@ -22,8 +22,9 @@ sanitized by :func:`build_exchange`.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Optional
 
@@ -34,6 +35,18 @@ from ..redaction import sanitize_url
 from ..request_control import RequestGate, RequestUnit
 from .capabilities import ProviderErrorKind, classify_http_status
 from .raw_exchange import RawExchange, build_exchange_from_parts
+
+#: Providers whose real network is F1A-budget-governed. A self-owned (real
+#: transport) client for one of these MUST carry a request gate, unless it opts
+#: out explicitly (``require_gate=False`` -- the bounded provider-audit) or the
+#: dev-only override env var is set. This closes the programmatic bypass where a
+#: real MLB/NBA client is used without the budget gate.
+_GATED_PROVIDERS: frozenset[str] = frozenset({"mlb_statsapi", "balldontlie"})
+_ALLOW_UNGATED_ENV = "MONEYMAKER_ALLOW_UNGATED_INGEST"
+
+
+def _ungated_dev_override() -> bool:
+    return os.environ.get(_ALLOW_UNGATED_ENV) == "1"
 
 #: Content types a data provider may return. A response outside this set is
 #: rejected rather than parsed (defends against an HTML error/redirect page).
@@ -102,13 +115,18 @@ class BaseProviderClient:
         redact_values: Iterable[str] = (),
         gate: Optional[RequestGate] = None,
         league: str = "",
+        require_gate: bool = True,
     ) -> None:
         # F1A: an optional request/credit gate enforced at this single GET
         # chokepoint. When present, EVERY transport attempt (initial call, each
         # retry, each page) must reserve budget first; a reservation failure
-        # raises BudgetExhausted and the transport is never invoked.
+        # raises BudgetExhausted and the transport is never invoked. For a gated
+        # provider (MLB/NBA) a self-owned real-transport client MUST carry a gate
+        # (see _get); ``require_gate=False`` opts a bounded non-ingestion caller
+        # (the provider-audit) out of that requirement.
         self._gate = gate
         self._league = league
+        self._require_gate = require_gate
         self._base_url = base_url
         # Secrets always stripped from every stored body (e.g. a header key that
         # a provider might echo). Never affects behaviour, only redaction.
@@ -162,18 +180,43 @@ class BaseProviderClient:
         gated, via the cost policy's path classifier, so no transport escapes).
         """
 
+        # Programmatic-bypass guard (F1A): a self-owned real-transport client for a
+        # gated provider must carry a request gate. A mocked/injected client
+        # (``not self._owns_client``) cannot reach the real network and is exempt,
+        # as is an explicit opt-out (provider-audit) or the dev-only override.
+        if (
+            self._gate is None
+            and self._owns_client
+            and self._require_gate
+            and self.provider_name in _GATED_PROVIDERS
+            and not _ungated_dev_override()
+        ):
+            raise ProviderError(
+                f"{self.provider_name}: a network-capable client requires an F1A request "
+                "gate; use the guarded pilot path (--pilot with a reviewed manifest). "
+                f"Set {_ALLOW_UNGATED_ENV}=1 for dev-only, unbudgeted use.",
+                kind=ProviderErrorKind.UNEXPECTED,
+            )
+
         request_params: dict[str, Any] = dict(params or {})
         secrets: list[str] = list(self._always_redact)
         if secret and secret_param:
             request_params[secret_param] = secret
             secrets.append(secret)
 
-        # Secret-free unit for budget accounting (params here never hold the key).
-        gate_unit = request_unit or self._gate_unit(path, params, endpoint_family)
+        # Secret-free unit for budget accounting. The credit-charged endpoint family
+        # is ALWAYS derived from the trusted request path (classifier), never from a
+        # caller-supplied label -- a caller may enrich identity (entity/page) via
+        # ``request_unit`` but cannot select a cheaper family than the path implies.
+        gate_unit: Optional[RequestUnit] = None
+        if self._gate is not None:
+            trusted_family = self._gate.cost_policy.classify(path)
+            base_unit = request_unit or self._gate_unit(path, params, trusted_family)
+            gate_unit = replace(base_unit, endpoint_family=trusted_family)
 
         attempt = 0
         while True:
-            if self._gate is not None:
+            if self._gate is not None and gate_unit is not None:
                 # Reserve BEFORE any socket work; BudgetExhausted stops the run
                 # here and is never caught by the HTTP error handling below.
                 self._gate.reserve(gate_unit, is_retry=attempt > 0)
@@ -181,6 +224,10 @@ class BaseProviderClient:
             started_ns = time.monotonic_ns()
             request = self._client.build_request("GET", path, params=request_params)
             try:
+                # A transport send is about to occur -- record ACTUAL network
+                # activity (distinct from the earlier reservation).
+                if self._gate is not None and gate_unit is not None:
+                    self._gate.mark_transport(page=gate_unit.page > 0)
                 # stream=True so the body is read chunk-by-chunk and the size cap
                 # is enforced BEFORE the whole response is buffered into memory.
                 response = await self._client.send(request, stream=True)
@@ -200,6 +247,9 @@ class BaseProviderClient:
             body, oversized = await self._read_bounded(response)
             elapsed_ns = time.monotonic_ns() - started_ns
             status_code = response.status_code
+
+            if self._gate is not None and not oversized:
+                self._gate.record_response()  # a complete body was received
 
             if oversized:
                 # No exchange, no body: an oversized response never reaches
@@ -242,6 +292,7 @@ class BaseProviderClient:
                     self._gate.record_failure()
                 raise
             if self._gate is not None:
+                self._gate.record_parse_success()
                 self._gate.record_success()
             return ProviderResponse(data=data, exchange=exchange)
 

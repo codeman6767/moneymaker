@@ -56,20 +56,20 @@ def build_mlb_policy() -> EndpointCostPolicy:
     )
 
 
-# --- BALLDONTLIE (GOAT; credits == metered calls, 1:1 conservative) -------- #
-#: One metered call == one credit (conservative GOAT request-quota unit).
-BALLDONTLIE_COSTS: dict[str, int] = {
-    "teams": 1,
-    "players": 1,
-    "games": 1,
-    "game": 1,
-    "box_scores": 1,
-    "stats": 1,
-    "advanced_stats": 1,
-    "plays": 1,
-    "lineups": 1,
-    "player_injuries": 1,
-}
+# --- BALLDONTLIE (GOAT; per-request credit cost UNPROVEN -> fail closed) ---- #
+# Independent review found NO authoritative, versioned basis in the repository for
+# a per-endpoint BALLDONTLIE credit cost: the provider documentation describes
+# per-minute request-rate limits by tier, not a per-request credit weight, and no
+# response-header contract for consumed/remaining credits is documented. Assuming
+# "1 credit per request" would be a guess that makes NBA planning falsely
+# executable. Per the F1A review we therefore assign NO costs: every BALLDONTLIE
+# family has an UNKNOWN credit cost, so any credit-capped NBA plan/run is
+# non-executable and fails closed with `unknown_credit_cost` until a later
+# controlled capability verification (F1B pilot) establishes and versions the real
+# cost contract. Requests are still hard-capped; credits are never fabricated. To
+# populate this once an authoritative source exists, bump the version below and add
+# the audited per-endpoint costs.
+BALLDONTLIE_COSTS: dict[str, int] = {}
 
 
 def _classify_balldontlie(path: str) -> str:

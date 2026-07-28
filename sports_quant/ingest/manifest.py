@@ -14,12 +14,28 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 from .planning import RequestPlan
 
 MANIFEST_FORMAT_VERSION = "f1a-manifest-v1"
 EXPECTED_SCHEMA_VERSION = 16
+_SUPPORTED_PLAN_VERSIONS = frozenset({"f1a-plan-v1"})
+_SUPPORTED_COST_POLICY_VERSIONS = frozenset({"mlb-cost-v1", "bdl-cost-v1"})
+
+
+class ManifestError(RuntimeError):
+    """A manifest is missing, tampered, non-canonical, or an unsupported version."""
+
+
+def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    seen: dict[str, Any] = {}
+    for k, v in pairs:
+        if k in seen:
+            raise ManifestError(f"duplicate JSON key in manifest: {k!r}")
+        seen[k] = v
+    return seen
 
 
 def canonical_json(payload: dict[str, Any]) -> str:
@@ -183,3 +199,82 @@ def build_manifest(
         unresolved_bounds=plan.unresolved_bounds(),
         plan_body=plan_body(plan),
     )
+
+
+def manifest_from_body(body: dict[str, Any]) -> PilotManifest:
+    """Reconstruct a :class:`PilotManifest` from its canonical body dict."""
+
+    b = body.get("bounds", {})
+    return PilotManifest(
+        provider=body["provider"], league=body["league"], stage=body["stage"],
+        date_range=body["date_range"], families=tuple(body["families"]),
+        plan_version=body["plan_version"],
+        manifest_format_version=body["manifest_format_version"],
+        request_cap=body.get("request_cap"), credit_cap=body.get("credit_cap"),
+        cost_policy_version=body["cost_policy_version"],
+        credits_applicable=bool(body["credits_applicable"]),
+        estimated_requests_min=int(body["estimated_requests_min"]),
+        estimated_requests_max=body.get("estimated_requests_max"),
+        estimated_credits_min=body.get("estimated_credits_min"),
+        estimated_credits_max=body.get("estimated_credits_max"),
+        max_games=b.get("max_games"), max_pages=b.get("max_pages"),
+        max_records=b.get("max_records"), max_retries=int(b.get("max_retries", 3)),
+        scratch_db=body.get("scratch_db", ""), checkpoint_path=body.get("checkpoint_path", ""),
+        expected_schema_version=int(body["expected_schema_version"]),
+        executable=bool(body["executable"]),
+        unresolved_bounds=tuple(body.get("unresolved_bounds", [])),
+        plan_body=body["plan_body"],
+    )
+
+
+def load_and_validate(
+    path: Path, *, expected_league: str, expected_provider: str
+) -> PilotManifest:
+    """Load a reviewed manifest, failing closed on tamper / non-canonical / version.
+
+    Validates (before any network or database work): duplicate JSON keys, exact
+    canonical byte encoding (tamper + noncanonical detection), supported manifest /
+    plan / cost-policy versions, schema v16, and provider/league match. Raises
+    :class:`ManifestError` on any violation.
+    """
+
+    p = Path(path)
+    if p.is_symlink():
+        raise ManifestError(f"manifest path is a symlink (refused): {p}")
+    if not p.is_file():
+        raise ManifestError(f"manifest not found: {p}")
+    text = p.read_text(encoding="utf-8")
+    try:
+        body = json.loads(text, object_pairs_hook=_no_duplicate_keys)
+    except json.JSONDecodeError as exc:
+        raise ManifestError(f"manifest is not valid JSON: {exc}") from None
+    if not isinstance(body, dict):
+        raise ManifestError("manifest root must be a JSON object")
+
+    # Canonical-encoding + tamper check: the file must be exactly the canonical
+    # serialization of its own parsed content (the manifest carries no self-hash
+    # field; the canonical bytes ARE the integrity check).
+    try:
+        recanonical = canonical_json(body)
+    except (TypeError, ValueError) as exc:
+        raise ManifestError(f"manifest not canonically serializable: {exc}") from None
+    if recanonical != text:
+        raise ManifestError("manifest is tampered or non-canonically encoded")
+
+    if body.get("manifest_format_version") != MANIFEST_FORMAT_VERSION:
+        raise ManifestError(
+            f"unsupported manifest_format_version {body.get('manifest_format_version')!r}")
+    if body.get("plan_version") not in _SUPPORTED_PLAN_VERSIONS:
+        raise ManifestError(f"unsupported plan_version {body.get('plan_version')!r}")
+    if body.get("cost_policy_version") not in _SUPPORTED_COST_POLICY_VERSIONS:
+        raise ManifestError(
+            f"unsupported cost_policy_version {body.get('cost_policy_version')!r} "
+            "(regenerate the manifest under the current repository policy)")
+    if int(body.get("expected_schema_version", -1)) != EXPECTED_SCHEMA_VERSION:
+        raise ManifestError(
+            f"manifest expected_schema_version != {EXPECTED_SCHEMA_VERSION}")
+    if body.get("provider") != expected_provider or body.get("league") != expected_league:
+        raise ManifestError(
+            f"manifest provider/league ({body.get('provider')}/{body.get('league')}) "
+            f"does not match the command ({expected_provider}/{expected_league})")
+    return manifest_from_body(body)

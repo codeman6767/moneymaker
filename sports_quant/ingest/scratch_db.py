@@ -79,7 +79,64 @@ def _row_counts(conn: sqlite3.Connection) -> dict[str, int]:
 
 
 def fingerprint_of(counts: dict[str, int], schema_version: Optional[int]) -> str:
+    """Legacy row-count fingerprint (kept for callers). Weak: cannot detect a
+    content change at unchanged row counts. Prefer :func:`content_digest`."""
+
     payload = {"schema_version": schema_version, "row_counts": counts}
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _table_content_digest(conn: sqlite3.Connection, table: str) -> str:
+    """An order-independent digest of a table's full content.
+
+    Each row is hashed from its canonical column values; the row hashes are sorted
+    and combined, so the digest depends only on the SET of rows (content), not on
+    physical/scan order -- and it CHANGES when any row value changes even if the
+    row count does not (updated rows, delete+replace, changed raw responses or
+    normalized observations are all detected).
+    """
+
+    cur = conn.execute(f"SELECT * FROM {table}")  # noqa: S608 - table from sqlite_master
+    cols = [d[0] for d in cur.description]
+    row_hashes: list[str] = []
+    for row in cur:
+        payload = json.dumps([cols, list(row)], sort_keys=True, separators=(",", ":"),
+                             default=lambda o: repr(o))
+        row_hashes.append(hashlib.sha256(payload.encode("utf-8")).hexdigest())
+    row_hashes.sort()
+    h = hashlib.sha256()
+    h.update(str(len(row_hashes)).encode("utf-8"))
+    for rh in row_hashes:
+        h.update(rh.encode("utf-8"))
+    return h.hexdigest()
+
+
+def content_digest(conn: sqlite3.Connection, schema_version: Optional[int]) -> str:
+    """A deterministic whole-database content identity (schema + every row).
+
+    Includes the full ``sqlite_master`` schema (detects schema-object changes) and
+    a per-table content digest for every table. Opened read-only via ``mode=ro``
+    (never ``immutable``), so committed WAL content IS included and no sidecar is
+    written. Two databases with identical row counts but different content get
+    different digests; a byte-substituted or copied database is likewise detected.
+    """
+
+    schema_rows = conn.execute(
+        "SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' "
+        "ORDER BY type, name").fetchall()
+    schema_repr = json.dumps([[r["type"], r["name"], r["sql"]] for r in schema_rows],
+                            sort_keys=True, separators=(",", ":"))
+    tables = [str(r[0]) for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' "
+        "ORDER BY name")]
+    per_table = {t: _table_content_digest(conn, t) for t in tables}
+    payload = {
+        "schema_version": schema_version,
+        "schema_objects": hashlib.sha256(schema_repr.encode("utf-8")).hexdigest(),
+        "tables": per_table,
+    }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -128,9 +185,11 @@ def classify_scratch_db(
     try:
         version = _schema_version(conn)
         counts = _row_counts(conn)
+        # Strong identity: a whole-database content digest (schema + every row),
+        # WAL-aware, computed while the read-only connection is open.
+        fp = content_digest(conn, version)
     finally:
         conn.close()
-    fp = fingerprint_of(counts, version)
     nonempty = any(counts.get(t, 0) > 0 for t in _CORPUS_TABLES)
 
     if version != EXPECTED_SCHEMA_VERSION:

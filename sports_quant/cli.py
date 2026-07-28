@@ -336,6 +336,31 @@ def run_db_init(
 # write that should have worked). Distinct from a clean skip (0).
 EXIT_ACTIVE_FAILURE = 1
 
+# Usage error (invalid/unsafe invocation), caught before any network/DB work.
+EXIT_USAGE = 2
+
+
+def _legacy_ingest_blocked(client: object, out: "Printer", *, command: str) -> bool:
+    """True (blocked) when an ungated legacy MLB/NBA ingest would hit the real
+    network. The safe path is ``--plan`` then ``--pilot --manifest`` (F1A gate).
+
+    Exempt: a mocked/injected ``client`` (no real network) or the dev-only override
+    env var. The default is BLOCKED so no legacy CLI/programmatic call can reach
+    MLB/BALLDONTLIE transport without the budget gate.
+    """
+
+    import os
+
+    if client is not None:
+        return False  # injected/mocked client -> caller-controlled, not real network
+    if os.environ.get("MONEYMAKER_ALLOW_UNGATED_INGEST") == "1":
+        return False  # dev-only override; prohibited for F1B
+    out(f"[FAILED ] {command}: ungated legacy ingestion is disabled. Use the guarded "
+        "F1A pilot contract: '--plan [--manifest-out P]' then "
+        "'--pilot --manifest P --scratch-db DB'. (Dev-only: set "
+        "MONEYMAKER_ALLOW_UNGATED_INGEST=1; never for F1B.)")
+    return True
+
 
 def _report_ingest(result: OddsIngestResult, out: Printer) -> None:
     """Print a sanitized ingestion summary. Never displays the API key."""
@@ -936,7 +961,17 @@ def run_ingest_mlb(
     out: Printer = print,
     client: Optional[MlbStatsApiClient] = None,
 ) -> int:
-    """Ingest MLB official data. GET-only, no key; ``--dry-run`` persists nothing."""
+    """Ingest MLB official data. GET-only, no key; ``--dry-run`` persists nothing.
+
+    LEGACY, QUARANTINED: this ungated path (real client, no F1A request/credit gate)
+    is disabled by default. Use the guarded pilot contract (``--plan`` then
+    ``--pilot --manifest``). It is enabled only for a dev, when a mocked client is
+    injected (``client=...``, no real network) or the dev-only override env var is
+    set; it is prohibited for F1B.
+    """
+
+    if _legacy_ingest_blocked(client, out, command="ingest-mlb"):
+        return EXIT_USAGE
 
     if settings is None:
         settings = load_settings()
@@ -1137,7 +1172,14 @@ def run_ingest_nba(
     out: Printer = print,
     client: Optional[BalldontlieClient] = None,
 ) -> int:
-    """Ingest NBA official data from BALLDONTLIE (GOAT). ``--dry-run`` persists nothing."""
+    """Ingest NBA official data from BALLDONTLIE (GOAT). ``--dry-run`` persists nothing.
+
+    LEGACY, QUARANTINED (see :func:`run_ingest_mlb`): the ungated real-client path
+    is disabled by default; use the guarded pilot contract.
+    """
+
+    if _legacy_ingest_blocked(client, out, command="ingest-nba"):
+        return EXIT_USAGE
 
     if settings is None:
         settings = load_settings()
@@ -1447,23 +1489,41 @@ def _dispatch_f1a(args: Any, *, league: str) -> Optional[int]:
         return None
     if plan_mode and pilot_mode:
         print("[FAILED ] --plan and --pilot are mutually exclusive")
-        return 2
-    if args.from_date is None:
-        print("[FAILED ] --from is required for --plan/--pilot")
-        return 2
+        return EXIT_USAGE
     from .ingest.f1a import emit_plan, run_pilot_cli
     includes = tuple(dict.fromkeys(args.includes))
+
     if plan_mode:
+        if args.from_date is None:
+            print("[FAILED ] --from is required for --plan")
+            return EXIT_USAGE
         return emit_plan(
             league=league, from_date=args.from_date, to_date=args.to_date, includes=includes,
             max_games=args.max_games, max_pages=args.max_pages, max_records=args.max_records,
             request_cap=args.request_cap, credit_cap=args.credit_cap,
             scratch_db=str(args.scratch_db or ""), checkpoint=str(args.checkpoint or ""),
             as_json=args.as_json, manifest_out=args.manifest_out)
+
+    # --pilot: the reviewed MANIFEST governs the plan. Plan-shaping args may not
+    # silently override it -- any of them fails before any network/DB work.
+    conflicting = [
+        name for name, val in (
+            ("--from", args.from_date), ("--to", args.to_date),
+            ("--include", tuple(args.includes)), ("--max-games", args.max_games),
+            ("--max-pages", args.max_pages), ("--max-records", args.max_records),
+            ("--request-cap", args.request_cap), ("--credit-cap", args.credit_cap),
+        ) if val not in (None, (), [])
+    ]
+    if conflicting:
+        print("[FAILED ] --pilot is governed by --manifest; remove plan-shaping args: "
+              + ", ".join(conflicting))
+        return EXIT_USAGE
+    if getattr(args, "manifest", None) is None:
+        print("[FAILED ] --pilot requires --manifest PATH (generate + review it via "
+              "'--plan --manifest-out PATH')")
+        return EXIT_USAGE
     return run_pilot_cli(
-        league=league, from_date=args.from_date, to_date=args.to_date, includes=includes,
-        request_cap=args.request_cap, credit_cap=args.credit_cap, max_games=args.max_games,
-        max_pages=args.max_pages, max_records=args.max_records, scratch_db=args.scratch_db,
+        league=league, manifest_path=args.manifest, scratch_db=args.scratch_db,
         checkpoint=args.checkpoint, resume=args.resume, as_json=args.as_json)
 
 
@@ -1486,7 +1546,10 @@ def _add_f1a_args(parser: Any) -> None:
                    help="Explicit isolated scratch database for a live pilot")
     g.add_argument("--checkpoint", dest="checkpoint", type=Path, default=None, metavar="PATH")
     g.add_argument("--resume", action="store_true", help="Resume from --checkpoint (verified)")
-    g.add_argument("--manifest-out", dest="manifest_out", type=Path, default=None, metavar="PATH")
+    g.add_argument("--manifest-out", dest="manifest_out", type=Path, default=None, metavar="PATH",
+                   help="(--plan) write the canonical reviewed manifest to PATH")
+    g.add_argument("--manifest", dest="manifest", type=Path, default=None, metavar="PATH",
+                   help="(--pilot) the reviewed manifest that GOVERNS execution")
 
 
 def main(argv: Optional[list[str]] = None) -> int:

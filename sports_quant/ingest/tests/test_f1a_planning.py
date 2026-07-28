@@ -36,7 +36,10 @@ def test_mlb_rich_bounded_is_executable() -> None:
     assert plan.required_request_cap() == 41 * 4
 
 
-def test_nba_skeleton_needs_max_pages() -> None:
+def test_nba_skeleton_non_executable_unknown_credit_cost() -> None:
+    # NBA request fan-out is boundable (max_pages), but the BALLDONTLIE per-request
+    # credit cost is UNKNOWN (no authoritative source) -> credit-capped plan is
+    # non-executable and fails closed, even fully bounded.
     unbounded = build_plan(league="nba", from_date="2026-01-05", to_date="2026-01-05",
                            families=("games",), stage="skeleton", bounds=Bounds())
     assert unbounded.executable() is False
@@ -44,21 +47,22 @@ def test_nba_skeleton_needs_max_pages() -> None:
     bounded = build_plan(league="nba", from_date="2026-01-05", to_date="2026-01-05",
                          families=("games",), stage="skeleton",
                          bounds=Bounds(max_pages=5, max_retries=3))
-    assert bounded.executable() is True
-    assert bounded.semantic_requests_max() == 5
+    assert bounded.semantic_requests_max() == 5           # requests ARE boundable
     assert bounded.credits_applicable is True
-    assert bounded.credits_max() == 5 * 4  # 1 credit/page * 5 pages * retry factor
+    assert bounded.credits_max() is None                  # ... but credits are unknown
+    assert bounded.executable() is False
+    assert any("unknown_credit_cost" in b for b in bounded.unresolved_bounds())
 
 
-def test_nba_rich_bounded_credits_computed() -> None:
+def test_nba_rich_requests_boundable_credits_unknown() -> None:
     plan = build_plan(league="nba", from_date="2026-01-05", to_date="2026-01-05",
                       families=("box", "stats", "advanced", "plays", "lineups"), stage="rich",
                       bounds=Bounds(max_games=8, max_pages=3, max_retries=3))
-    assert plan.executable() is True
     # games(3) + box(1) + stats(24) + advanced(24) + plays(24) + lineups(8) = 84
     assert plan.semantic_requests_max() == 84
-    assert plan.credits_max() == 84 * 4
-    assert plan.credits_min() is not None
+    assert plan.credits_max() is None                     # unknown credit cost
+    assert plan.executable() is False
+    assert any("unknown_credit_cost" in b for b in plan.unresolved_bounds())
 
 
 def _nba_skeleton_plan():  # type: ignore[no-untyped-def]

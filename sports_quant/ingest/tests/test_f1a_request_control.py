@@ -14,6 +14,7 @@ import httpx
 import pytest
 
 from sports_quant.ingest.cost_policies import build_balldontlie_policy, build_mlb_policy
+from sports_quant.ingest.tests.f1a_support import known_cost_policy
 from sports_quant.providers.base_provider import BaseProviderClient, ProviderError
 from sports_quant.request_control import (
     BudgetExhausted,
@@ -50,10 +51,12 @@ def _counter_handler(calls: list[int], *, status: int = 200):
 
 
 def _nba_gate(*, max_requests: int, max_credits: int | None) -> RequestGate:
+    # Mechanism tests use a TEST metered policy with known costs; the REAL
+    # BALLDONTLIE policy (unknown costs, fail closed) is asserted separately.
     return RequestGate(
         request_budget=RequestBudget(max_requests=max_requests),
         credit_budget=CreditBudget(applicable=True, max_credits=max_credits),
-        cost_policy=build_balldontlie_policy(),
+        cost_policy=known_cost_policy(),
     )
 
 
@@ -137,6 +140,28 @@ def test_retry_succeeds_when_budget_allows() -> None:
     assert sum(calls) == 2
     assert gate.usage.retry_attempts == 1
     assert gate.usage.reserved_credits == 2  # initial + retry each reserve a credit
+
+
+def test_real_balldontlie_policy_fails_closed_on_known_family() -> None:
+    # The REAL policy has UNKNOWN per-endpoint credit cost (no authoritative
+    # source), so even a well-classified family (`games`) fails closed under a
+    # credit cap -- NBA is not silently made executable.
+    calls: list[int] = []
+    gate = RequestGate(
+        request_budget=RequestBudget(max_requests=100),
+        credit_budget=CreditBudget(applicable=True, max_credits=100),
+        cost_policy=build_balldontlie_policy(),
+    )
+    c = _gated_client(gate, _counter_handler(calls))
+
+    async def go() -> None:
+        with pytest.raises(BudgetExhausted) as exc:
+            await c._get("/v1/games", endpoint_family="games")
+        assert exc.value.limit_type is LimitType.UNKNOWN_CREDIT_COST
+        await c.aclose()
+
+    asyncio.run(go())
+    assert calls == []  # never reaches the socket
 
 
 def test_unknown_nba_credit_cost_fails_closed() -> None:
