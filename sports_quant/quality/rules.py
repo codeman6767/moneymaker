@@ -22,29 +22,52 @@ for context and never affect the E2 grade.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from typing import Optional
 
 from ..pit.asof import AsOfAmbiguityError, AsOfReader
+from ..pit.dataset import _feature_cutoff
 from ..pit.models import Cutoff
+from ..pit.registry import TABLE_REGISTRY, TableClass
 from .report import Finding, Severity
 
-__all__ = ["run_rules", "open_dq_findings", "OBSERVATION_CONFLICT_SCANS"]
+__all__ = ["run_rules", "open_dq_findings", "conflict_scan_tables"]
 
 _LABEL_HORIZON = Cutoff.parse("9999-12-31T23:59:59.000000Z")
 _LEAGUE_CODES = {"mlb": "MLB", "nba": "NBA"}
+_UNIQUE_RE = re.compile(r"UNIQUE\s*\(([^)]*)\)", re.IGNORECASE)
 
-# (table, anchor-columns) for equal-time conflict scans. Anchor = the append-only
-# UNIQUE(...) minus (observed_at, content_hash): two rows sharing an anchor and
-# observed_at with DIFFERENT content_hash are a genuine equal-time conflict.
-OBSERVATION_CONFLICT_SCANS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("game_result_snapshots", ("game_ref_id",)),
-    ("nba_game_results", ("game_ref_id",)),
-    ("game_status_history", ("game_id", "provider")),
-    ("team_game_statistics", ("game_ref_id", "provider_team_id")),
-    ("nba_team_statistics", ("game_ref_id", "provider_team_id")),
-    ("weather_snapshots", ("game_ref_id", "forecast_mode", "valid_time")),
-)
+
+def conflict_scan_tables(conn: sqlite3.Connection) -> list[tuple[str, tuple[str, ...]]]:
+    """Every append-only observation table to scan for equal-time conflicts, DERIVED
+    from the registry + schema so a newly-added append-only table cannot silently
+    escape the audit. A table qualifies when it is ``asof_filtered`` with an
+    ``observed_at`` transaction column, a stable id, and a ``content_hash`` tie key.
+    Its anchor = the table's ``UNIQUE(...)`` columns minus (observed_at,
+    content_hash); tables without such a UNIQUE are skipped (reported by the caller
+    as a coverage gap)."""
+
+    out: list[tuple[str, tuple[str, ...]]] = []
+    for name in sorted(TABLE_REGISTRY):
+        entry = TABLE_REGISTRY[name]
+        if (entry.classification is not TableClass.ASOF_FILTERED or not entry.observed_at_column
+                or not entry.content_column):
+            continue
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name = ?", (name,)).fetchone()
+        if row is None or row[0] is None:
+            continue
+        anchor: tuple[str, ...] = ()
+        for m in _UNIQUE_RE.finditer(str(row[0])):
+            cols = [c.strip() for c in m.group(1).split(",")]
+            if entry.observed_at_column in cols and entry.content_column in cols:
+                anchor = tuple(c for c in cols
+                               if c not in (entry.observed_at_column, entry.content_column))
+                break
+        if anchor:
+            out.append((name, anchor))
+    return out
 
 
 def _games(conn: sqlite3.Connection, league: Optional[str]) -> list[sqlite3.Row]:
@@ -76,17 +99,16 @@ def _result_leaks(conn: sqlite3.Connection, league: Optional[str]) -> list[Findi
             continue
         sport = "mlb" if league_code == "MLB" else "nba"
         try:
-            schedule = reader.official_schedule(ref)
+            t_cut = _feature_cutoff(conn, ref)  # same policy as the dataset builder
         except AsOfAmbiguityError:
+            continue  # reported by DQ-PIT-008
+        if t_cut is None:
             continue
-        if schedule is None or schedule.get("scheduled_start") is None:
-            continue
-        t_cut = str(schedule.get("scheduled_start"))
         table = "game_result_snapshots" if sport == "mlb" else "nba_game_results"
         leaked = conn.execute(  # noqa: S608 - table from a fixed literal set
             f"SELECT COUNT(*) FROM {table} WHERE game_ref_id = ? AND mapped_status = 'final' "
             "AND winning_side IN ('home','away') AND observed_at <= ?",
-            (ref, _iso(t_cut))).fetchone()[0]
+            (ref, t_cut.iso)).fetchone()[0]
         if leaked:
             out.append(Finding(
                 rule_code="DQ-PIT-001", severity=Severity.BLOCKING, entity_type="game",
@@ -102,9 +124,9 @@ def _equal_time_conflicts(conn: sqlite3.Connection) -> list[Finding]:
     a corpus containing them cannot deterministically resolve those states."""
 
     out: list[Finding] = []
-    for table, anchor in OBSERVATION_CONFLICT_SCANS:
+    for table, anchor in conflict_scan_tables(conn):
         cols = ", ".join(anchor)
-        rows = conn.execute(  # noqa: S608 - table/anchor from the fixed OBSERVATION_CONFLICT_SCANS
+        rows = conn.execute(  # noqa: S608 - table/anchor from registry-derived conflict_scan_tables
             f"SELECT {cols}, observed_at, COUNT(DISTINCT content_hash) AS c FROM {table} "
             f"GROUP BY {cols}, observed_at HAVING c > 1 ORDER BY {cols}, observed_at").fetchall()
         for r in rows:
@@ -220,10 +242,3 @@ def open_dq_findings(conn: sqlite3.Connection, *, league: Optional[str] = None,
 
 def _league_of(league_id: str) -> Optional[str]:
     return {"lg_mlb": "MLB", "lg_nba": "NBA"}.get(league_id)
-
-
-def _iso(value: str) -> str:
-    """Normalize a possibly-non-microsecond timestamp to the canonical comparison
-    form so ``observed_at <= scheduled_start`` compares correctly."""
-
-    return Cutoff.parse(value).iso

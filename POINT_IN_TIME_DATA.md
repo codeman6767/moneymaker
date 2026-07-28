@@ -180,29 +180,66 @@ hides it.
 >
 > **Phase E1 has independently passed its correctness review and is complete.**
 >
-> **Phase E2 status — implemented; independent review pending.** The historical
-> row layer and quality tooling are built (`sports_quant/pit/dataset.py`,
-> `sports_quant/quality/`, `sports_quant/status.py`, and the `data-status` /
-> `data-quality` CLI commands), schema still **v16** (no new migration).
+> **Phase E2 status — independently reviewed and COMPLETE.** The historical
+> row layer and quality tooling (`sports_quant/pit/dataset.py`,
+> `sports_quant/quality/`, `sports_quant/status.py`, `sports_quant/report_access.py`,
+> and the `data-status` / `data-quality` CLI commands) have passed an independent
+> correctness review, schema still **v16** (no new migration).
 > `build_historical_dataset(conn, league=…)` emits real pregame rows from
 > persisted games + append-only observations using ONLY the E1 accessors and
-> registry: one row per proven game, feature cutoff = the game's scheduled start,
-> label = the final result observed STRICTLY AFTER the cutoff (correction-aware,
-> excluded/fail-closed on equal-time conflicts, invisible-at-cutoff verified), and
-> the game↔reference correspondence gated on the accepted `entity_type='game'`
-> decision decided by the cutoff. `score_diff`/`phase` are cutoff-known (0 pregame)
-> and the result never enters the state payload. It converts to the existing
+> registry: one row per proven game; the feature cutoff is the game's scheduled
+> start **taken from the earliest schedule snapshot actually visible at the cutoff**
+> (a schedule first observed at/after that start cannot set its own cutoff — the row
+> is excluded, fail-closed on equal-time schedule conflicts); label = the final
+> result observed STRICTLY AFTER the cutoff (correction-aware, excluded/fail-closed
+> on equal-time conflicts, invisible-at-cutoff verified); and the game↔reference
+> correspondence gated on the accepted `entity_type='game'` decision decided by the
+> cutoff. `score_diff`/`phase` are cutoff-known (0 pregame) and the result never
+> enters the state payload. **Label isolation is structural:** `feature_state()` /
+> `serialize()` carry identity + cutoff + cutoff-known state ONLY, while the label,
+> winner and its provenance live on a SEPARATE `label_record()` / `serialize_labels()`
+> surface — a later result correction changes the label surface byte-for-byte and
+> leaves the feature-state serialization unchanged. It converts to the existing
 > `GameStateDataset` WITHOUT fabricating data — a zero-column feature matrix and an
-> all-NaN (explicitly unavailable) `true_prob` — preserving chronological
-> splitting. `data-status` and `data-quality` are OFFLINE, genuinely read-only
-> (`immutable=1`, no sidecars), exit `3` on a missing/unmigrated/corrupt db, and
-> `data-quality` exits `1` at/above its `--fail-on` severity. E2 corpus rules
-> (report-only; never upserted into `data_quality_issues`) prove leakage/
-> determinism defects: `DQ-PIT-001` result-leak (blocking), `DQ-PIT-008` equal-time
-> conflict (blocking), `DQ-PIT-011` unknown weather eligibility (issue),
+> all-NaN (explicitly unavailable) `true_prob`, length-invariant-checked — preserving
+> chronological splitting; row `timestamp` is microseconds so sub-second-distinct
+> cutoffs never collide.
+>
+> **Independent-review repairs (this pass), each with an adversarial regression.**
+> **(1)** the feature cutoff is now the earliest *visible-at-cutoff* schedule start,
+> closing a future-schedule/cutoff-rewriting leak. **(2)** feature-state and label
+> surfaces are physically separated (above). **(3)** equal-time conflict coverage is
+> **registry-derived**: `conflict_scan_tables` enumerates every as-of-filtered,
+> content-hashed append-only table with a `UNIQUE(...)` anchor, so a newly-added
+> observation table cannot silently escape the `DQ-PIT-008` scan. **(4)** `data-status`
+> / `data-quality` **fail closed on a committed-but-uncheckpointed WAL** (a non-empty
+> `-wal` sidecar → exit `3`), never a silent stale `immutable=1` read. **(5)** an OPEN
+> blocking/`--fail-on` `data_quality_issues` row now gates BOTH `corpus_valid` and the
+> exit code — the command can never report the corpus valid while a blocking open
+> issue exists (`execution_valid` still reflects only the newly-detected E2 rule
+> findings). **(6)** pending manual-review counts count only the LATEST flagged
+> decision per `(entity_type, source_provider, source_ref)`, so superseded or
+> completed reviews are not over-counted. **(7)** `provider_runs` breaks a same
+> `started_at` tie deterministically — differing statuses are reported as
+> `ambiguous(...)` rather than a rebuild-dependent generated-`run_id` winner. **(8)**
+> `--since` is validated as a real `YYYY-MM-DD` (invalid → usage error, never silent
+> zeros); league/since scoping is applied only where honest, else a `not attributable`
+> note.
+>
+> `data-status` and `data-quality` are OFFLINE, genuinely read-only
+> (`immutable=1`, no sidecars), exit `3` on a missing/unmigrated/corrupt/stale-WAL db,
+> and `data-quality` exits `1` at/above its `--fail-on` severity (E2 findings OR open
+> issues). E2 corpus rules (report-only; never upserted into `data_quality_issues`)
+> prove leakage/determinism defects: `DQ-PIT-001` result-leak (blocking), `DQ-PIT-008`
+> equal-time conflict (blocking), `DQ-PIT-011` unknown weather eligibility (issue),
 > `E2-LABEL-UNAVAILABLE` / `E2-IDENTITY-MISSING` (note). **No feature engineering,
 > model training, live request, ingestion, backfill, recommendation or execution
-> work was performed, and the E2 independent correctness review has not yet passed.**
+> work was performed.**
+>
+> **Phase E2 has independently passed its correctness review and is complete;
+> Phase E (E1 + E2) is complete. No later phase (feature engineering, modeling,
+> simulation, recommendations, backtesting, paper trading, execution) has been
+> started.**
 
 ## 3. As-of query pattern
 
@@ -332,7 +369,7 @@ complete historical snapshot; c008 retains only current + first provenance, so
 Phase E must read from the decision/DQ timelines and must not claim to reconstruct
 prior rules text/hash observations beyond that boundary |
 | Weather forecast-vs-actual kept distinct (leakage vector) | ◧ **D4 built (schema v14)** — `weather_snapshots.weather_kind` separates `current_forecast` / `station_observation` / `historical_forecast` / `reanalysis`; `observed_at` is never backdated to a model-run time; an explicit `pit_eligible` (1/0/NULL) is set (a station observation / reanalysis is never PIT-eligible; a stitched historical forecast whose availability is unproven is `pit_eligible=NULL` + a `DQ-WX-PIT-001` note). Phase E must gate pregame weather features on `weather_kind='current_forecast' AND observed_at ≤ cutoff AND pit_eligible=1` — never on the endpoint of origin, and never a reanalysis/observation row |
-| Full `pit/asof.py` + safe-join registry + evaluation-only isolation + adversarial leak fixtures | ✅ **E1 complete — independently reviewed (schema v16, no new migration)** — `sports_quant/pit/` ships the strict `Cutoff` type, the canonical `latest_as_of` algorithm (content-hash fail-closed ties, positive-allowlist WHERE grammar), the fail-closed table registry (structural + feature-column policies, true read-only URI mode, review-gated identity), feature-facing as-of accessors that project only feature-safe columns, `evaluation_only.closing_line_for_evaluation`, and adversarial fixtures proving **DQ-PIT-001..011**. **E2 implemented (independent review pending):** `pit/dataset.py` historical row builder + `sports_quant/quality/` rules/report + `data-status`/`data-quality` commands |
+| Full `pit/asof.py` + safe-join registry + evaluation-only isolation + adversarial leak fixtures | ✅ **E1 complete — independently reviewed (schema v16, no new migration)** — `sports_quant/pit/` ships the strict `Cutoff` type, the canonical `latest_as_of` algorithm (content-hash fail-closed ties, positive-allowlist WHERE grammar), the fail-closed table registry (structural + feature-column policies, true read-only URI mode, review-gated identity), feature-facing as-of accessors that project only feature-safe columns, `evaluation_only.closing_line_for_evaluation`, and adversarial fixtures proving **DQ-PIT-001..011**. **E2 complete — independently reviewed:** `pit/dataset.py` historical row builder (visible-at-cutoff cutoff, feature-state/label split, microsecond timestamps) + `sports_quant/quality/` rules/report (registry-derived conflict scan) + `data-status`/`data-quality` commands (uncheckpointed-WAL fail-closed, open-issue validity/exit gate). Phase E complete; no later phase started. |
 
 `GameRepository.status_as_of()` is the first working instance of the §3
 pattern, and its tests already cover the DQ-PIT-004 shape: a status observed at

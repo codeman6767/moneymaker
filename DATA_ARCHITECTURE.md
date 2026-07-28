@@ -1234,7 +1234,7 @@ sports_quant/
                           #   independently reviewed): true read-only URI, content-hash fail-closed
                           #   ties, feature-column allowlists, positive-allowlist SQL grammar,
                           #   games status+scheduled_start as-of, review-gated identity;
-                          #   dataset.py = historical row builder (E2 implemented, review pending)
+                          #   dataset.py = historical row builder (E2 complete, independently reviewed)
 ◧ quality/                # rules.py, report.py, runner.py (E2): corpus PIT quality
                           #   grading; data-status + data-quality CLI (offline, read-only)
 ```

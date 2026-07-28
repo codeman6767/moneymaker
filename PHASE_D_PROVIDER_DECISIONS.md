@@ -9,7 +9,7 @@ read-only MLB/NBA betting **recommendation** engine.
 > is complete (schema v14): D2 (MLB) and D3 (NBA) additionally passed controlled
 > live provider audits on 2026-07-24, while D4 (NWS/Open-Meteo weather) is
 > offline/mock-verified only (no live weather audit or persisted weather
-> ingestion). D5 entity matching is complete through D5B2 (schema v16, mocked/offline plus a bounded public-contract audit); Phase E1 is complete (independently reviewed) and Phase E2 (dataset + quality commands) is implemented (independent review pending); any large backfill still requires an approved
+> ingestion). D5 entity matching is complete through D5B2 (schema v16, mocked/offline plus a bounded public-contract audit); Phase E1 and Phase E2 (dataset + quality commands) are both complete and independently reviewed (Phase E complete; no later phase started); any large backfill still requires an approved
 > provider audit first. No account was created, no subscription purchased, and no
 > live provider call was made while writing THIS document (every capability table
 > reflects mocked, contract-enforcing understanding as of the review date below).

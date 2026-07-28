@@ -1716,10 +1716,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     review.add_argument("--db", dest="database_path", type=Path, default=None, metavar="PATH")
     review.add_argument("--json", dest="as_json", action="store_true", help="Machine-readable output")
 
+    from .report_access import validate_since as _valid_since
     status = sub.add_parser(
         "data-status", help="Offline read-only corpus status report (E2)")
     status.add_argument("--league", choices=["mlb", "nba"], default=None)
-    status.add_argument("--since", dest="since", default=None, metavar="YYYY-MM-DD")
+    status.add_argument("--since", dest="since", default=None, metavar="YYYY-MM-DD",
+                        type=_valid_since)
     status.add_argument("--db", dest="database_path", type=Path, default=None, metavar="PATH")
     status.add_argument("--json", dest="as_json", action="store_true", help="Machine-readable output")
 

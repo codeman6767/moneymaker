@@ -35,6 +35,45 @@ def resolve_db_path(database_path: Optional[Path]) -> Path:
     return load_settings().resolved_database_path()
 
 
+def validate_since(since: Optional[str]) -> Optional[str]:
+    """Validate a ``--since`` value as a real ``YYYY-MM-DD`` calendar date, or raise
+    ``ValueError`` (so an invalid date fails clearly rather than silently producing
+    misleading zero counts)."""
+
+    if since is None:
+        return None
+    from datetime import date
+    try:
+        y, m, d = (int(p) for p in since.split("-"))
+        date(y, m, d)
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"invalid --since {since!r}: expected a real YYYY-MM-DD date") from exc
+    if len(since) != 10 or since[4] != "-" or since[7] != "-":
+        raise ValueError(f"invalid --since {since!r}: expected YYYY-MM-DD")
+    return since
+
+
+def pending_review_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    """CURRENTLY-pending manual reviews grouped by entity_type (RF7).
+
+    A decision counts only when it is still flagged (``needs_manual_review = 1``)
+    AND is the LATEST decision for its ``(entity_type, source_provider, source_ref)``
+    source -- an older flagged decision that was later superseded by a newer
+    decision (or whose review was completed) is not counted. Deterministically
+    ordered by entity_type."""
+
+    rows = conn.execute(
+        "SELECT d.entity_type AS et, COUNT(*) AS c FROM entity_match_decisions d "
+        "WHERE d.needs_manual_review = 1 AND NOT EXISTS ("
+        "  SELECT 1 FROM entity_match_decisions d2 "
+        "  WHERE d2.entity_type = d.entity_type AND d2.source_provider = d.source_provider "
+        "  AND d2.source_ref = d.source_ref AND ("
+        "    d2.decided_at > d.decided_at "
+        "    OR (d2.decided_at = d.decided_at AND d2.match_id > d.match_id))) "
+        "GROUP BY d.entity_type ORDER BY d.entity_type").fetchall()
+    return {str(r["et"]): int(r["c"]) for r in rows}
+
+
 def schema_version_or_none(conn: sqlite3.Connection) -> Optional[int]:
     """Highest applied migration version, or None when unmigrated."""
 
@@ -58,6 +97,16 @@ def with_readonly_corpus(
     path = resolve_db_path(database_path)
     if not path.exists():
         out(f"[FAILED ] database not found at {path}; run 'python -m sports_quant db-init'")
+        return EXIT_DATABASE_ERROR
+    # A nonempty WAL sidecar means committed-but-uncheckpointed data. The read-only
+    # snapshot opens with SQLite immutable=1, which IGNORES the WAL and would read a
+    # STALE corpus -- so fail closed rather than silently reporting stale state. We
+    # never checkpoint (that would write to the user's database from a read command).
+    wal = Path(f"{path}-wal")
+    if wal.exists() and wal.stat().st_size > 0:
+        out(f"[FAILED ] database at {path} has an uncheckpointed WAL "
+            f"({wal.stat().st_size} bytes); a complete read-only snapshot cannot be taken. "
+            "Checkpoint the database (or close all writers) and retry.")
         return EXIT_DATABASE_ERROR
     try:
         with read_only_connection(path) as conn:

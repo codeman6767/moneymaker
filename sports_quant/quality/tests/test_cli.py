@@ -9,7 +9,7 @@ from pathlib import Path
 from sports_quant.db.engine import Database
 from sports_quant.matching.tests.conftest import seed_schedule, seed_team
 from sports_quant.matching.tests.test_phase_d5a_matching import _create_canonical
-from sports_quant.pit.tests.conftest import SCHED_START, seed_result
+from sports_quant.pit.tests.conftest import SCHED_OBSERVED, SCHED_START, seed_result
 from sports_quant.quality.runner import run_data_quality
 from sports_quant.status import run_data_status
 
@@ -26,7 +26,8 @@ def _build_corpus(db_path: Path, *, result_at: str = "2026-07-16T00:00:00.000000
                          canonical_name="San Diego Padres", city="SD", nickname="Padres")
         ref = seed_schedule(conn, provider="mlb_statsapi", provider_game_id="G1",
                             home_provider_team_id="101", away_provider_team_id="102",
-                            scheduled_start=SCHED_START, season=2026, game_date_local="2026-07-14")
+                            scheduled_start=SCHED_START, season=2026, game_date_local="2026-07-14",
+                            observed_at=SCHED_OBSERVED)
         _create_canonical(conn, league_code="MLB", home_team_id=home, away_team_id=away,
                           scheduled_start=SCHED_START, game_date_local="2026-07-14",
                           official_provider="mlb_statsapi", official_game_key="G1")
@@ -121,7 +122,8 @@ def test_data_quality_fail_on_note(db_path: Path) -> None:
                          canonical_name="SD", city="SD", nickname="P")
         ref = seed_schedule(conn, provider="mlb_statsapi", provider_game_id="G1",
                             home_provider_team_id="101", away_provider_team_id="102",
-                            scheduled_start=SCHED_START, season=2026, game_date_local="2026-07-14")
+                            scheduled_start=SCHED_START, season=2026, game_date_local="2026-07-14",
+                            observed_at=SCHED_OBSERVED)
         _create_canonical(conn, league_code="MLB", home_team_id=home, away_team_id=away,
                           scheduled_start=SCHED_START, game_date_local="2026-07-14",
                           official_provider="mlb_statsapi", official_game_key="G1")

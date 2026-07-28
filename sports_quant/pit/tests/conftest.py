@@ -31,7 +31,10 @@ from sports_quant.db.repositories.nba import (
     SqliteInjurySnapshotRepository,
     SqliteNbaResultRepository,
 )
-from sports_quant.db.repositories.official_games import SqliteResultRepository
+from sports_quant.db.repositories.official_games import (
+    SqliteResultRepository,
+    SqliteScheduleRepository,
+)
 from sports_quant.db.repositories.raw_responses import (
     SqliteRawResponseRepository,
     response_content_hash,
@@ -58,6 +61,9 @@ T1 = "2026-07-10T00:00:00.000000Z"
 CUTOFF = "2026-07-12T00:00:00.000000Z"
 T2 = "2026-07-16T00:00:00.000000Z"
 SCHED_START = "2026-07-15T02:10:00Z"
+# The schedule must be first observed BEFORE the scheduled start for a valid
+# pregame feature cutoff (E2 RF1 policy).
+SCHED_OBSERVED = "2026-07-01T00:00:00.000000Z"
 
 
 @pytest.fixture()
@@ -112,7 +118,8 @@ def ctx(conn: sqlite3.Connection) -> Ctx:
     player_ref = seed_player_ref(conn, provider="mlb_statsapi", provider_player_id="P1")
     game_ref = seed_schedule(conn, provider="mlb_statsapi", provider_game_id="G1",
                              home_provider_team_id="101", away_provider_team_id="102",
-                             scheduled_start=SCHED_START, season=2026, game_date_local="2026-07-14")
+                             scheduled_start=SCHED_START, season=2026, game_date_local="2026-07-14",
+                             observed_at=SCHED_OBSERVED)
     game_id = _create_canonical(
         conn, league_code="MLB", home_team_id=home, away_team_id=away,
         scheduled_start=SCHED_START, game_date_local="2026-07-14",
@@ -141,6 +148,22 @@ def seed_result(conn: sqlite3.Connection, *, game_ref_id: str, observed_at: str,
             observed_at=observed_at, ingested_at=observed_at, run_id=run_id, raw_response_id=rid,
             raw_response_hash=rhash, mapped_status=mapped_status, home_runs=5, away_runs=3,
             winning_side=winning_side)
+
+
+def seed_schedule_snapshot(conn: sqlite3.Connection, *, game_ref_id: str, scheduled_start: str,
+                           observed_at: str, provider: str = "mlb_statsapi",
+                           provider_game_id: str = "G1", mapped_status: str = "scheduled") -> None:
+    """Append an additional schedule snapshot to an EXISTING provider game reference
+    (a schedule correction / postponement), at a chosen observed_at."""
+
+    run_id, rid, rhash = _prov(conn)
+    with transaction(conn):
+        SqliteScheduleRepository(conn).append(
+            game_ref_id=game_ref_id, provider=provider, provider_game_id=provider_game_id,
+            observed_at=observed_at, ingested_at=observed_at, run_id=run_id, raw_response_id=rid,
+            raw_response_hash=rhash, mapped_status=mapped_status, season=2026,
+            game_date_local="2026-07-14", scheduled_start=scheduled_start,
+            home_provider_team_id="101", away_provider_team_id="102")
 
 
 def seed_team_stat(conn: sqlite3.Connection, *, game_ref_id: str, team_id: str, observed_at: str,
@@ -302,7 +325,7 @@ def seed_nba_ctx(conn: sqlite3.Connection, *, provider_game_id: str = "NG1",
     game_ref = seed_schedule(conn, provider="balldontlie", provider_game_id=provider_game_id,
                              home_provider_team_id="1610612747", away_provider_team_id="1610612738",
                              scheduled_start=SCHED_START, season=2026,
-                             game_date_local=game_date_local)
+                             game_date_local=game_date_local, observed_at=SCHED_OBSERVED)
     game_id = _create_canonical(
         conn, league_code="NBA", home_team_id=home, away_team_id=away,
         scheduled_start=SCHED_START, game_date_local=game_date_local,

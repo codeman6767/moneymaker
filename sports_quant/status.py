@@ -15,7 +15,13 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Optional
 
-from .report_access import EXIT_OK, Printer, with_readonly_corpus
+from .report_access import (
+    EXIT_OK,
+    Printer,
+    pending_review_counts,
+    validate_since,
+    with_readonly_corpus,
+)
 
 # Observation tables carrying an `observed_at` transaction-time column.
 _OBSERVATION_TABLES: tuple[str, ...] = (
@@ -62,16 +68,26 @@ def build_status_report(
                      "provider-keyed observations is not attributable without a match decision")
 
     # Latest ingestion/audit run per provider (global; ingestion_runs has no league).
+    # Determinism (RF8): the winner is the row with the MAX started_at; a generated
+    # run_id is NOT used to break a tie. If several runs share that max started_at
+    # with DIFFERENT statuses, the status is reported as "ambiguous(...)" (sorted,
+    # deterministic) rather than a rebuild-dependent pick.
     provider_runs: dict[str, dict[str, Any]] = {}
+    provider_latest: dict[str, str] = {}
     for r in conn.execute(
-        "SELECT provider, status, command, operation, sport, started_at FROM ingestion_runs "
-        "ORDER BY provider, started_at DESC, run_id DESC"
+        "SELECT provider, MAX(started_at) AS m FROM ingestion_runs GROUP BY provider"
     ).fetchall():
-        prov = str(r["provider"])
-        if prov not in provider_runs:  # first per provider = latest (ordered DESC)
-            provider_runs[prov] = {"status": r["status"], "command": r["command"],
-                                   "operation": r["operation"], "sport": r["sport"],
-                                   "started_at": r["started_at"]}
+        provider_latest[str(r["provider"])] = str(r["m"])
+    for prov, latest in sorted(provider_latest.items()):
+        rows = conn.execute(
+            "SELECT status, command, operation, sport FROM ingestion_runs "
+            "WHERE provider = ? AND started_at = ? ORDER BY status, command, operation",
+            (prov, latest)).fetchall()
+        statuses = sorted({str(x["status"]) for x in rows})
+        status_val = statuses[0] if len(statuses) == 1 else f"ambiguous({','.join(statuses)})"
+        provider_runs[prov] = {"status": status_val, "command": rows[0]["command"],
+                               "operation": rows[0]["operation"], "sport": rows[0]["sport"],
+                               "started_at": latest}
     if league_code:
         notes.append("provider run status is provider-scoped; ingestion_runs carries no league")
 
@@ -107,8 +123,9 @@ def build_status_report(
             f"({placeholders})", tuple(kalshi_series)),
     }
 
-    pending_manual_review = _count(
-        conn, "SELECT COUNT(*) FROM entity_match_decisions WHERE needs_manual_review = 1")
+    # CURRENTLY-pending reviews only (latest flagged decision per source; RF7).
+    review_by_type = pending_review_counts(conn)
+    pending_manual_review = sum(review_by_type.values())
     if league_code:
         notes.append("pending manual reviews are not league-attributable")
 
@@ -143,6 +160,7 @@ def build_status_report(
         "unmatched_sportsbook_events": unmatched_sportsbook_events,
         "unmatched_kalshi": unmatched_kalshi,
         "pending_manual_review": pending_manual_review,
+        "pending_manual_review_by_type": {k: review_by_type[k] for k in sorted(review_by_type)},
         "open_data_quality": open_dq,
         "scope_notes": notes,
     }
@@ -172,7 +190,10 @@ def run_data_status(
     database_path: Optional[Path] = None, as_json: bool = False, out: Printer = print,
 ) -> int:
     """Produce the status report. Exit 0 when produced (any corpus quality);
-    exit 3 for a missing/unmigrated/corrupt/unsupported database."""
+    exit 3 for a missing/unmigrated/corrupt/unsupported/stale-WAL database. Raises
+    ``ValueError`` for an invalid ``--since`` (fail clearly, not silent zeros)."""
+
+    validate_since(since)
 
     def work(conn: sqlite3.Connection) -> int:
         report = build_status_report(conn, league=league, since=since)
