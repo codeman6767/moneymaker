@@ -1501,9 +1501,11 @@ def _dispatch_f1a(args: Any, *, league: str) -> Optional[int]:
         if args.from_date is None:
             print("[FAILED ] --from is required for --plan")
             return EXIT_USAGE
+        retries = getattr(args, "max_retries", None)
         return emit_plan(
             league=league, from_date=args.from_date, to_date=args.to_date, includes=includes,
             max_games=args.max_games, max_pages=args.max_pages, max_records=args.max_records,
+            max_retries=3 if retries is None else retries,
             rate_per_min=getattr(args, "request_rate", None),
             request_cap=args.request_cap, credit_cap=args.credit_cap,
             scratch_db=str(args.scratch_db or ""), checkpoint=str(args.checkpoint or ""),
@@ -1516,6 +1518,7 @@ def _dispatch_f1a(args: Any, *, league: str) -> Optional[int]:
             ("--from", args.from_date), ("--to", args.to_date),
             ("--include", tuple(args.includes)), ("--max-games", args.max_games),
             ("--max-pages", args.max_pages), ("--max-records", args.max_records),
+            ("--max-retries", getattr(args, "max_retries", None)),
             ("--request-rate", getattr(args, "request_rate", None)),
             ("--request-cap", args.request_cap), ("--credit-cap", args.credit_cap),
         ) if val not in (None, (), [])
@@ -1550,6 +1553,10 @@ def _add_f1a_args(parser: Any) -> None:
     g.add_argument("--max-games", dest="max_games", type=int, default=None, metavar="N")
     g.add_argument("--max-pages", dest="max_pages", type=int, default=None, metavar="N")
     g.add_argument("--max-records", dest="max_records", type=int, default=None, metavar="N")
+    g.add_argument("--max-retries", dest="max_retries", type=int, default=None, metavar="N",
+                   help="Retry attempts per request (default 3). Part of the plan's "
+                        "conservative maximum (cap = semantic max x (1 + max_retries)) "
+                        "and of the manifest identity")
     g.add_argument("--request-rate", dest="request_rate", type=int, default=None, metavar="PER_MIN",
                    help="Configured BALLDONTLIE request rate/min (<= verified tier max)")
     g.add_argument("--scratch-db", dest="scratch_db", type=Path, default=None, metavar="PATH",

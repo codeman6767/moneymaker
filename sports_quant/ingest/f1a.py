@@ -66,6 +66,34 @@ class _UnitFailed(RuntimeError):
 _MLB_RICH = {"results", "box", "inning", "rosters"}
 _NBA_RICH = {"box", "stats", "advanced", "plays", "lineups", "quarters"}
 
+#: The planner/manifest family vocabulary and the CLI/ingestor include vocabulary
+#: disagree on one name: a plan and manifest record the NBA player-statistics family
+#: as ``stats`` (see :data:`~sports_quant.ingest.planning.NBA_RICH_FAMILIES`), while
+#: the ``ingest-nba`` CLI and :mod:`nba_ingestor` call the same group ``player-stats``.
+#: Left untranslated the mismatch is silent in BOTH directions: ``--include
+#: player-stats`` was dropped from the family set (collapsing a rich plan to
+#: skeleton), and a manifest family ``stats`` reached the ingestor as an unrecognised
+#: include, so player statistics were never fetched or persisted even though the plan
+#: had reserved a request for them. These two maps are the single translation point.
+_NBA_FAMILY_FROM_INCLUDE = {"player-stats": "stats"}
+_NBA_INCLUDE_FROM_FAMILY = {v: k for k, v in _NBA_FAMILY_FROM_INCLUDE.items()}
+
+
+def _normalize_includes(league: str, includes: tuple[str, ...]) -> tuple[str, ...]:
+    """Map caller/CLI include names onto the planner's family vocabulary."""
+
+    if league != "nba":
+        return includes
+    return tuple(_NBA_FAMILY_FROM_INCLUDE.get(i, i) for i in includes)
+
+
+def _ingestor_includes(league: str, families: tuple[str, ...]) -> tuple[str, ...]:
+    """Map planner/manifest family names onto the ingestor's include vocabulary."""
+
+    if league != "nba":
+        return families
+    return tuple(_NBA_INCLUDE_FROM_FAMILY.get(f, f) for f in families)
+
 #: F1B (live pilot) is DISABLED by default. A future controlled authorization is a
 #: separate, reviewed step; this env var only lets tests exercise the mocked
 #: guarded path. It never enables real network here (transports are mocked).
@@ -125,7 +153,9 @@ def _validate_range_endpoint(value: str, label: str) -> str:
 def _families_and_stage(league: str, includes: tuple[str, ...]) -> tuple[tuple[str, ...], str]:
     rich = _MLB_RICH if league == "mlb" else _NBA_RICH
     skeleton = "schedule" if league == "mlb" else "games"
-    rich_present = sorted(set(includes) & rich)
+    # Normalize CLI include names (e.g. NBA "player-stats") to family names first, so
+    # a documented CLI group can never be silently dropped from the family set.
+    rich_present = sorted(set(_normalize_includes(league, includes)) & rich)
     families = (skeleton, *rich_present)
     return families, ("rich" if rich_present else "skeleton")
 
@@ -326,7 +356,12 @@ class _IngestorExecutor:
                     database=self._database, client=client, from_date=self._from,
                     to_date=self._to,
                     game_id=int(game_id) if game_id is not None else None,
-                    includes=includes, tier=BalldontlieTier.GOAT, dry_run=False, **nba_kwargs)
+                    # Translate manifest family names into the ingestor's include
+                    # vocabulary, so a declared family (e.g. `stats`) really executes
+                    # instead of being silently ignored while the plan reserved a
+                    # request for it.
+                    includes=_ingestor_includes("nba", includes),
+                    tier=BalldontlieTier.GOAT, dry_run=False, **nba_kwargs)
             finally:
                 await client.aclose()
 
@@ -342,12 +377,18 @@ class _IngestorExecutor:
                 f"{getattr(result, 'error_type', None)}: {getattr(result, 'error_message', '')}")
         # Surface max_games SELECTION accounting (both ingestors already compute it)
         # so the report distinguishes a bounded selection from budget truncation.
-        received = int(getattr(result, "games_received", 0) or 0)
-        excluded = int(getattr(result, "games_truncated", 0) or 0)
-        if received or excluded:
-            selected = len(getattr(result, "ordered_game_ids", ()) or ())
-            gate.record_selection(games_received=received, games_selected=selected,
-                                  excluded=excluded)
+        #
+        # ONLY the discovery pass (game_id is None) describes the selection. A rich
+        # per-game unit re-fetches its own single game and would otherwise re-report
+        # games_received=1 for each, inflating the totals (e.g. 2 discovered games
+        # reported as 3 received / 2 selected).
+        if game_id is None:
+            received = int(getattr(result, "games_received", 0) or 0)
+            excluded = int(getattr(result, "games_truncated", 0) or 0)
+            if received or excluded:
+                selected = len(getattr(result, "ordered_game_ids", ()) or ())
+                gate.record_selection(games_received=received, games_selected=selected,
+                                      excluded=excluded)
         return result
 
     def iter_units(self, *, gate: RequestGate, completed: set[str]) -> Iterator[UnitDone]:

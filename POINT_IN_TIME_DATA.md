@@ -263,8 +263,12 @@ hides it.
 > and NBA 1 request (8 games → 2 selected), both discovery-only, each completed
 > resume making **zero** additional requests, development corpus byte-identical, no
 > secret leakage, schema v16. The **F1B *rich-data* pilot has not started and remains
-> unauthorized** pending a separately reviewed manifest and request budget
-> (`MONEYMAKER_F1B_AUTHORIZED=1` is off by default and process-scoped when used).
+> unauthorized** pending an approved per-run request budget and separate explicit
+> authorization per league (`MONEYMAKER_F1B_AUTHORIZED=1` is off by default and
+> process-scoped when used). Its two manifests are **prepared and validated offline**
+> (2026-07-29): MLB `2026-07-20..2026-07-21` (`results`/`box`/`inning`/`rosters`,
+> cap 12) and NBA `2026-01-05` (`box`/`stats`/`advanced`/`plays`/`lineups`/`quarters`,
+> cap 14), both `max_games=1`, `max_retries=1`, schema v16. Nothing has executed.
 > Prerequisites were discharged 2026-07-28: a bounded GET-only `provider-audit`
 > confirmed MLB (keyless) and BALLDONTLIE **GOAT**
 > (`authenticated=true`, `tier_restricted=false`) access; BALLDONTLIE is request-**rate**

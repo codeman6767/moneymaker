@@ -1,7 +1,12 @@
-# F1B skeleton pilot manifests (EXECUTED and independently reviewed)
+# F1B pilot manifests — skeleton (executed & reviewed) + rich (prepared only)
 
-These are canonical, secret-free, deterministic **skeleton** pilot manifests
-produced offline by `--plan --manifest-out` (zero network, zero database writes).
+Canonical, secret-free, deterministic pilot manifests produced offline by
+`--plan --manifest-out` (zero network, zero database writes).
+
+| Stage | Status |
+|---|---|
+| **Skeleton** (`*_skeleton.manifest.json`) | **executed live and independently reviewed** |
+| **Rich** (`*_rich.manifest.json`) | **prepared and validated offline — NOT executed** |
 
 **Both have since been executed as live skeleton pilots and independently
 reviewed** (see `F1B_SKELETON_PILOT_REPORT.md`): MLB on 2026-07-29 (1 request,
@@ -14,9 +19,11 @@ Executing a manifest requires the separate, reviewed authorization boundary
 (`MONEYMAKER_F1B_AUTHORIZED=1`), which is **off** by default and is set only for
 the single authorized process.
 
-The **F1B rich-data pilot has NOT started and remains unauthorized**: it needs a
-separately reviewed manifest (rich families) and an approved per-run request
-budget. Nothing here authorizes it.
+The **F1B rich-data pilot has NOT been executed and remains unauthorized.** Its two
+manifests are now prepared and validated offline (see *Rich manifests* below), but
+**each future execution requires separate explicit user authorization** and an
+approved per-run request budget. Nothing here authorizes it. MLB and NBA must be
+executed and reviewed **separately**.
 
 ## Manifests
 
@@ -36,6 +43,41 @@ credit metered) and are never fabricated.
 |---|---|---|---|---|---|
 | `mlb_skeleton.manifest.json` | `fa28695b…` | 1 of cap 4 | 1 | 30 → 2 (28) | 0 additional requests |
 | `nba_skeleton.manifest.json` | `6fe6dc37…` | 1 of cap 8 | 1 | 8 → 2 (6) | 0 additional requests |
+
+## Rich manifests (PREPARED, validated offline, NOT executed)
+
+| File | League | Provider | Range | Families (skeleton family auto-added) | `max_games` | `max_pages` | `max_records` | `max_retries` | Semantic max | **Request cap** | Rate |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `mlb_rich.manifest.json` | MLB | MLB StatsAPI (keyless) | 2026-07-20..2026-07-21 | `schedule` + `results`, `box`, `inning`, `rosters` | 1 | — | — | 1 | 6 | **12** | n/a |
+| `nba_rich.manifest.json` | NBA | BALLDONTLIE GOAT | 2026-01-05 | `games` + `box`, `stats`, `advanced`, `plays`, `lineups`, `quarters` | 1 | 1 | 100 | 1 | 7 | **14** | 60/min ≤ 600/min |
+
+| | `manifest_hash` | `plan_hash` | Scratch database | Checkpoint |
+|---|---|---|---|---|
+| MLB rich | `f56b5c5da53d86c9…` | `73e887229ce20b8c…` | `data/f1b_mlb_rich_scratch.db` | `data/f1b_mlb_rich.ckpt` |
+| NBA rich | `9de5d312b99c3e85…` | `1c896ae16a13c10b…` | `data/f1b_nba_rich_scratch.db` | `data/f1b_nba_rich.ckpt` |
+
+**Caps are planner-derived, never hand-written**: `cap = semantic_max × (1 + max_retries)`
+= 6 × 2 = **12** (MLB) and 7 × 2 = **14** (NBA). The planner models every request the
+ingestor makes:
+
+* **MLB (6)** — range schedule discovery, per-game schedule re-fetch, **one** linescore
+  shared by `results`+`inning`, one box score, and up to **two** team/date rosters.
+* **NBA (7)** — one games listing page, per-game `game` re-fetch, **one** box score
+  shared by `box`+`quarters`, and one page each of `stats`, `advanced`, `plays`, `lineups`.
+
+A zero-network differential (real orchestration + real client request construction over
+mocked transports) confirms the executor attempts **exactly** the semantic maximum and
+never exceeds it: MLB 6/6, NBA 7/7, both far inside their retry-inclusive caps.
+`max_games=1` provably prevents any second-game request and `max_pages=1` any
+second page. Rich families are discovery-plus-selected-game only — **no** injuries,
+odds, weather, or Kalshi families.
+
+These retrospective pilots will **not** create a strict historical point-in-time
+corpus: both windows are completed past dates, so every observation carries the
+**current receipt time**. They measure capability, coverage, request fan-out,
+correction behaviour, and persistence only.
+
+---
 
 Selected games are the deterministic canonical first two — MLB by
 `(officialDate, gamePk)`, NBA by `(date_local, game_id)` — never provider response

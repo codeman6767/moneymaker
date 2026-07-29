@@ -8,8 +8,50 @@ independently reviewed — the skeleton stage is complete** (see
 training, calibration, simulation, EV evaluation, backtesting, or recommendation
 output has started. Schema remains **v16**.
 
-**The F1B *rich-data* pilot has NOT started and remains unauthorized**, pending a
-separately reviewed manifest (rich families) and an approved per-run request budget.
+**The F1B *rich-data* pilot has NOT been executed and remains unauthorized.** Its two
+manifests are now **prepared and validated offline** (see the rich-manifest box below);
+**each future execution requires separate explicit user authorization** and an approved
+per-run request budget, and MLB and NBA must be executed and reviewed **separately**.
+
+> **F1B rich-data manifests prepared (2026-07-29, offline, zero provider requests).**
+> `pilots/f1b/mlb_rich.manifest.json` (`f56b5c5da53d86c9…`, plan `73e887229ce20b8c…`)
+> and `pilots/f1b/nba_rich.manifest.json` (`9de5d312b99c3e85…`, plan `1c896ae16a13c10b…`),
+> both schema **v16**, canonical, deterministic, secret-free, and executable.
+>
+> - **MLB rich** — `2026-07-20..2026-07-21`, families `schedule` (auto) + `results`,
+>   `box`, `inning`, `rosters`; `max_games=1`, `max_retries=1`; semantic max **6**;
+>   **request cap 12**; credits n/a; scratch `data/f1b_mlb_rich_scratch.db`;
+>   checkpoint `data/f1b_mlb_rich.ckpt`.
+> - **NBA rich** — `2026-01-05`, families `games` (auto) + `box`, `stats`, `advanced`,
+>   `plays`, `lineups`, `quarters`; `max_games=1`, `max_pages=1`, `max_records=100`,
+>   `max_retries=1`; configured rate **60/min** ≤ verified **600/min**; semantic max
+>   **7**; **request cap 14**; credits n/a; scratch `data/f1b_nba_rich_scratch.db`;
+>   checkpoint `data/f1b_nba_rich.ckpt`.
+>
+> **Caps are planner-derived, not hand-written**: `cap = semantic_max × (1 + max_retries)`.
+> A zero-network **differential** (real `run_pilot_cli` + real client request
+> construction over mocked transports) shows the executor attempts **exactly** the
+> semantic maximum and never exceeds it — MLB **6/6**, NBA **7/7** — with `results`+`inning`
+> sharing one linescore, `box`+`quarters` sharing one box score, `max_games=1`
+> preventing any second-game request, and `max_pages=1` preventing any second page.
+>
+> **Planner/executor mismatch found and repaired.** The NBA player-statistics group was
+> named `player-stats` by the CLI/ingestor but `stats` by the planner/manifest. Untranslated
+> this was silent in **both** directions: `--include player-stats` was dropped from the
+> family set (collapsing a rich plan to skeleton), and a manifest family `stats` reached
+> the ingestor as an unrecognised include, so player statistics were never fetched or
+> persisted even though the plan had reserved a request for them. A single translation
+> point now maps the two vocabularies. Also repaired: rich selection accounting was
+> double-counted by per-game units (2 discovered games reported as 3 received), and
+> `--max-retries` is now expressible on the CLI so the retry policy — part of the
+> manifest identity — is reproducible.
+>
+> These retrospective pilots will **not** create a strict historical point-in-time
+> corpus: both windows are completed past dates, so every observation carries the
+> **current receipt time** and can never be treated as historical live-replay features.
+> They measure capability, coverage, request fan-out, correction behaviour, and
+> persistence only. No features, models, simulations, EV, recommendations, staking, or
+> execution have started. **The rich stage is neither complete nor authorized.**
 
 > **F1B skeleton pilot execution + independent review (2026-07-29).** Both pilots
 > ran under the `MONEYMAKER_F1B_AUTHORIZED=1` boundary (process-scoped only, never
