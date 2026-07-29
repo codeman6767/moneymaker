@@ -1,29 +1,32 @@
-"""Typed endpoint-cost policies for the F1A request gate (offline).
+"""Typed endpoint policies for the F1A request gate (offline).
 
-Two providers participate in the F1 pilot:
+Two providers participate in the F1 pilot, and NEITHER is credit/billing metered:
 
-* **MLB StatsAPI** -- keyless/public. Requests are hard-capped, but there is no
-  paid credit balance: credits are **not applicable** and never fabricated.
-* **BALLDONTLIE (GOAT)** -- metered. We model one metered API call as **one
-  credit** (the conservative GOAT request-quota unit); this 1:1 model is the
-  cost-policy's documented semantics, versioned so a future weighting bumps the
-  version. An endpoint family **not** in the policy has an *unknown* cost, which
-  makes a credit-capped plan/run non-executable (fail closed) -- never assumed 1.
+* **MLB StatsAPI** -- keyless/public. Requests are hard-capped; credits are **not
+  applicable** and never fabricated.
+* **BALLDONTLIE** -- authenticated by a subscription tier, but the official
+  documentation meters access by a **per-minute REQUEST-RATE limit** per tier
+  (Free 5/min, ALL-STAR 60/min, GOAT 600/min), NOT by a monetary credit balance
+  or endpoint-weighted credit cost, and it publishes no consumed/remaining-credit
+  response-header contract. We therefore model BALLDONTLIE credits as **not
+  applicable** (never fabricated) and instead attach a versioned request-RATE
+  policy (:func:`build_balldontlie_rate_policy`) whose configured rate defaults
+  well below the tier maximum. The hard aggregate request cap still bounds the
+  total call count for the logical run; retries and pagination each count as a
+  request; and an unrecognised endpoint family still fails closed at the gate.
 
-Each policy carries a ``classifier`` mapping a raw request path to its endpoint
-family, so the gate at the transport chokepoint can label *any* call even if a
-helper forgot to -- an unclassifiable path becomes the ``unknown`` family, which
-under a credit cap fails closed.
+Each policy carries a ``classifier`` (path -> endpoint family) and a declared
+``known_families`` set, so the gate can label any call from the trusted path and
+fail closed on an unclassifiable one.
 """
 
 from __future__ import annotations
 
-from ..request_control import EndpointCostPolicy
+from ..request_control import EndpointCostPolicy, RequestRatePolicy
 
 # --- MLB StatsAPI (keyless; credits N/A) ----------------------------------- #
 MLB_FAMILIES: frozenset[str] = frozenset(
-    {"schedule", "teams", "venue", "game_linescore", "game_boxscore", "roster",
-     "person", "unknown"}
+    {"schedule", "teams", "venue", "game_linescore", "game_boxscore", "roster", "person"}
 )
 
 
@@ -53,23 +56,25 @@ def build_mlb_policy() -> EndpointCostPolicy:
         credit_applicable=False,  # keyless/public: no paid credit balance
         costs={},
         classifier=_classify_mlb,
+        known_families=MLB_FAMILIES,
     )
 
 
-# --- BALLDONTLIE (GOAT; per-request credit cost UNPROVEN -> fail closed) ---- #
-# Independent review found NO authoritative, versioned basis in the repository for
-# a per-endpoint BALLDONTLIE credit cost: the provider documentation describes
-# per-minute request-rate limits by tier, not a per-request credit weight, and no
-# response-header contract for consumed/remaining credits is documented. Assuming
-# "1 credit per request" would be a guess that makes NBA planning falsely
-# executable. Per the F1A review we therefore assign NO costs: every BALLDONTLIE
-# family has an UNKNOWN credit cost, so any credit-capped NBA plan/run is
-# non-executable and fails closed with `unknown_credit_cost` until a later
-# controlled capability verification (F1B pilot) establishes and versions the real
-# cost contract. Requests are still hard-capped; credits are never fabricated. To
-# populate this once an authoritative source exists, bump the version below and add
-# the audited per-endpoint costs.
-BALLDONTLIE_COSTS: dict[str, int] = {}
+# --- BALLDONTLIE (request-rate limited by tier; credits N/A) ---------------- #
+BALLDONTLIE_FAMILIES: frozenset[str] = frozenset(
+    {"teams", "players", "games", "game", "box_scores", "stats", "advanced_stats",
+     "plays", "lineups", "player_injuries"}
+)
+
+#: Official per-minute request-rate ceilings by BALLDONTLIE tier (requests/min).
+#: Source: BALLDONTLIE API documentation (rate limits section). These are REQUEST
+#: rates, not credit balances.
+BALLDONTLIE_TIER_RATES: dict[str, int] = {"free": 5, "all-star": 60, "goat": 600}
+
+#: Conservative default operating rate, well below the GOAT tier maximum. A pilot
+#: manifest may lower it further; it can never exceed the verified tier maximum.
+BALLDONTLIE_DEFAULT_RATE_PER_MIN = 100
+BALLDONTLIE_RATE_POLICY_VERSION = "bdl-rate-v1"
 
 
 def _classify_balldontlie(path: str) -> str:
@@ -87,7 +92,6 @@ def _classify_balldontlie(path: str) -> str:
     if "/stats" in p:
         return "stats"
     if "/games" in p:
-        # /games/{id} vs /games list share the games family (cost 1 either way).
         return "game" if any(seg.isdigit() for seg in p.split("/")) else "games"
     if "/teams" in p:
         return "teams"
@@ -97,10 +101,35 @@ def _classify_balldontlie(path: str) -> str:
 
 
 def build_balldontlie_policy() -> EndpointCostPolicy:
+    # credits NOT applicable: BALLDONTLIE is request-rate limited, not credit
+    # metered. Requests are hard-capped and rate-limited; an unrecognised endpoint
+    # family fails closed via ``known_families``.
     return EndpointCostPolicy(
         provider="balldontlie",
         version="bdl-cost-v1",
-        credit_applicable=True,
-        costs=BALLDONTLIE_COSTS,
+        credit_applicable=False,
+        costs={},
         classifier=_classify_balldontlie,
+        known_families=BALLDONTLIE_FAMILIES,
+    )
+
+
+def build_balldontlie_rate_policy(
+    tier: str = "goat", configured_per_min: int = BALLDONTLIE_DEFAULT_RATE_PER_MIN
+) -> RequestRatePolicy:
+    """A versioned BALLDONTLIE request-rate policy for ``tier`` (default GOAT).
+
+    ``configured_per_min`` is validated (by :class:`RequestRatePolicy`) to never
+    exceed the verified tier maximum; the default is conservatively far below it.
+    """
+
+    tier_key = tier.lower()
+    if tier_key not in BALLDONTLIE_TIER_RATES:
+        raise ValueError(f"unknown BALLDONTLIE tier {tier!r}")
+    return RequestRatePolicy(
+        provider="balldontlie",
+        version=BALLDONTLIE_RATE_POLICY_VERSION,
+        tier=tier_key,
+        tier_max_per_min=BALLDONTLIE_TIER_RATES[tier_key],
+        configured_per_min=configured_per_min,
     )

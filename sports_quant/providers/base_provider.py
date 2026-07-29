@@ -220,6 +220,11 @@ class BaseProviderClient:
                 # Reserve BEFORE any socket work; BudgetExhausted stops the run
                 # here and is never caught by the HTTP error handling below.
                 self._gate.reserve(gate_unit, is_retry=attempt > 0)
+                # Then honour the configured request-RATE: wait (never exceed) so a
+                # burst stays within the provider's per-minute tier limit.
+                rate_wait = self._gate.rate_acquire()
+                if rate_wait > 0:
+                    await self._sleep(rate_wait)
             requested_at = datetime.now(timezone.utc)
             started_ns = time.monotonic_ns()
             request = self._client.build_request("GET", path, params=request_params)
@@ -248,6 +253,8 @@ class BaseProviderClient:
             elapsed_ns = time.monotonic_ns() - started_ns
             status_code = response.status_code
 
+            if self._gate is not None and status_code == 429:
+                self._gate.record_429()  # observed rate-limit response (backoff below)
             if self._gate is not None and not oversized:
                 self._gate.record_response()  # a complete body was received
 

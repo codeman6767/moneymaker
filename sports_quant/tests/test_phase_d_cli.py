@@ -132,6 +132,26 @@ def _bdl_decl():
     return declaration_for(PROVIDER_BALLDONTLIE, balldontlie_tier=BalldontlieTier.GOAT)
 
 
+def test_audit_builds_ungated_clients_for_gated_providers() -> None:
+    # Regression: the bounded provider-audit constructs REAL (self-owned) transport
+    # clients for the F1A-gated providers. Those clients must opt out of the request
+    # gate (require_gate=False); otherwise the F1A gate guard raises before the audit
+    # can issue its GET probes. Mocked-client tests can't catch this (an injected
+    # client is exempt from the guard), so assert the real construction path here.
+    import asyncio
+
+    from sports_quant.cli import _make_audit_probes
+
+    for provider in (PROVIDER_MLB_STATSAPI, PROVIDER_BALLDONTLIE):
+        _probes, client, _decl_ = _make_audit_probes(provider, _settings())
+        try:
+            assert client._require_gate is False, provider   # opted out of the gate
+            assert client._owns_client is True, provider     # ... and would otherwise be guarded
+            assert client._gate is None, provider            # audit attaches no budget gate
+        finally:
+            asyncio.run(client.aclose())
+
+
 def test_provider_audit_partial_failure_exits_one(tmp_path: Path) -> None:
     """teams succeeds but games 5xx's after retries -> partially_failed -> exit 1."""
 

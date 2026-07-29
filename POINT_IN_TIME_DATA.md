@@ -258,9 +258,14 @@ hides it.
 > committed-transaction persistence boundary, logical-run budget across resumed
 > processes, `max_games` enforcement + planner/ingestor fan-out fidelity, WAL-aware
 > content-digest scratch identity, hardened atomic checkpoints, and CLI wiring).
-> F1B remains **unauthorized and unexecuted** (separate authorization + prerequisite
-> task; BALLDONTLIE credit cost stays fail-closed until an authoritative policy
-> exists); reconstructed provenance is design-only
+> F1B remains **unauthorized and unexecuted** (separate authorization boundary
+> `MONEYMAKER_F1B_AUTHORIZED=1`, off). Its prerequisites are discharged (2026-07-28):
+> a bounded GET-only `provider-audit` confirmed MLB (keyless) and BALLDONTLIE **GOAT**
+> (`authenticated=true`, `tier_restricted=false`) access; BALLDONTLIE is request-**rate**
+> limited per tier, so credits are **not applicable** (never fabricated) and a versioned
+> request-rate policy (`bdl-rate-v1`, 100/min default ≤ GOAT 600/min) governs pacing;
+> reviewed skeleton manifests are generated (not executed) at `pilots/f1b/`.
+> Reconstructed provenance is design-only
 > (`RECONSTRUCTED_CORPUS_PROVENANCE.md`), the strict E1/E2 builder is unchanged, and
 > no features or models have started.**
 

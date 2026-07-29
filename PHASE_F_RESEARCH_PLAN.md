@@ -7,9 +7,45 @@ model training, calibration, simulation, EV evaluation, backtesting, or
 recommendation output has started. Schema remains **v16**. No live provider request
 or persisted ingestion has occurred (F1A is offline; all provider behavior is
 tested with mocked transports and a socket sentinel). **The live F1B pilot remains
-NOT authorized and unexecuted** — it requires its own separate authorization +
-prerequisite task (a confirmed GOAT subscription, an authoritative BALLDONTLIE
-credit-cost policy, and §R.7 prerequisites).
+NOT authorized and unexecuted.** Its prerequisites have now been discharged (see
+§R.7 and the box below): the GOAT subscription is confirmed active by a bounded
+GET-only audit, the BALLDONTLIE quota model is corrected (a versioned request-**rate**
+policy — credits are *not applicable*, never fabricated), and canonical zero-network
+**skeleton** manifests have been generated for review. Executing them still requires
+the separate authorization boundary (`MONEYMAKER_F1B_AUTHORIZED=1`), which stays off.
+
+> **F1B prerequisite discharge (2026-07-28).** Bounded, GET-only provider audits
+> ran at the configured NBA tier against a git-ignored scratch DB (no secret ever
+> printed):
+> - **MLB StatsAPI** — `succeeded`, 5 GET requests, 0 active failures, keyless
+>   (auth n/a), no tier restriction, capabilities observed.
+> - **BALLDONTLIE (GOAT)** — `succeeded`, 9 GET requests, **authenticated=true**,
+>   **tier_restricted=false**, all 9 probes HTTP 200 including the GOAT rich
+>   endpoints (advanced_stats, plays, lineups, box_scores, player_stats). No HTTP
+>   429s observed.
+>
+> **Quota-model correction.** BALLDONTLIE is metered by a per-minute **request-rate**
+> limit per tier (Free 5, ALL-STAR 60, GOAT 600 req/min), **not** a monetary/credit
+> balance. The codebase now models BALLDONTLIE credits as **not applicable** (never
+> fabricated) and attaches a versioned request-rate policy (`RequestRatePolicy`,
+> `bdl-rate-v1`) whose configured rate defaults to **100/min** (conservatively below
+> the GOAT max) and can never exceed the verified tier maximum. The hard **aggregate
+> request cap** still bounds total calls for the whole logical run; retries and
+> pagination each consume a request; an unrecognised endpoint family fails closed
+> (`UNKNOWN_ENDPOINT`); resumes do not reset the aggregate budget. The four concepts
+> — aggregate request budget, requests attempted, provider tier rate limit,
+> configured safe rate — plus throttle wait and observed 429s are reported distinctly.
+>
+> **F1A audit-path defect (fixed).** The F1A ungated-transport guard blocked the
+> bounded provider-audit (the audit built self-owned clients without the sanctioned
+> `require_gate=False` opt-out; mocked-client tests never exercised the real-network
+> path). Fixed in `_make_audit_probes` with a regression test.
+>
+> **Skeleton manifests generated (not executed).** `pilots/f1b/mlb_skeleton.manifest.json`
+> and `pilots/f1b/nba_skeleton.manifest.json` — small completed date ranges,
+> discovery-only families, explicit git-ignored scratch DB + checkpoint, conservative
+> request caps, NBA rate 60/min. Deterministic (byte-identical on regeneration);
+> credits n/a. See `pilots/f1b/README.md`.
 
 > **F1A independent-review resolution (B1 + B2).** The two review blockers are
 > resolved. **B1 — request-addressable resumability:** the pilot now checkpoints at
@@ -41,10 +77,13 @@ credit-cost policy, and §R.7 prerequisites).
 > (`sports_quant/providers/base_provider.py:_get`): every attempt (initial call,
 > each retry, each page) must reserve budget first, so a zero request budget makes
 > zero transport calls and a run halts *before* exceeding a request or credit cap
-> (`sports_quant/request_control.py`). Typed endpoint-cost policies
-> (`sports_quant/ingest/cost_policies.py`) leave BALLDONTLIE credits **unknown →
-> fail closed** (no authoritative per-endpoint cost) and mark MLB StatsAPI credits
-> *not applicable*. A genuine zero-network `--plan`/`--manifest-out`; deterministic,
+> (`sports_quant/request_control.py`). Typed endpoint policies
+> (`sports_quant/ingest/cost_policies.py`) mark BALLDONTLIE credits **not applicable**
+> (it is request-**rate** limited per tier, not credit metered — see the F1B box
+> above; a versioned `RequestRatePolicy` bounds the configured per-minute rate below
+> the tier max, and an unrecognised endpoint family fails closed) and mark MLB
+> StatsAPI credits *not applicable* (keyless). A genuine zero-network
+> `--plan`/`--manifest-out`; deterministic,
 > secret-free plans and pilot manifests with stable hashes (`planning.py`,
 > `manifest.py`); manifest-governed `--pilot` (tamper/version/dup-key/schema/
 > provider/policy-drift fail closed); a versioned external checkpoint with atomic
@@ -212,13 +251,21 @@ feature availability. Full policy in the revised §3.
 ### R.7 Prerequisite classification (F0 gates G1–G5)
 
 - **Already satisfied:** MLB StatsAPI keyless public access + NBA GOAT endpoint
-  *access* were probe-verified (2026-07-24); the read-only/GET-only/execution-
-  quarantine invariants hold.
-- **Claude can verify without exposing secrets:** a future `provider-audit` can
-  confirm GOAT *access* and per-endpoint reachability (it reads no secret into
-  output). Historical *depth* (G3) is measurable only by the F1B pilot.
-- **User decision required before F1B:** confirm an active BALLDONTLIE **GOAT**
-  subscription (G2); approve a per-run request/credit **budget**.
+  *access* were probe-verified (2026-07-24) and **re-confirmed by a bounded GET-only
+  `provider-audit` on 2026-07-28** — MLB `succeeded` (5 GET, keyless); BALLDONTLIE
+  GOAT `succeeded` (9 GET, `authenticated=true`, `tier_restricted=false`, GOAT rich
+  endpoints 200). The read-only/GET-only/execution-quarantine invariants hold; the
+  audit persisted only to a git-ignored scratch DB and printed no secret.
+- **G2 (active GOAT subscription): satisfied** — confirmed by the 2026-07-28 audit
+  above. Historical *depth/coverage* (G3) is still measurable only by the F1B pilot.
+- **Quota model:** BALLDONTLIE is request-**rate** limited per tier (not credit
+  metered); credits are *not applicable*. A versioned request-rate policy
+  (`bdl-rate-v1`, configured 100/min default ≤ GOAT 600/min) replaces the earlier
+  (incorrect) "authoritative per-endpoint credit-cost" prerequisite.
+- **User decision still required before *executing* F1B:** approve a per-run request
+  **budget** and set the separate authorization boundary
+  (`MONEYMAKER_F1B_AUTHORIZED=1`). Reviewed skeleton manifests are generated at
+  `pilots/f1b/` but **not executed**.
 - **User decision required before F2 / large backfill:** licensing/retention (G4 —
   MLB StatsAPI commercial terms; Open-Meteo CC-BY non-commercial).
 - **Purchase/subscription that may be required:** The Odds API **historical** plan
@@ -228,8 +275,9 @@ feature availability. Full policy in the revised §3.
   *depth/coverage* (G3); any commercial PIT historical dataset (Option C) — each
   requires an audited sample before acceptance, never accepted on advertisement.
 
-The user currently expects GOAT access; this review neither exposes nor validates the
-key — a future `provider-audit` confirms access safely.
+GOAT access is now **confirmed** by the 2026-07-28 bounded `provider-audit`
+(`authenticated=true`, `tier_restricted=false`); the audit neither exposed nor logged
+the key.
 
 ---
 

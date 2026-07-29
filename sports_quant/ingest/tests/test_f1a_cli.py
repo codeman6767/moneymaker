@@ -78,13 +78,27 @@ def test_plan_mode_makes_no_network(no_network, capsys: pytest.CaptureFixture) -
     assert payload["expected_schema_version"] == 16
 
 
-def test_plan_mode_nba_non_executable_unknown_cost(no_network, capsys) -> None:
+def test_plan_mode_nba_executable_when_bounded_rate_not_credits(no_network, capsys) -> None:
+    # BALLDONTLIE is request-RATE limited, not credit metered: a bounded NBA plan is
+    # executable, exposes the rate contract, and fabricates NO credit figures.
     rc = main(["ingest-nba", "--plan", "--from", "2026-01-05", "--to", "2026-01-05",
                "--max-pages", "5", "--json"])
     assert rc == 0
     payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
-    assert payload["executable"] is False  # unknown BALLDONTLIE credit cost
-    assert any("unknown_credit_cost" in b for b in payload["unresolved_bounds"])
+    assert payload["executable"] is True
+    assert payload["unresolved_bounds"] == []
+    assert payload["credits_applicable"] is False
+    assert payload["estimated_credits_max"] is None       # never fabricated
+    assert payload["provider_rate_limit_per_min"] == 600   # GOAT tier max
+    assert payload["configured_rate_per_min"] == 100        # conservative default
+
+
+def test_plan_mode_nba_unbounded_non_executable(no_network, capsys) -> None:
+    rc = main(["ingest-nba", "--plan", "--from", "2026-01-05", "--to", "2026-01-05", "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["executable"] is False  # unbounded games-list fan-out
+    assert payload["unresolved_bounds"]     # names the missing --max-pages bound
 
 
 def test_plan_manifest_out_deterministic(no_network, tmp_path: Path) -> None:
@@ -149,13 +163,15 @@ def test_new_scratch_db_rejected(tmp_path: Path, f1b_authorized) -> None:
     assert rc == 2
 
 
-def test_nba_manifest_non_executable_refused(tmp_path: Path, f1b_authorized) -> None:
+def test_nba_unbounded_manifest_non_executable_refused(tmp_path: Path, f1b_authorized) -> None:
+    # An UNBOUNDED NBA plan (no --max-pages) has unbounded games-list fan-out and is
+    # non-executable, so run_pilot_cli must refuse it (no network) rather than run it.
     out = tmp_path / "nba.json"
     emit_plan(league="nba", from_date="2026-01-05", to_date="2026-01-05", includes=(),
-              max_pages=5, manifest_out=out, out=lambda _s: None)
+              manifest_out=out, out=lambda _s: None)
     rc = run_pilot_cli(league="nba", manifest_path=out, scratch_db=_scratch(tmp_path),
                        out=lambda _s: None)
-    assert rc == 2  # unknown credit cost -> non-executable
+    assert rc == 2  # unbounded fan-out -> non-executable -> refused
 
 
 def test_tampered_manifest_rejected(tmp_path: Path, f1b_authorized) -> None:

@@ -37,34 +37,39 @@ def test_mlb_rich_bounded_is_executable() -> None:
     assert plan.required_request_cap() == 51 * 4
 
 
-def test_nba_skeleton_non_executable_unknown_credit_cost() -> None:
-    # NBA request fan-out is boundable (max_pages), but the BALLDONTLIE per-request
-    # credit cost is UNKNOWN (no authoritative source) -> credit-capped plan is
-    # non-executable and fails closed, even fully bounded.
+def test_nba_skeleton_executable_when_bounded_credits_na() -> None:
+    # BALLDONTLIE is request-RATE limited, not credit metered -> credits N/A. An
+    # UNBOUNDED skeleton (no --max-pages) is still non-executable because the games
+    # list fan-out is unbounded; a fully bounded skeleton IS executable, and NO
+    # credit figures are ever fabricated.
     unbounded = build_plan(league="nba", from_date="2026-01-05", to_date="2026-01-05",
                            families=("games",), stage="skeleton", bounds=Bounds())
     assert unbounded.executable() is False
+    assert unbounded.credits_applicable is False
+    assert unbounded.credits_max() is None
 
     bounded = build_plan(league="nba", from_date="2026-01-05", to_date="2026-01-05",
                          families=("games",), stage="skeleton",
                          bounds=Bounds(max_pages=5, max_retries=3))
     assert bounded.semantic_requests_max() == 5           # requests ARE boundable
-    assert bounded.credits_applicable is True
-    assert bounded.credits_max() is None                  # ... but credits are unknown
-    assert bounded.executable() is False
-    assert any("unknown_credit_cost" in b for b in bounded.unresolved_bounds())
+    assert bounded.credits_applicable is False            # credits NOT applicable
+    assert bounded.credits_min() is None                  # ... and never fabricated
+    assert bounded.credits_max() is None
+    assert bounded.executable() is True                   # bounded requests -> executable
+    assert bounded.unresolved_bounds() == ()
 
 
-def test_nba_rich_requests_boundable_credits_unknown() -> None:
+def test_nba_rich_requests_boundable_executable_credits_na() -> None:
     plan = build_plan(league="nba", from_date="2026-01-05", to_date="2026-01-05",
                       families=("box", "stats", "advanced", "plays", "lineups"), stage="rich",
                       bounds=Bounds(max_games=8, max_pages=3, max_retries=3))
     # games pages(3) + per-game single-invocation over 8 games:
     # game(8) + box(8) + stats(24) + advanced(24) + plays(24) + lineups(8) = 96; +3 = 99
     assert plan.semantic_requests_max() == 99
-    assert plan.credits_max() is None                     # unknown credit cost
-    assert plan.executable() is False
-    assert any("unknown_credit_cost" in b for b in plan.unresolved_bounds())
+    assert plan.credits_applicable is False               # request-rate limited, not credits
+    assert plan.credits_max() is None                     # never fabricated
+    assert plan.executable() is True                      # fully bounded -> executable
+    assert plan.unresolved_bounds() == ()
 
 
 def _nba_skeleton_plan():  # type: ignore[no-untyped-def]

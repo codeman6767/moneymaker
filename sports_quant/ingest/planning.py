@@ -47,6 +47,9 @@ class Bounds:
     max_pages: Optional[int] = None
     max_records: Optional[int] = None
     max_retries: int = 3
+    #: Configured request-rate (requests/min) for a rate-limited provider (NBA).
+    #: None = provider default; validated against the tier max when the gate builds.
+    rate_per_min: Optional[int] = None
 
     @property
     def retry_factor(self) -> int:
@@ -279,7 +282,9 @@ def plan_nba(
         provider="balldontlie", league="nba", stage=stage, date_range=rng,
         families=tuple(sorted(fam)), fixed_units=(), contingents=tuple(contingents),
         bounds=bounds, cost_policy_version=build_balldontlie_policy().version,
-        credits_applicable=True,
+        # BALLDONTLIE is request-RATE limited, not credit metered -> credits N/A;
+        # executability now depends only on bounded request fan-out.
+        credits_applicable=False,
     )
 
 

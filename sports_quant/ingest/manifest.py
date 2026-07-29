@@ -72,6 +72,7 @@ def plan_body(plan: RequestPlan) -> dict[str, Any]:
             "max_pages": plan.bounds.max_pages,
             "max_records": plan.bounds.max_records,
             "max_retries": plan.bounds.max_retries,
+            "rate_per_min": plan.bounds.rate_per_min,
         },
         "cost_policy_version": plan.cost_policy_version,
         "credits_applicable": plan.credits_applicable,
@@ -105,6 +106,9 @@ class PilotManifest:
     max_pages: Optional[int]
     max_records: Optional[int]
     max_retries: int
+    #: Request-rate contract (rate-limited providers only; None when N/A).
+    configured_rate_per_min: Optional[int]
+    provider_rate_limit_per_min: Optional[int]
     scratch_db: str
     checkpoint_path: str
     expected_schema_version: int
@@ -131,9 +135,12 @@ class PilotManifest:
             "estimated_requests_max": self.estimated_requests_max,
             "estimated_credits_min": self.estimated_credits_min,
             "estimated_credits_max": self.estimated_credits_max,
+            "configured_rate_per_min": self.configured_rate_per_min,
+            "provider_rate_limit_per_min": self.provider_rate_limit_per_min,
             "bounds": {
                 "max_games": self.max_games, "max_pages": self.max_pages,
                 "max_records": self.max_records, "max_retries": self.max_retries,
+                "rate_per_min": self.configured_rate_per_min,
             },
             "scratch_db": self.scratch_db,
             "checkpoint_path": self.checkpoint_path,
@@ -172,6 +179,17 @@ def build_manifest(
 
     req_cap = request_cap if request_cap is not None else plan.required_request_cap()
     cr_cap = credit_cap if credit_cap is not None else plan.required_credit_cap()
+    configured_rate: Optional[int] = None
+    provider_rate: Optional[int] = None
+    if plan.provider == "balldontlie":
+        from .cost_policies import (
+            BALLDONTLIE_DEFAULT_RATE_PER_MIN,
+            build_balldontlie_rate_policy,
+        )
+        rp = build_balldontlie_rate_policy(
+            tier="goat",
+            configured_per_min=plan.bounds.rate_per_min or BALLDONTLIE_DEFAULT_RATE_PER_MIN)
+        configured_rate, provider_rate = rp.configured_per_min, rp.tier_max_per_min
     return PilotManifest(
         provider=plan.provider,
         league=plan.league,
@@ -192,6 +210,8 @@ def build_manifest(
         max_pages=plan.bounds.max_pages,
         max_records=plan.bounds.max_records,
         max_retries=plan.bounds.max_retries,
+        configured_rate_per_min=configured_rate,
+        provider_rate_limit_per_min=provider_rate,
         scratch_db=scratch_db,
         checkpoint_path=checkpoint_path,
         expected_schema_version=EXPECTED_SCHEMA_VERSION,
@@ -219,6 +239,8 @@ def manifest_from_body(body: dict[str, Any]) -> PilotManifest:
         estimated_credits_max=body.get("estimated_credits_max"),
         max_games=b.get("max_games"), max_pages=b.get("max_pages"),
         max_records=b.get("max_records"), max_retries=int(b.get("max_retries", 3)),
+        configured_rate_per_min=body.get("configured_rate_per_min"),
+        provider_rate_limit_per_min=body.get("provider_rate_limit_per_min"),
         scratch_db=body.get("scratch_db", ""), checkpoint_path=body.get("checkpoint_path", ""),
         expected_schema_version=int(body["expected_schema_version"]),
         executable=bool(body["executable"]),

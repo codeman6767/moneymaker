@@ -141,6 +141,7 @@ def emit_plan(
     max_pages: Optional[int] = None,
     max_records: Optional[int] = None,
     max_retries: int = 3,
+    rate_per_min: Optional[int] = None,
     request_cap: Optional[int] = None,
     credit_cap: Optional[int] = None,
     scratch_db: str = "",
@@ -152,7 +153,7 @@ def emit_plan(
     """``--plan``: build + emit a plan/manifest with ZERO network or database work."""
 
     bounds = Bounds(max_games=max_games, max_pages=max_pages, max_records=max_records,
-                    max_retries=max_retries)
+                    max_retries=max_retries, rate_per_min=rate_per_min)
     plan, manifest = _build_plan_and_manifest(
         league=league, from_date=from_date, to_date=to_date, includes=includes, bounds=bounds,
         scratch_db=scratch_db, checkpoint=checkpoint, request_cap=request_cap,
@@ -179,6 +180,10 @@ def emit_plan(
         out(f"  credits:  min={manifest.estimated_credits_min} "
             f"max={'unbounded' if cr_max is None else cr_max}  "
             f"required_credit_cap={manifest.credit_cap}")
+    elif manifest.provider_rate_limit_per_min is not None:
+        out(f"  credits:  not applicable (BALLDONTLIE is request-rate limited)  "
+            f"rate: configured={manifest.configured_rate_per_min}/min "
+            f"tier_max={manifest.provider_rate_limit_per_min}/min")
     else:
         out("  credits:  not applicable (keyless MLB StatsAPI)")
     if not manifest.executable:
@@ -331,16 +336,23 @@ class _IngestorExecutor:
                            database_mutated=bool(getattr(result, "raw_responses_received", 0)))
 
 
-def _make_gate(*, league: str, request_cap: int, credit_cap: Optional[int]) -> RequestGate:
+def _make_gate(*, league: str, request_cap: int, credit_cap: Optional[int],
+               rate_per_min: Optional[int] = None) -> RequestGate:
     if league == "mlb":
         return RequestGate(
             request_budget=RequestBudget(max_requests=request_cap),
             credit_budget=CreditBudget(applicable=False),
             cost_policy=build_mlb_policy())
+    # BALLDONTLIE: credits N/A (request-rate limited). Attach the versioned rate
+    # policy so the runtime throttles to the configured per-minute rate.
+    from .cost_policies import BALLDONTLIE_DEFAULT_RATE_PER_MIN, build_balldontlie_rate_policy
+    rate_policy = build_balldontlie_rate_policy(
+        tier="goat", configured_per_min=rate_per_min or BALLDONTLIE_DEFAULT_RATE_PER_MIN)
     return RequestGate(
         request_budget=RequestBudget(max_requests=request_cap),
-        credit_budget=CreditBudget(applicable=True, max_credits=credit_cap),
-        cost_policy=build_balldontlie_policy())
+        credit_budget=CreditBudget(applicable=False),
+        cost_policy=build_balldontlie_policy(),
+        rate_policy=rate_policy)
 
 
 def run_pilot_cli(
@@ -397,8 +409,12 @@ def run_pilot_cli(
     #    version must be explicitly regenerated and re-reviewed.
     from_date, to_date = _parse_date_range(manifest.date_range)
     includes = tuple(f for f in manifest.families if f not in ("schedule", "games"))
+    # Rebuild the exact plan bounds, incl. the request-rate bound recorded in the
+    # signed plan body, so the recomputed plan_hash matches the reviewed manifest.
+    plan_rate_per_min = manifest.plan_body.get("bounds", {}).get("rate_per_min")
     bounds = Bounds(max_games=manifest.max_games, max_pages=manifest.max_pages,
-                    max_records=manifest.max_records, max_retries=manifest.max_retries)
+                    max_records=manifest.max_records, max_retries=manifest.max_retries,
+                    rate_per_min=plan_rate_per_min)
     rebuilt = build_plan(league=league, from_date=from_date, to_date=to_date,
                          families=manifest.families, stage=manifest.stage, bounds=bounds)
     if plan_hash(rebuilt) != manifest.computed_plan_hash():
@@ -481,7 +497,8 @@ def run_pilot_cli(
     # Logical-run budget: on resume, pre-charge the gate with the prior process's
     # usage so the manifest caps span all resumed processes (no fresh budget).
     gate = _make_gate(league=league, request_cap=manifest.request_cap,
-                      credit_cap=manifest.credit_cap)
+                      credit_cap=manifest.credit_cap,
+                      rate_per_min=manifest.configured_rate_per_min)
     if resume_ck is not None:
         gate.seed_prior(
             prior_requests=int(resume_ck.usage.get("reserved_attempts", 0) or 0),

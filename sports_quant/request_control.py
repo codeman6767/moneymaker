@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import json
 import threading
+import time
+from collections import deque
 from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Any, Callable, Mapping, Optional
@@ -41,6 +43,9 @@ class LimitType(str, Enum):
     #: A single request whose conservative credit cost is unknown while a credit
     #: cap is in force -- the plan/run is not executable (fail closed).
     UNKNOWN_CREDIT_COST = "unknown_credit_cost"
+    #: A request whose path classifies to an endpoint family the provider's policy
+    #: does not recognise -- fail closed rather than issue an unmodelled call.
+    UNKNOWN_ENDPOINT = "unknown_endpoint"
 
 
 @dataclass(frozen=True)
@@ -99,12 +104,14 @@ class EndpointCostPolicy:
         credit_applicable: bool,
         costs: Mapping[str, int],
         classifier: Optional[Callable[[str], str]] = None,
+        known_families: Optional[frozenset[str]] = None,
     ) -> None:
         self.provider = provider
         self.version = version
         self.credit_applicable = credit_applicable
         self._costs = dict(costs)
         self._classifier = classifier
+        self._known_families = known_families
 
     def classify(self, path: str) -> str:
         """Map a raw request path to its endpoint family ("unknown" if none)."""
@@ -112,6 +119,15 @@ class EndpointCostPolicy:
         if self._classifier is None:
             return "unknown"
         return self._classifier(path)
+
+    def is_known_family(self, endpoint_family: str) -> bool:
+        """True when the family is recognised. When ``known_families`` is declared,
+        a family outside it (e.g. the ``unknown`` fallback) fails closed at the gate
+        even for a request-rate-limited provider with no credit cost."""
+
+        if self._known_families is None:
+            return True
+        return endpoint_family in self._known_families
 
     def cost_for(self, endpoint_family: str) -> Optional[int]:
         """Conservative credit cost, or ``None`` when unknown/not applicable.
@@ -212,6 +228,68 @@ class CreditBudget:
             raise ValueError("an applicable credit budget requires max_credits >= 0")
 
 
+@dataclass(frozen=True)
+class RequestRatePolicy:
+    """A versioned provider request-RATE contract (requests per minute).
+
+    Some providers (BALLDONTLIE) meter by a per-minute REQUEST-RATE limit per
+    subscription tier, NOT by a monetary/credit balance. This is distinct from the
+    aggregate request budget (a hard total-call ceiling for the whole logical run):
+    the rate policy bounds how FAST calls may be issued. ``configured_per_min`` is
+    the safe operating rate the runtime honours and MUST be <= the provider's
+    ``tier_max_per_min`` (a conservative default sits well below the tier maximum).
+    """
+
+    provider: str
+    version: str
+    tier: str
+    tier_max_per_min: int
+    configured_per_min: int
+
+    def __post_init__(self) -> None:
+        if self.tier_max_per_min <= 0 or self.configured_per_min <= 0:
+            raise ValueError("rate limits must be positive")
+        if self.configured_per_min > self.tier_max_per_min:
+            raise ValueError(
+                f"configured rate {self.configured_per_min}/min exceeds the verified "
+                f"tier maximum {self.tier_max_per_min}/min for {self.provider} ({self.tier})")
+
+
+class RateLimiter:
+    """A client-side sliding-window rate limiter (requests per ``window`` seconds).
+
+    Concurrency-safe. :meth:`acquire_wait` returns the seconds the caller must wait
+    (0 when a slot is free now) before issuing a request to stay within
+    ``per_min``, reserving the slot. The clock is injectable for deterministic
+    tests; the async transport awaits the returned delay before sending.
+    """
+
+    def __init__(self, per_min: int, *, clock: Callable[[], float] = time.monotonic,
+                 window: float = 60.0) -> None:
+        if per_min <= 0:
+            raise ValueError("per_min must be positive")
+        self._per_min = per_min
+        self._clock = clock
+        self._window = window
+        self._times: "deque[float]" = deque()
+        self._lock = threading.Lock()
+
+    def acquire_wait(self) -> float:
+        with self._lock:
+            now = self._clock()
+            horizon = now - self._window
+            while self._times and self._times[0] <= horizon:
+                self._times.popleft()
+            if len(self._times) < self._per_min:
+                self._times.append(now)
+                return 0.0
+            # Wait until the oldest reservation leaves the window; reserve the slot
+            # at that future instant so concurrent callers serialise correctly.
+            wait = self._times[0] + self._window - now
+            self._times.append(now + max(0.0, wait))
+            return max(0.0, wait)
+
+
 @dataclass
 class UsageReport:
     """Deterministic usage/truncation accounting produced by a run or plan.
@@ -247,6 +325,14 @@ class UsageReport:
     provider_credits_remaining: Optional[int] = None
     credits_applicable: bool = False
     credit_header_status: str = "not_applicable"  # not_applicable|absent|present|inconsistent
+    # Request-RATE accounting (distinct from the aggregate request budget and from
+    # any credit balance): the provider's per-minute tier ceiling, the configured
+    # safe operating rate, cumulative client-side throttle wait, and observed 429s.
+    rate_limited: bool = False
+    provider_rate_limit_per_min: Optional[int] = None
+    configured_rate_per_min: Optional[int] = None
+    throttle_wait_seconds: float = 0.0
+    http_429s: int = 0
     families_completed: tuple[str, ...] = ()
     families_failed: tuple[str, ...] = ()
     families_truncated: tuple[str, ...] = ()
@@ -278,20 +364,51 @@ class RequestGate:
         cost_policy: EndpointCostPolicy,
         usage: Optional[UsageReport] = None,
         resumable: bool = True,
+        rate_policy: Optional[RequestRatePolicy] = None,
+        sleep: Optional[Callable[[float], Any]] = None,
     ) -> None:
         self._req = request_budget
         self._credit = credit_budget
         self._policy = cost_policy
         self._lock = threading.Lock()
         self._resumable = resumable
+        self._rate_policy = rate_policy
+        self._limiter = RateLimiter(rate_policy.configured_per_min) if rate_policy else None
         self.usage = usage or UsageReport(provider=cost_policy.provider)
         self.usage.credits_applicable = credit_budget.applicable
         if not credit_budget.applicable:
             self.usage.credit_header_status = "not_applicable"
+        if rate_policy is not None:
+            self.usage.rate_limited = True
+            self.usage.provider_rate_limit_per_min = rate_policy.tier_max_per_min
+            self.usage.configured_rate_per_min = rate_policy.configured_per_min
 
     @property
     def cost_policy(self) -> EndpointCostPolicy:
         return self._policy
+
+    @property
+    def rate_policy(self) -> Optional[RequestRatePolicy]:
+        return self._rate_policy
+
+    def rate_acquire(self) -> float:
+        """Reserve a rate slot; return the seconds the caller must wait before the
+        actual transport send to stay within the configured per-minute rate. The
+        wait is accumulated in ``throttle_wait_seconds`` (0 when a slot is free)."""
+
+        if self._limiter is None:
+            return 0.0
+        wait = self._limiter.acquire_wait()
+        if wait > 0:
+            with self._lock:
+                self.usage.throttle_wait_seconds += wait
+        return wait
+
+    def record_429(self) -> None:
+        """Record an observed HTTP 429 (rate-limit) response (handled via backoff)."""
+
+        with self._lock:
+            self.usage.http_429s += 1
 
     def seed_prior(self, *, prior_requests: int, prior_credits: int) -> None:
         """Pre-charge the gate with a previous process's usage on resume.
@@ -320,6 +437,18 @@ class RequestGate:
 
         family = unit.endpoint_family
         with self._lock:
+            # Unrecognised endpoint family -> fail closed (never issue an unmodelled
+            # call), independent of whether the provider is credit-metered.
+            if not self._policy.is_known_family(family):
+                self.usage.blocked_requests += 1
+                exc = BudgetExhausted(
+                    limit_type=LimitType.UNKNOWN_ENDPOINT,
+                    cap=self._req.max_requests, consumed=self.usage.attempted_requests,
+                    remaining=max(0, self._req.max_requests - self.usage.attempted_requests),
+                    blocked_family=family, blocked_identity=unit.identity(),
+                    resumable=self._resumable)
+                self.usage.budget_exhausted = exc.as_dict()
+                raise exc
             # Unknown credit cost under an applicable credit cap -> fail closed.
             cost: Optional[int] = None
             if self._credit.applicable:

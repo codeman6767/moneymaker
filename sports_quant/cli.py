@@ -629,11 +629,15 @@ def _make_audit_probes(
 
     tier = BalldontlieTier(settings.nba_data_tier)
     declaration = declaration_for(provider, balldontlie_tier=tier)
+    # The bounded provider-audit is the sanctioned non-ingestion, GET-only caller
+    # for the F1A-gated providers: it opts out of the request gate explicitly
+    # (require_gate=False) rather than routing through a budgeted pilot manifest.
     if provider == PROVIDER_MLB_STATSAPI:
-        client: Any = MlbStatsApiClient(base_url=settings.mlb_stats_api_base_url)
+        client: Any = MlbStatsApiClient(
+            base_url=settings.mlb_stats_api_base_url, require_gate=False)
         probes = build_mlb_statsapi_probes(client)
     elif provider == PROVIDER_BALLDONTLIE:
-        client = BalldontlieClient(settings.nba_data_api_key)
+        client = BalldontlieClient(settings.nba_data_api_key, require_gate=False)
         probes = build_balldontlie_probes(client)
     elif provider == PROVIDER_NWS:
         client = NwsClient(base_url=settings.nws_base_url)
@@ -1500,6 +1504,7 @@ def _dispatch_f1a(args: Any, *, league: str) -> Optional[int]:
         return emit_plan(
             league=league, from_date=args.from_date, to_date=args.to_date, includes=includes,
             max_games=args.max_games, max_pages=args.max_pages, max_records=args.max_records,
+            rate_per_min=getattr(args, "request_rate", None),
             request_cap=args.request_cap, credit_cap=args.credit_cap,
             scratch_db=str(args.scratch_db or ""), checkpoint=str(args.checkpoint or ""),
             as_json=args.as_json, manifest_out=args.manifest_out)
@@ -1511,6 +1516,7 @@ def _dispatch_f1a(args: Any, *, league: str) -> Optional[int]:
             ("--from", args.from_date), ("--to", args.to_date),
             ("--include", tuple(args.includes)), ("--max-games", args.max_games),
             ("--max-pages", args.max_pages), ("--max-records", args.max_records),
+            ("--request-rate", getattr(args, "request_rate", None)),
             ("--request-cap", args.request_cap), ("--credit-cap", args.credit_cap),
         ) if val not in (None, (), [])
     ]
@@ -1542,6 +1548,8 @@ def _add_f1a_args(parser: Any) -> None:
     g.add_argument("--max-games", dest="max_games", type=int, default=None, metavar="N")
     g.add_argument("--max-pages", dest="max_pages", type=int, default=None, metavar="N")
     g.add_argument("--max-records", dest="max_records", type=int, default=None, metavar="N")
+    g.add_argument("--request-rate", dest="request_rate", type=int, default=None, metavar="PER_MIN",
+                   help="Configured BALLDONTLIE request rate/min (<= verified tier max)")
     g.add_argument("--scratch-db", dest="scratch_db", type=Path, default=None, metavar="PATH",
                    help="Explicit isolated scratch database for a live pilot")
     g.add_argument("--checkpoint", dest="checkpoint", type=Path, default=None, metavar="PATH")
