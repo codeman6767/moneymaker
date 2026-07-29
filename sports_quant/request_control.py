@@ -34,6 +34,11 @@ from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Any, Callable, Mapping, Optional
 
+#: Endpoint families whose successful responses are *listing/discovery pages* and so
+#: count toward ``pages_fetched``: MLB ``schedule`` and BALLDONTLIE ``games``. A
+#: per-entity (rich) fetch is not a listing page.
+LISTING_FAMILIES = frozenset({"schedule", "games"})
+
 
 class LimitType(str, Enum):
     """Which budget a :class:`BudgetExhausted` refers to."""
@@ -328,11 +333,35 @@ class UsageReport:
     # Request-RATE accounting (distinct from the aggregate request budget and from
     # any credit balance): the provider's per-minute tier ceiling, the configured
     # safe operating rate, cumulative client-side throttle wait, and observed 429s.
+    #
+    # ``rate_policy_active`` means only "a rate policy is attached and enforcing".
+    # ``rate_limited`` means a request was ACTUALLY delayed, blocked, or answered with
+    # a provider rate-limit response -- it is never true merely because a policy
+    # exists (that conflation made a clean run report rate_limited=true with zero
+    # throttle wait and zero 429s).
+    rate_policy_active: bool = False
     rate_limited: bool = False
     provider_rate_limit_per_min: Optional[int] = None
     configured_rate_per_min: Optional[int] = None
+    throttle_events: int = 0
     throttle_wait_seconds: float = 0.0
     http_429s: int = 0
+    # GAME-SELECTION accounting (``max_games``), kept strictly separate from BUDGET
+    # truncation below: a bounded selection is a planned, successful outcome, whereas
+    # ``families_truncated`` / ``budget_exhausted`` mean the run was cut short.
+    games_received: int = 0
+    games_selected: int = 0
+    games_excluded_by_max_games: int = 0
+    selection_truncated: bool = False
+    # AUTHENTICATION / TIER honesty. ``tier_verified`` is only ever true when a
+    # bounded capability audit observed tier-gated endpoints; a successful call to an
+    # endpoint that is also available below the subscribed tier proves authentication
+    # but never proves the tier.
+    authentication_succeeded: Optional[bool] = None
+    authentication_status: str = "not_applicable"  # not_applicable|unknown|succeeded|failed
+    tier_status: str = "unknown"  # unknown|not_applicable|configured_not_verified|verified
+    tier_verified: bool = False
+    tier_evidence_source: str = "none"  # none|declared_capabilities|bounded_capability_audit
     families_completed: tuple[str, ...] = ()
     families_failed: tuple[str, ...] = ()
     families_truncated: tuple[str, ...] = ()
@@ -341,6 +370,23 @@ class UsageReport:
     database_mutated: bool = False
     manifest_hash: str = ""
     checkpoint_state: str = "none"  # none|written|resumed|completed|truncated
+    # Resume provenance: a resumed process rewrites this report, so the FIRST run's
+    # transport evidence would otherwise be lost from the checkpoint (a completed
+    # resume would show network_occurred=false for network-fetched data).
+    prior_transport_starts: int = 0
+    prior_pages_fetched: int = 0
+
+    @property
+    def total_transport_starts(self) -> int:
+        """Transport sends across the whole logical run (prior processes included)."""
+
+        return self.prior_transport_starts + self.transport_starts
+
+    @property
+    def total_pages_fetched(self) -> int:
+        """Unique successful listing pages across the whole logical run."""
+
+        return self.prior_pages_fetched + self.pages_fetched
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -378,8 +424,11 @@ class RequestGate:
         self.usage.credits_applicable = credit_budget.applicable
         if not credit_budget.applicable:
             self.usage.credit_header_status = "not_applicable"
+        self._counted_pages: set[str] = set()
         if rate_policy is not None:
-            self.usage.rate_limited = True
+            # A policy being attached is NOT rate limiting; only an actual wait,
+            # block, or provider 429 sets ``rate_limited``.
+            self.usage.rate_policy_active = True
             self.usage.provider_rate_limit_per_min = rate_policy.tier_max_per_min
             self.usage.configured_rate_per_min = rate_policy.configured_per_min
 
@@ -401,7 +450,10 @@ class RequestGate:
         wait = self._limiter.acquire_wait()
         if wait > 0:
             with self._lock:
+                # An actual delay DID occur -> this run really was rate limited.
+                self.usage.throttle_events += 1
                 self.usage.throttle_wait_seconds += wait
+                self.usage.rate_limited = True
         return wait
 
     def record_429(self) -> None:
@@ -409,8 +461,16 @@ class RequestGate:
 
         with self._lock:
             self.usage.http_429s += 1
+            self.usage.rate_limited = True  # a provider rate-limit response is real
 
-    def seed_prior(self, *, prior_requests: int, prior_credits: int) -> None:
+    def seed_prior(
+        self,
+        *,
+        prior_requests: int,
+        prior_credits: int,
+        prior_transport_starts: int = 0,
+        prior_pages_fetched: int = 0,
+    ) -> None:
         """Pre-charge the gate with a previous process's usage on resume.
 
         The manifest's request/credit caps apply to the ENTIRE logical run across
@@ -426,6 +486,10 @@ class RequestGate:
             self.usage.attempted_requests = self.usage.prior_requests
             self.usage.reserved_attempts = self.usage.prior_requests
             self.usage.reserved_credits = self.usage.prior_credits
+            # Carry the earlier process's transport evidence so a completed resume
+            # cannot erase the fact that the data was fetched over the network.
+            self.usage.prior_transport_starts = max(0, int(prior_transport_starts))
+            self.usage.prior_pages_fetched = max(0, int(prior_pages_fetched))
 
     # -- reservation ---------------------------------------------------------
     def reserve(self, unit: RequestUnit, *, is_retry: bool = False) -> None:
@@ -517,13 +581,17 @@ class RequestGate:
 
     # -- staged transport recording -----------------------------------------
     def mark_transport(self, *, page: bool = False) -> None:
-        """A real transport send was attempted (distinct from a reservation)."""
+        """A real transport send was attempted (distinct from a reservation).
+
+        Pages are deliberately NOT counted here: a send that later fails must not
+        count as a fetched page, and a retry of the same page must not count twice.
+        Page accounting happens in :meth:`record_success` keyed by page identity.
+        The ``page`` argument is accepted for call-site compatibility and ignored.
+        """
 
         with self._lock:
             self.usage.network_occurred = True
             self.usage.transport_starts += 1
-            if page:
-                self.usage.pages_fetched += 1
 
     def record_response(self) -> None:
         """A complete HTTP response body was received (any status)."""
@@ -536,13 +604,91 @@ class RequestGate:
             self.usage.parse_successes += 1
 
     # -- outcome recording ---------------------------------------------------
-    def record_success(self) -> None:
+    def record_success(self, unit: Optional[RequestUnit] = None) -> None:
+        """A fully-successful response was returned.
+
+        When ``unit`` names a listing family (schedule / games discovery), the page is
+        counted ONCE per unique ``(family, date_key, entity_key, page)`` identity, so
+        a retried page adds request attempts but never a second successful page.
+        Authentication is proven by the first success when auth applies.
+        """
+
         with self._lock:
             self.usage.successful_responses += 1
+            if unit is not None and unit.endpoint_family in LISTING_FAMILIES:
+                identity = unit.identity()
+                if identity not in self._counted_pages:
+                    self._counted_pages.add(identity)
+                    self.usage.pages_fetched += 1
+            if self.usage.authentication_status in ("unknown", "failed"):
+                self.usage.authentication_status = "succeeded"
+                self.usage.authentication_succeeded = True
 
-    def record_failure(self) -> None:
+    def record_failure(self, *, status_code: Optional[int] = None) -> None:
         with self._lock:
             self.usage.failed_responses += 1
+            if status_code in (401, 403) and self.usage.authentication_status != "not_applicable":
+                self.usage.authentication_status = "failed"
+                self.usage.authentication_succeeded = False
+
+    def set_auth_context(
+        self,
+        *,
+        auth_applicable: bool,
+        configured_tier: Optional[str] = None,
+    ) -> None:
+        """Declare whether authentication applies, and the CONFIGURED (unverified) tier.
+
+        A keyless provider reports authentication as not applicable. For an
+        authenticated provider the tier starts ``configured_not_verified``: only a
+        bounded capability audit that actually observed tier-gated endpoints may
+        promote it via :meth:`record_tier_evidence`.
+        """
+
+        with self._lock:
+            if not auth_applicable:
+                self.usage.authentication_status = "not_applicable"
+                self.usage.authentication_succeeded = None
+                self.usage.tier_status = "not_applicable"
+                self.usage.tier_verified = False
+                self.usage.tier_evidence_source = "none"
+                return
+            self.usage.authentication_status = "unknown"
+            self.usage.tier_status = "configured_not_verified"
+            self.usage.tier_verified = False
+            self.usage.tier_evidence_source = "none"
+            if configured_tier:
+                self.usage.tier_status = f"configured_not_verified:{configured_tier}"
+
+    def record_tier_evidence(self, *, source: str, verified: bool,
+                             tier: Optional[str] = None) -> None:
+        """Record tier evidence explicitly, from a named evidence source.
+
+        ``source`` must name real evidence (``bounded_capability_audit`` observed
+        tier-gated endpoints, or ``declared_capabilities`` which is declaration only
+        and can never verify). Only an observing audit may set ``verified=True``.
+        """
+
+        with self._lock:
+            self.usage.tier_evidence_source = source
+            if source != "bounded_capability_audit":
+                verified = False
+            self.usage.tier_verified = verified
+            if verified and tier:
+                self.usage.tier_status = f"verified:{tier}"
+            elif tier:
+                self.usage.tier_status = f"configured_not_verified:{tier}"
+
+    def record_selection(
+        self, *, games_received: int, games_selected: int, excluded: int
+    ) -> None:
+        """Record ``max_games`` selection accounting (never budget truncation)."""
+
+        with self._lock:
+            self.usage.games_received += max(0, int(games_received))
+            self.usage.games_selected += max(0, int(games_selected))
+            self.usage.games_excluded_by_max_games += max(0, int(excluded))
+            self.usage.selection_truncated = self.usage.games_excluded_by_max_games > 0
 
     def record_provider_credits(
         self, *, remaining: Optional[int], consumed: Optional[int]

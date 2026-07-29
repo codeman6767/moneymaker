@@ -1,18 +1,56 @@
 # Phase F — Research & Recommendation Plan (authoritative)
 
 **Status:** F0 planning complete **and independently reviewed** (see §R). **F1A
-(request/credit safety controls) is implemented AND has independently passed its
-correctness review — F1A is complete.** No corpus backfill, feature engineering,
-model training, calibration, simulation, EV evaluation, backtesting, or
-recommendation output has started. Schema remains **v16**. No live provider request
-or persisted ingestion has occurred (F1A is offline; all provider behavior is
-tested with mocked transports and a socket sentinel). **The live F1B pilot remains
-NOT authorized and unexecuted.** Its prerequisites have now been discharged (see
-§R.7 and the box below): the GOAT subscription is confirmed active by a bounded
-GET-only audit, the BALLDONTLIE quota model is corrected (a versioned request-**rate**
-policy — credits are *not applicable*, never fabricated), and canonical zero-network
-**skeleton** manifests have been generated for review. Executing them still requires
-the separate authorization boundary (`MONEYMAKER_F1B_AUTHORIZED=1`), which stays off.
+(request/credit safety controls) is complete and independently reviewed.** **The
+F1B *skeleton* pilots for MLB and NBA have now EXECUTED successfully and have been
+independently reviewed — the skeleton stage is complete** (see
+`F1B_SKELETON_PILOT_REPORT.md` and the box below). No feature engineering, model
+training, calibration, simulation, EV evaluation, backtesting, or recommendation
+output has started. Schema remains **v16**.
+
+**The F1B *rich-data* pilot has NOT started and remains unauthorized**, pending a
+separately reviewed manifest (rich families) and an approved per-run request budget.
+
+> **F1B skeleton pilot execution + independent review (2026-07-29).** Both pilots
+> ran under the `MONEYMAKER_F1B_AUTHORIZED=1` boundary (process-scoped only, never
+> persisted), each governed by its committed manifest:
+> - **MLB** (`fa28695b…`, cap 4) — **1 request**, 1 listing page, **30 games
+>   received → 2 selected (28 excluded by `max_games`)**, 1 raw response, 2 schedule
+>   snapshots, 2 provider game refs, 4 provider team refs, 0 DQ findings.
+> - **NBA** (`6fe6dc37…`, cap 8, 60/min configured ≤ 600/min GOAT max) — **1
+>   request**, 1 listing page, **8 games received → 2 selected (6 excluded)**, 1 raw
+>   response, 2 schedule snapshots, 2 provider game refs, 4 provider team refs, 9
+>   declared capability rows, 2 non-blocking capability-honesty DQ notes.
+>
+> Selected games are the deterministic canonical first two (MLB by
+> `(officialDate, gamePk)`, NBA by `(date_local, game_id)`), **not** provider
+> response order — independently reconfirmed from the persisted response bodies.
+> Both **completed resumes made zero additional provider requests**, zero database
+> mutation, and left row counts and content hashes byte-identical. **No secret
+> leakage occurred** (no key, `Authorization`, `x-api-key`, or secret-bearing URL in
+> any database, checkpoint, or output; the only `authorization`/`?apiKey=` matches
+> are schema DDL comments documenting that such values are never stored). **The
+> development corpus was unchanged** (byte-identical SHA-256, every row predating
+> the pilots), and the MLB artifacts were unchanged by the NBA execution.
+>
+> The review also repaired five **reporting** defects (the runs were correct; their
+> reports were not): `rate_limited` no longer means "a rate policy exists"
+> (`rate_policy_active` + `throttle_events` added); `max_games` selection accounting
+> is now reported (`games_received` / `games_selected` /
+> `games_excluded_by_max_games` / `selection_truncated`) strictly separately from
+> budget truncation; `pages_fetched` now counts unique **successful** listing pages
+> (page 0 included, failed transports excluded, retries counted once); authentication
+> and tier are reported honestly (`authentication_status`, `tier_status`,
+> `tier_verified`, `tier_evidence_source`); and a completed resume no longer erases
+> the first run's transport provenance (`prior_transport_starts` /
+> `prior_pages_fetched`).
+>
+> **Tier honesty:** a 200 from `/v1/games` proves **authentication only** — that
+> endpoint is available below GOAT, so the skeleton run alone can never verify the
+> tier. The 9 capability rows the skeleton wrote are **declared** states
+> (`is_observed=0`), not observations. GOAT reachability evidence comes solely from
+> the separate bounded capability audit of 2026-07-28 (`tier_restricted=false`, rich
+> endpoints 200) recorded in its own git-ignored audit database.
 
 > **F1B prerequisite discharge (2026-07-28).** Bounded, GET-only provider audits
 > ran at the configured NBA tier against a git-ignored scratch DB (no secret ever

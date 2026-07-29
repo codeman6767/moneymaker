@@ -232,7 +232,7 @@ class BaseProviderClient:
                 # A transport send is about to occur -- record ACTUAL network
                 # activity (distinct from the earlier reservation).
                 if self._gate is not None and gate_unit is not None:
-                    self._gate.mark_transport(page=gate_unit.page > 0)
+                    self._gate.mark_transport()
                 # stream=True so the body is read chunk-by-chunk and the size cap
                 # is enforced BEFORE the whole response is buffered into memory.
                 response = await self._client.send(request, stream=True)
@@ -288,7 +288,9 @@ class BaseProviderClient:
 
             if status_code >= 400:
                 if self._gate is not None:
-                    self._gate.record_failure()
+                    # The status lets the gate distinguish an AUTH failure (401/403)
+                    # from any other terminal failure, without seeing the credential.
+                    self._gate.record_failure(status_code=status_code)
                 self._raise_for_status(status_code, exchange)
 
             try:
@@ -300,7 +302,9 @@ class BaseProviderClient:
                 raise
             if self._gate is not None:
                 self._gate.record_parse_success()
-                self._gate.record_success()
+                # The unit identifies the page, so a successful listing page is
+                # counted exactly once even if an earlier attempt was retried.
+                self._gate.record_success(gate_unit)
             return ProviderResponse(data=data, exchange=exchange)
 
     def _gate_unit(

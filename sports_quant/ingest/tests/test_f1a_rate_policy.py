@@ -118,7 +118,10 @@ def test_gate_exposes_rate_contract_and_accumulates_throttle_wait() -> None:
         cost_policy=build_balldontlie_policy(),
         rate_policy=build_balldontlie_rate_policy("goat", 2))
     # Rate fields are surfaced on the usage report, distinct from any credit fields.
-    assert gate.usage.rate_limited is True
+    # An ATTACHED policy is `rate_policy_active`; it is NOT itself rate limiting.
+    assert gate.usage.rate_policy_active is True
+    assert gate.usage.rate_limited is False
+    assert gate.usage.throttle_events == 0
     assert gate.usage.provider_rate_limit_per_min == 600   # tier max
     assert gate.usage.configured_rate_per_min == 2         # configured safe rate
     assert gate.usage.credits_applicable is False
@@ -126,17 +129,24 @@ def test_gate_exposes_rate_contract_and_accumulates_throttle_wait() -> None:
     gate._limiter = RateLimiter(2, clock=lambda: now[0], window=60.0)  # type: ignore[attr-defined]
     assert gate.rate_acquire() == 0.0
     assert gate.rate_acquire() == 0.0
+    assert gate.usage.rate_limited is False    # nothing has waited yet
     wait = gate.rate_acquire()
     assert wait == pytest.approx(60.0)
     assert gate.usage.throttle_wait_seconds == pytest.approx(60.0)
+    # Only now, after a request actually waited, is the run truly rate limited.
+    assert gate.usage.throttle_events == 1
+    assert gate.usage.rate_limited is True
 
 
 def test_gate_records_429_without_inventing_anything() -> None:
     gate = _bdl_gate(request_cap=10)
     assert gate.usage.http_429s == 0
+    assert gate.usage.rate_limited is False
     gate.record_429()
     gate.record_429()
     assert gate.usage.http_429s == 2
+    # A provider rate-limit RESPONSE is real rate limiting.
+    assert gate.usage.rate_limited is True
     # A 429 is a rate signal, never a credit figure.
     assert gate.usage.reported_credits_consumed is None
     assert gate.usage.provider_credits_remaining is None

@@ -250,7 +250,7 @@ hides it.
 > scheduled start. The corpus strategy is therefore a staged hybrid — a
 > forward-collected strict-PIT corpus (system of record) plus a separate, explicitly
 > non-PIT reconstructed-research corpus — and the live pilot is split into F1A
-> (request/credit controls) then F1B and is NOT yet authorized. Schema
+> (request/credit controls) then F1B. Schema
 > remains v16. **F1A is implemented AND has independently passed its correctness
 > review — F1A is complete** (offline; request/credit gate at the transport
 > chokepoint, zero-network `--plan`/`--manifest-out`, deterministic manifests,
@@ -258,13 +258,24 @@ hides it.
 > committed-transaction persistence boundary, logical-run budget across resumed
 > processes, `max_games` enforcement + planner/ingestor fan-out fidelity, WAL-aware
 > content-digest scratch identity, hardened atomic checkpoints, and CLI wiring).
-> F1B remains **unauthorized and unexecuted** (separate authorization boundary
-> `MONEYMAKER_F1B_AUTHORIZED=1`, off). Its prerequisites are discharged (2026-07-28):
-> a bounded GET-only `provider-audit` confirmed MLB (keyless) and BALLDONTLIE **GOAT**
+> The **F1B *skeleton* pilots have EXECUTED and been independently reviewed**
+> (2026-07-29; `F1B_SKELETON_PILOT_REPORT.md`): MLB 1 request (30 games → 2 selected)
+> and NBA 1 request (8 games → 2 selected), both discovery-only, each completed
+> resume making **zero** additional requests, development corpus byte-identical, no
+> secret leakage, schema v16. The **F1B *rich-data* pilot has not started and remains
+> unauthorized** pending a separately reviewed manifest and request budget
+> (`MONEYMAKER_F1B_AUTHORIZED=1` is off by default and process-scoped when used).
+> Prerequisites were discharged 2026-07-28: a bounded GET-only `provider-audit`
+> confirmed MLB (keyless) and BALLDONTLIE **GOAT**
 > (`authenticated=true`, `tier_restricted=false`) access; BALLDONTLIE is request-**rate**
 > limited per tier, so credits are **not applicable** (never fabricated) and a versioned
-> request-rate policy (`bdl-rate-v1`, 100/min default ≤ GOAT 600/min) governs pacing;
-> reviewed skeleton manifests are generated (not executed) at `pilots/f1b/`.
+> request-rate policy (`bdl-rate-v1`, 100/min default ≤ GOAT 600/min) governs pacing.
+>
+> **Critically for PIT semantics:** the skeleton pilots did **not** create a strict
+> historical point-in-time corpus. Both ranges are *completed* past dates, so every
+> row carries a 2026-07-29 receipt `observed_at`. These are retrospective
+> observations and must never be treated as historical live-replay features; the E2
+> feature-cutoff guard continues to exclude them.
 > Reconstructed provenance is design-only
 > (`RECONSTRUCTED_CORPUS_PROVENANCE.md`), the strict E1/E2 builder is unchanged, and
 > no features or models have started.**

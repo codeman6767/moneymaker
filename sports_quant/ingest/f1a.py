@@ -340,6 +340,14 @@ class _IngestorExecutor:
             raise _UnitFailed(
                 f"{self._league} ingest unit failed: "
                 f"{getattr(result, 'error_type', None)}: {getattr(result, 'error_message', '')}")
+        # Surface max_games SELECTION accounting (both ingestors already compute it)
+        # so the report distinguishes a bounded selection from budget truncation.
+        received = int(getattr(result, "games_received", 0) or 0)
+        excluded = int(getattr(result, "games_truncated", 0) or 0)
+        if received or excluded:
+            selected = len(getattr(result, "ordered_game_ids", ()) or ())
+            gate.record_selection(games_received=received, games_selected=selected,
+                                  excluded=excluded)
         return result
 
     def iter_units(self, *, gate: RequestGate, completed: set[str]) -> Iterator[UnitDone]:
@@ -376,20 +384,29 @@ class _IngestorExecutor:
 def _make_gate(*, league: str, request_cap: int, credit_cap: Optional[int],
                rate_per_min: Optional[int] = None) -> RequestGate:
     if league == "mlb":
-        return RequestGate(
+        gate = RequestGate(
             request_budget=RequestBudget(max_requests=request_cap),
             credit_budget=CreditBudget(applicable=False),
             cost_policy=build_mlb_policy())
+        # MLB StatsAPI is keyless: authentication (and therefore any tier) is N/A.
+        gate.set_auth_context(auth_applicable=False)
+        return gate
     # BALLDONTLIE: credits N/A (request-rate limited). Attach the versioned rate
     # policy so the runtime throttles to the configured per-minute rate.
     from .cost_policies import BALLDONTLIE_DEFAULT_RATE_PER_MIN, build_balldontlie_rate_policy
     rate_policy = build_balldontlie_rate_policy(
         tier="goat", configured_per_min=rate_per_min or BALLDONTLIE_DEFAULT_RATE_PER_MIN)
-    return RequestGate(
+    gate = RequestGate(
         request_budget=RequestBudget(max_requests=request_cap),
         credit_budget=CreditBudget(applicable=False),
         cost_policy=build_balldontlie_policy(),
         rate_policy=rate_policy)
+    # Authentication applies and is proven by the first successful response. The tier
+    # stays UNVERIFIED here: the skeleton only calls /v1/games, which is available
+    # below GOAT, so it can never establish the subscribed tier. Only a bounded
+    # capability audit that observed tier-gated endpoints may promote tier_verified.
+    gate.set_auth_context(auth_applicable=True, configured_tier=rate_policy.tier)
+    return gate
 
 
 def run_pilot_cli(
@@ -541,9 +558,25 @@ def run_pilot_cli(
                       credit_cap=manifest.credit_cap,
                       rate_per_min=manifest.configured_rate_per_min)
     if resume_ck is not None:
+        _u = resume_ck.usage
         gate.seed_prior(
-            prior_requests=int(resume_ck.usage.get("reserved_attempts", 0) or 0),
-            prior_credits=int(resume_ck.usage.get("reserved_credits", 0) or 0))
+            prior_requests=int(_u.get("reserved_attempts", 0) or 0),
+            prior_credits=int(_u.get("reserved_credits", 0) or 0),
+            # Carry the earlier process's transport evidence forward so a completed
+            # resume cannot make network-fetched data look as if it never was fetched.
+            prior_transport_starts=int(_u.get("transport_starts", 0) or 0)
+            + int(_u.get("prior_transport_starts", 0) or 0),
+            prior_pages_fetched=int(_u.get("pages_fetched", 0) or 0)
+            + int(_u.get("prior_pages_fetched", 0) or 0))
+        # Selection accounting is a property of the frozen selected set, so it must
+        # survive a resume that re-fetches nothing.
+        gate.record_selection(
+            games_received=int(_u.get("games_received", 0) or 0),
+            games_selected=int(_u.get("games_selected", 0) or 0),
+            excluded=int(_u.get("games_excluded_by_max_games", 0) or 0))
+        if _u.get("authentication_status") == "succeeded":
+            gate.usage.authentication_status = "succeeded"
+            gate.usage.authentication_succeeded = True
 
     result = run_pilot(
         manifest=manifest, gate=gate, executor=executor,
@@ -555,8 +588,35 @@ def run_pilot_cli(
         out(json.dumps(result.as_dict(), sort_keys=True))
     else:
         state = "TRUNCATED" if result.truncated else "COMPLETE"
-        out(f"pilot {league.upper()} {state}  requests={result.usage['attempted_requests']} "
+        # `.get` throughout: a partial usage mapping must never break reporting.
+        u = result.usage
+        out(f"pilot {league.upper()} {state}  requests={u.get('attempted_requests', 0)} "
             f"completed_units={result.completed} skipped={result.skipped}")
+        # Pages: unique SUCCESSFUL listing pages (a retry never double-counts).
+        out(f"  pages:     fetched={u.get('pages_fetched', 0)} "
+            f"(logical run total="
+            f"{u.get('prior_pages_fetched', 0) + u.get('pages_fetched', 0)})")
+        # Selection truncation is a planned bound -- NEVER budget truncation.
+        out(f"  selection: received={u.get('games_received', 0)} "
+            f"selected={u.get('games_selected', 0)} "
+            f"excluded_by_max_games={u.get('games_excluded_by_max_games', 0)} "
+            f"selection_truncated={u.get('selection_truncated', False)}")
+        out(f"  budget:    truncated={result.truncated} "
+            f"blocked_requests={u.get('blocked_requests', 0)} "
+            f"budget_exhausted={u.get('budget_exhausted') is not None}")
+        # Rate: a policy being active is not the same as having been rate limited.
+        out(f"  rate:      policy_active={u.get('rate_policy_active', False)} "
+            f"configured={u.get('configured_rate_per_min')}/min "
+            f"provider_max={u.get('provider_rate_limit_per_min')}/min "
+            f"throttle_events={u.get('throttle_events', 0)} "
+            f"throttle_wait={float(u.get('throttle_wait_seconds', 0.0)):.3f}s "
+            f"http_429s={u.get('http_429s', 0)} "
+            f"rate_limited={u.get('rate_limited', False)}")
+        out(f"  auth:      status={u.get('authentication_status', 'not_applicable')} "
+            f"succeeded={u.get('authentication_succeeded')}  "
+            f"tier={u.get('tier_status', 'unknown')} "
+            f"verified={u.get('tier_verified', False)} "
+            f"evidence={u.get('tier_evidence_source', 'none')}")
         if result.truncated and result.exhaustion is not None:
             out(f"  budget exhausted: {result.exhaustion['limit_type']} "
                 f"cap={result.exhaustion['cap']}")
