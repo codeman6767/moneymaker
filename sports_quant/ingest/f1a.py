@@ -55,9 +55,14 @@ EXIT_OK = 0
 EXIT_USAGE = 2
 EXIT_DATABASE_ERROR = 3
 EXIT_BUDGET_EXHAUSTED = 4
+EXIT_RUN_FAILED = 5  # a non-budget run failure (fetch/parse/persist); resumable
+
+
+class _UnitFailed(RuntimeError):
+    """A per-unit ingest failed (fetch/parse/persist); the unit stays incomplete."""
 
 _MLB_RICH = {"results", "box", "inning", "rosters"}
-_NBA_RICH = {"box", "stats", "advanced", "plays", "lineups"}
+_NBA_RICH = {"box", "stats", "advanced", "plays", "lineups", "quarters"}
 
 #: F1B (live pilot) is DISABLED by default. A future controlled authorization is a
 #: separate, reviewed step; this env var only lets tests exercise the mocked
@@ -217,6 +222,8 @@ class _IngestorExecutor:
         stage: str,
         max_pages: Optional[int] = None,
         max_records: Optional[int] = None,
+        max_games: Optional[int] = None,
+        resume_game_ids: tuple[str, ...] = (),
     ) -> None:
         self._league = league
         self._database = database
@@ -227,19 +234,34 @@ class _IngestorExecutor:
         self._stage = stage
         self._max_pages = max_pages
         self._max_records = max_records
+        self._max_games = max_games
+        self._resume_game_ids = resume_game_ids
 
-    def _unit(self) -> RequestUnit:
-        rng = self._from if not self._to or self._to == self._from else f"{self._from}..{self._to}"
-        fam = "schedule" if self._league == "mlb" else "games"
-        return RequestUnit(provider=("mlb_statsapi" if self._league == "mlb" else "balldontlie"),
-                           league=self._league, endpoint_family=fam, date_key=rng,
-                           entity_key=f"stage:{self._stage}")
+    @property
+    def _provider(self) -> str:
+        return "mlb_statsapi" if self._league == "mlb" else "balldontlie"
 
-    def iter_units(self, *, gate: RequestGate, completed: set[str]) -> Iterator[UnitDone]:
-        unit = self._unit()
-        ident = unit.identity()
-        if ident in completed:
-            return  # resume: this stage already durable -> zero transport
+    @property
+    def _range(self) -> str:
+        return self._from if not self._to or self._to == self._from else f"{self._from}..{self._to}"
+
+    def _skeleton_identity(self) -> str:
+        return RequestUnit(provider=self._provider, league=self._league,
+                           endpoint_family="skeleton", date_key=self._range).identity()
+
+    def _game_identity(self, gid: str) -> str:
+        return RequestUnit(provider=self._provider, league=self._league,
+                           endpoint_family="game", date_key=self._range, entity_key=gid).identity()
+
+    def _run_ingest(self, gate: RequestGate, *, game_id: Optional[str],
+                    includes: tuple[str, ...]) -> Any:
+        """Run one atomic ingest (skeleton range, or one single-game) under the gate.
+
+        A single-game ingest is the deterministic bounded unit whose entire
+        persistence boundary is atomic (its own committed transactions); a
+        BudgetExhausted swallowed by the ingestor is surfaced from the gate.
+        """
+
         client = self._client_factory(gate)
 
         async def _run() -> Any:
@@ -249,26 +271,64 @@ class _IngestorExecutor:
                 if self._league == "mlb":
                     return await ingest_mlb(
                         database=self._database, client=client, from_date=self._from,
-                        to_date=self._to, includes=self._includes, dry_run=False)
+                        to_date=self._to,
+                        game_pk=int(game_id) if game_id is not None else None,
+                        includes=includes, max_games=self._max_games, dry_run=False)
                 from ..providers.capabilities import BalldontlieTier
-                nba_kwargs: dict[str, Any] = {}
+                nba_kwargs: dict[str, Any] = {"max_games": self._max_games}
                 if self._max_pages is not None:
                     nba_kwargs["max_pages"] = self._max_pages
                 if self._max_records is not None:
                     nba_kwargs["max_records"] = self._max_records
                 return await ingest_nba(
                     database=self._database, client=client, from_date=self._from,
-                    to_date=self._to, includes=self._includes,
-                    tier=BalldontlieTier.GOAT, dry_run=False, **nba_kwargs)
+                    to_date=self._to,
+                    game_id=int(game_id) if game_id is not None else None,
+                    includes=includes, tier=BalldontlieTier.GOAT, dry_run=False, **nba_kwargs)
             finally:
                 await client.aclose()
 
         result = asyncio.run(_run())
-        # If a gated call was blocked and the ingestor swallowed it, surface it.
-        if gate.usage.budget_exhausted is not None:
+        if gate.usage.budget_exhausted is not None:  # gate may swallow inside the ingestor
             raise BudgetExhausted.from_dict(gate.usage.budget_exhausted)
-        mutated = bool(getattr(result, "raw_responses_received", 0))
-        yield UnitDone(identity=ident, family=unit.endpoint_family, database_mutated=mutated)
+        # A genuine ingest failure (fetch/parse/persist error the ingestor caught)
+        # leaves the unit INCOMPLETE -- do not checkpoint it as done; surface it so
+        # the runner records a failed, resumable state.
+        if getattr(result, "status", "") == "failed":
+            raise _UnitFailed(
+                f"{self._league} ingest unit failed: "
+                f"{getattr(result, 'error_type', None)}: {getattr(result, 'error_message', '')}")
+        return result
+
+    def iter_units(self, *, gate: RequestGate, completed: set[str]) -> Iterator[UnitDone]:
+        """Yield the skeleton unit, then one atomic unit per selected game.
+
+        Request-addressable resumability (B1): a completed unit is skipped with
+        ZERO transport; the selected game set is frozen at the skeleton unit and
+        reused on resume; each per-game unit is durable (its ingest committed)
+        before it is yielded (and thus checkpointed).
+        """
+
+        skel_id = self._skeleton_identity()
+        rich = self._includes
+        if skel_id in completed:
+            game_ids = tuple(self._resume_game_ids)  # resume: reuse the frozen set
+        else:
+            result = self._run_ingest(gate, game_id=None, includes=())  # skeleton only
+            game_ids = tuple(getattr(result, "ordered_game_ids", ()) or ())
+            yield UnitDone(identity=skel_id, family="skeleton",
+                           database_mutated=bool(getattr(result, "raw_responses_received", 0)),
+                           stage_game_ids=game_ids)
+
+        if not rich:
+            return  # skeleton-only stage: no per-game units
+        for gid in game_ids:
+            unit_id = self._game_identity(gid)
+            if unit_id in completed:
+                continue  # already durable -> zero transport
+            result = self._run_ingest(gate, game_id=gid, includes=rich)
+            yield UnitDone(identity=unit_id, family="game",
+                           database_mutated=bool(getattr(result, "raw_responses_received", 0)))
 
 
 def _make_gate(*, league: str, request_cap: int, credit_cap: Optional[int]) -> RequestGate:
@@ -352,20 +412,32 @@ def run_pilot_cli(
     if manifest.request_cap is None:
         out("[FAILED ] manifest has no request cap")
         return EXIT_USAGE
+    req_max = rebuilt.required_request_cap()
+    if req_max is not None and manifest.request_cap < req_max:
+        out(f"[FAILED ] manifest request_cap {manifest.request_cap} is below the plan's "
+            f"conservative maximum {req_max}")
+        return EXIT_USAGE
+    cred_max = rebuilt.required_credit_cap()
+    if (manifest.credit_cap is not None and cred_max is not None
+            and manifest.credit_cap < cred_max):
+        out(f"[FAILED ] manifest credit_cap {manifest.credit_cap} is below the plan's "
+            f"conservative maximum {cred_max}")
+        return EXIT_USAGE
 
     # 4. Resume must match the exact manifest (before any DB read).
     expected_fp: Optional[str] = None
+    resume_ck: Optional[Any] = None
     if resume:
         assert checkpoint is not None
         try:
-            ck = load_checkpoint(Path(checkpoint))
+            resume_ck = load_checkpoint(Path(checkpoint))
         except CheckpointError as exc:
             out(f"[FAILED ] {exc}")
             return EXIT_USAGE
-        if ck.manifest_hash != manifest.manifest_hash():
+        if resume_ck.manifest_hash != manifest.manifest_hash():
             out("[FAILED ] checkpoint does not match this manifest")
             return EXIT_USAGE
-        expected_fp = ck.scratch_fingerprint
+        expected_fp = resume_ck.scratch_fingerprint
 
     # 5. Scratch-database isolation (read-only classification; never mutates a DB).
     try:
@@ -402,13 +474,21 @@ def run_pilot_cli(
     executor = _IngestorExecutor(
         league=league, database=database, client_factory=client_factory,
         from_date=from_date, to_date=to_date, includes=includes, stage=manifest.stage,
-        max_pages=manifest.max_pages, max_records=manifest.max_records)
+        max_pages=manifest.max_pages, max_records=manifest.max_records,
+        max_games=manifest.max_games,
+        resume_game_ids=tuple(resume_ck.stage_game_ids) if resume_ck is not None else ())
+
+    # Logical-run budget: on resume, pre-charge the gate with the prior process's
+    # usage so the manifest caps span all resumed processes (no fresh budget).
+    gate = _make_gate(league=league, request_cap=manifest.request_cap,
+                      credit_cap=manifest.credit_cap)
+    if resume_ck is not None:
+        gate.seed_prior(
+            prior_requests=int(resume_ck.usage.get("reserved_attempts", 0) or 0),
+            prior_credits=int(resume_ck.usage.get("reserved_credits", 0) or 0))
 
     result = run_pilot(
-        manifest=manifest,
-        gate=_make_gate(league=league, request_cap=manifest.request_cap,
-                        credit_cap=manifest.credit_cap),
-        executor=executor,
+        manifest=manifest, gate=gate, executor=executor,
         checkpoint_path=Path(checkpoint) if checkpoint else Path(f"{scratch_db}.ckpt"),
         scratch_fingerprint=classification.fingerprint or "",
         resume=resume, code_version=code_version, fingerprint_fn=_fingerprint)
@@ -422,7 +502,13 @@ def run_pilot_cli(
         if result.truncated and result.exhaustion is not None:
             out(f"  budget exhausted: {result.exhaustion['limit_type']} "
                 f"cap={result.exhaustion['cap']}")
-    return EXIT_BUDGET_EXHAUSTED if result.truncated else EXIT_OK
+        if result.failure is not None:
+            out(f"  run failed (resumable): {result.failure}")
+    if result.truncated:
+        return EXIT_BUDGET_EXHAUSTED
+    if result.failure is not None:
+        return EXIT_RUN_FAILED
+    return EXIT_OK
 
 
 def _default_client_factory(league: str) -> Callable[[RequestGate], Any]:

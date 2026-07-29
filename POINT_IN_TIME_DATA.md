@@ -251,13 +251,18 @@ hides it.
 > forward-collected strict-PIT corpus (system of record) plus a separate, explicitly
 > non-PIT reconstructed-research corpus — and the live pilot is split into F1A
 > (request/credit controls) then F1B and is NOT yet authorized. Schema
-> remains v16. **F1A is now implemented and locally validated (offline; request/
-> credit gate at the transport chokepoint, zero-network `--plan`, deterministic
-> manifests, atomic checkpoints + verified resume, scratch-DB isolation, CLI
-> wiring); its independent correctness review is still pending, F1B remains
-> unauthorized, reconstructed provenance is design-only
-> (`RECONSTRUCTED_CORPUS_PROVENANCE.md`), the strict E1/E2 builder is unchanged,
-> and no features or models have started.**
+> remains v16. **F1A is implemented AND has independently passed its correctness
+> review — F1A is complete** (offline; request/credit gate at the transport
+> chokepoint, zero-network `--plan`/`--manifest-out`, deterministic manifests,
+> manifest-governed `--pilot`, per-**game** request-addressable resumability with a
+> committed-transaction persistence boundary, logical-run budget across resumed
+> processes, `max_games` enforcement + planner/ingestor fan-out fidelity, WAL-aware
+> content-digest scratch identity, hardened atomic checkpoints, and CLI wiring).
+> F1B remains **unauthorized and unexecuted** (separate authorization + prerequisite
+> task; BALLDONTLIE credit cost stays fail-closed until an authoritative policy
+> exists); reconstructed provenance is design-only
+> (`RECONSTRUCTED_CORPUS_PROVENANCE.md`), the strict E1/E2 builder is unchanged, and
+> no features or models have started.**
 
 ## 3. As-of query pattern
 

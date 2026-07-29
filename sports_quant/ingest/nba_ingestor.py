@@ -142,6 +142,11 @@ class NbaIngestResult:
     pages_fetched: int = 0
     raw_responses_received: int = 0
     games_received: int = 0
+    #: B2: games dropped from rich-data scope by ``max_games``, and the
+    #: deterministic canonical-ordered provider game ids selected (post-slice),
+    #: consumed by the F1A per-game pilot executor for resumability.
+    games_truncated: int = 0
+    ordered_game_ids: tuple[str, ...] = ()
     teams_observed: int = 0
     players_observed: int = 0
     schedule_observations: int = 0
@@ -903,6 +908,48 @@ class _Fetched:
     lineup_by_game: dict[str, ProviderResponse]
 
 
+def _select_nba_games(
+    games: list[tuple[dict[str, Any], "ProviderResponse"]],
+    norm_games: list[tuple[Any, "ProviderResponse"]],
+    max_games: Optional[int],
+) -> tuple[list[tuple[dict[str, Any], "ProviderResponse"]],
+           list[tuple[Any, "ProviderResponse"]], int]:
+    """Deterministic canonical selection for ``max_games`` (B2, NBA).
+
+    Orders by ``(date_local, game_id)`` -- never provider response order --
+    deduplicates by ``game_id``, then keeps the first ``max_games``. Returns the
+    selected ``(games, norm_games, truncated_count)``. Unbounded (``None``) keeps
+    the provider order unchanged so existing behavior is byte-identical.
+    """
+
+    if max_games is None:
+        return games, norm_games, 0
+    combined = list(zip(games, norm_games, strict=True))
+
+    def _key(item: tuple[Any, Any]) -> tuple[str, int]:
+        norm = item[1][0]
+        gid = getattr(norm, "game_id", None) if norm is not None else None
+        date = getattr(norm, "date_local", None) if norm is not None else None
+        try:
+            gid_int = int(gid) if gid is not None else 0
+        except (TypeError, ValueError):
+            gid_int = 0
+        return (str(date or ""), gid_int)
+
+    seen: set[str] = set()
+    deduped: list[tuple[Any, Any]] = []
+    for item in sorted(combined, key=_key):
+        norm = item[1][0]
+        gid = getattr(norm, "game_id", None) if norm is not None else None
+        if gid is None or gid in seen:
+            continue
+        seen.add(gid)
+        deduped.append(item)
+    truncated = max(0, len(deduped) - max_games)
+    kept = deduped[:max_games]
+    return [g for g, _n in kept], [n for _g, n in kept], truncated
+
+
 async def _fetch_all(
     client: BalldontlieClient,
     *,
@@ -913,6 +960,7 @@ async def _fetch_all(
     result: NbaIngestResult,
     max_pages: int,
     max_records: int,
+    max_games: Optional[int] = None,
 ) -> _Fetched:
     game_pages = await _fetch_games(
         client, from_date=from_date, to_date=to_date, game_id=game_id, result=result,
@@ -930,7 +978,12 @@ async def _fetch_all(
     result.games_received = len(games)
 
     norm_games = [(_normalize_game(g)[0], page) for g, page in games]
+    # B2: deterministic canonical selection for max_games (applied to the SELECTED
+    # set for every rich family below). Unbounded -> provider order preserved.
+    games, norm_games, truncated = _select_nba_games(games, norm_games, max_games)
+    result.games_truncated = truncated
     game_ids = [n.game_id for n, _ in norm_games if n is not None]
+    result.ordered_game_ids = tuple(game_ids)
 
     responses: list[ProviderResponse] = list(game_pages)
     box_by_date: dict[str, ProviderResponse] = {}
@@ -1002,10 +1055,18 @@ async def ingest_nba(
     dry_run: bool = False,
     max_pages: int = DEFAULT_MAX_PAGES,
     max_records: int = DEFAULT_MAX_RECORDS,
+    max_games: Optional[int] = None,
     tool_version: str = _TOOL_VERSION,
     command: str = _COMMAND,
 ) -> NbaIngestResult:
-    """Ingest NBA official data from BALLDONTLIE. ``--dry-run`` persists nothing."""
+    """Ingest NBA official data from BALLDONTLIE. ``--dry-run`` persists nothing.
+
+    ``max_games`` (B2) bounds the per-game rich-data fan-out to the first N games
+    in deterministic canonical order; validated before any network/DB work.
+    """
+
+    from .mlb_ingestor import validate_max_games
+    validate_max_games(max_games)  # fail before any side effect
 
     result = NbaIngestResult(dry_run=dry_run, status="succeeded", command=command)
     declaration = balldontlie_declaration(tier)
@@ -1015,6 +1076,7 @@ async def ingest_nba(
         fetched = await _fetch_all(
             client, from_date=from_date, to_date=to_date, game_id=game_id,
             include_set=include_set, result=result, max_pages=max_pages, max_records=max_records,
+            max_games=max_games,
         )
     except ProviderError as exc:
         result.status = "failed"

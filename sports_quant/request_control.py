@@ -225,6 +225,9 @@ class UsageReport:
     planned_requests: int = 0
     estimated_requests_min: int = 0
     estimated_requests_max: int = 0
+    # Logical-run carry-over from prior resumed processes (counted against the cap).
+    prior_requests: int = 0
+    prior_credits: int = 0
     # Staged accounting (each reserved attempt reaches exactly one terminal state):
     reserved_attempts: int = 0        # a budget slot was taken (may never send)
     attempted_requests: int = 0       # alias of reserved_attempts (back-compat)
@@ -289,6 +292,23 @@ class RequestGate:
     @property
     def cost_policy(self) -> EndpointCostPolicy:
         return self._policy
+
+    def seed_prior(self, *, prior_requests: int, prior_credits: int) -> None:
+        """Pre-charge the gate with a previous process's usage on resume.
+
+        The manifest's request/credit caps apply to the ENTIRE logical run across
+        all resumed processes, so a resume must not get a fresh budget. Prior
+        attempts/credits are counted against the cap here (an uncertain interrupted
+        request is treated conservatively as consumed), and reported separately as
+        ``prior_*`` so current-process usage stays distinguishable.
+        """
+
+        with self._lock:
+            self.usage.prior_requests = max(0, int(prior_requests))
+            self.usage.prior_credits = max(0, int(prior_credits))
+            self.usage.attempted_requests = self.usage.prior_requests
+            self.usage.reserved_attempts = self.usage.prior_requests
+            self.usage.reserved_credits = self.usage.prior_credits
 
     # -- reservation ---------------------------------------------------------
     def reserve(self, unit: RequestUnit, *, is_retry: bool = False) -> None:

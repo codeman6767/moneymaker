@@ -31,9 +31,10 @@ def test_mlb_rich_bounded_is_executable() -> None:
                       families=("box", "results", "inning", "rosters"), stage="rich",
                       bounds=Bounds(max_games=10, max_retries=3))
     assert plan.executable() is True
-    # schedule(1) + linescore(10) + box(10) + rosters(2*10) = 41
-    assert plan.semantic_requests_max() == 41
-    assert plan.required_request_cap() == 41 * 4
+    # skeleton schedule(1) + per-game single-invocation fan-out over 10 games:
+    # game_schedule(10) + linescore(10) + box(10) + rosters(2*10) = 50; +1 = 51
+    assert plan.semantic_requests_max() == 51
+    assert plan.required_request_cap() == 51 * 4
 
 
 def test_nba_skeleton_non_executable_unknown_credit_cost() -> None:
@@ -58,8 +59,9 @@ def test_nba_rich_requests_boundable_credits_unknown() -> None:
     plan = build_plan(league="nba", from_date="2026-01-05", to_date="2026-01-05",
                       families=("box", "stats", "advanced", "plays", "lineups"), stage="rich",
                       bounds=Bounds(max_games=8, max_pages=3, max_retries=3))
-    # games(3) + box(1) + stats(24) + advanced(24) + plays(24) + lineups(8) = 84
-    assert plan.semantic_requests_max() == 84
+    # games pages(3) + per-game single-invocation over 8 games:
+    # game(8) + box(8) + stats(24) + advanced(24) + plays(24) + lineups(8) = 96; +3 = 99
+    assert plan.semantic_requests_max() == 99
     assert plan.credits_max() is None                     # unknown credit cost
     assert plan.executable() is False
     assert any("unknown_credit_cost" in b for b in plan.unresolved_bounds())

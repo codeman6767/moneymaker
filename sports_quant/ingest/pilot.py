@@ -38,6 +38,10 @@ class UnitDone:
     identity: str
     family: str
     database_mutated: bool = True
+    #: Set by the skeleton unit to freeze the canonical selected game set into the
+    #: checkpoint, so a resume uses the SAME games even if the provider schedule
+    #: later changes.
+    stage_game_ids: tuple[str, ...] = ()
 
 
 class PilotExecutor(Protocol):
@@ -63,14 +67,17 @@ class PilotResult:
     checkpoint_state: str
     network_occurred: bool
     database_mutated: bool
+    failure: Optional[str] = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "success": self.success,
             "truncated": self.truncated,
+            "failed": self.failure is not None,
             "completed": self.completed,
             "skipped_on_resume": self.skipped,
             "budget_exhausted": self.exhaustion,
+            "failure": self.failure,
             "usage": self.usage,
             "checkpoint_state": self.checkpoint_state,
             "network_occurred": self.network_occurred,
@@ -145,12 +152,16 @@ def run_pilot(
     db_mutated = False
     exhaustion: Optional[dict[str, Any]] = None
     truncated = False
+    failed = False
+    failure: Optional[str] = None
 
     try:
         for done in executor.iter_units(gate=gate, completed=completed):
             completed.add(done.identity)
             ck.completed_identities = sorted(completed)
             ck.last_boundary = done.identity
+            if done.stage_game_ids:  # freeze the selected game set into the checkpoint
+                ck.stage_game_ids = list(done.stage_game_ids)
             families_done.add(done.family)
             newly_completed += 1
             if done.database_mutated:
@@ -162,12 +173,35 @@ def run_pilot(
         ck.state = "completed"
         gate.usage.checkpoint_state = "resumed_completed" if resume else "completed"
     except BudgetExhausted as exc:
+        # Controlled truncation: completed units are already durable + checkpointed.
         truncated = True
         exhaustion = exc.as_dict()
         ck.state = "truncated"
         ck.blocked_identities = sorted(set(ck.blocked_identities) | {exc.blocked_identity})
         gate.usage.checkpoint_state = "truncated"
         gate.usage.families_truncated = tuple(sorted(families_done | {exc.blocked_family}))
+    except BaseException as exc:  # noqa: BLE001 - record, preserve completed work, re-classify
+        # A non-budget failure (fetch/parse/persist, cancellation, KeyboardInterrupt):
+        # the in-progress unit is NOT checkpointed (left incomplete -> resumable);
+        # completed units stay durable; the original classification is preserved.
+        failed = True
+        failure = f"{type(exc).__name__}: {exc}"
+        ck.state = "failed"
+        gate.usage.checkpoint_state = "failed"
+        ck.usage = gate.usage.as_dict()
+        ck.scratch_fingerprint = fp()
+        write_checkpoint(checkpoint_path, ck)
+        gate.usage.families_completed = tuple(sorted(families_done))
+        gate.usage.database_mutated = db_mutated
+        result = PilotResult(
+            success=False, truncated=False, completed=newly_completed,
+            skipped=gate.usage.skipped_on_resume, exhaustion=None,
+            usage=gate.usage.as_dict(), checkpoint_state="failed",
+            network_occurred=gate.usage.network_occurred, database_mutated=db_mutated,
+            failure=failure)
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise  # never swallow an interrupt after recording the resumable state
+        return result
 
     gate.usage.families_completed = tuple(sorted(families_done))
     gate.usage.database_mutated = db_mutated
@@ -176,7 +210,7 @@ def run_pilot(
     write_checkpoint(checkpoint_path, ck)
 
     return PilotResult(
-        success=not truncated,
+        success=not truncated and not failed,
         truncated=truncated,
         completed=newly_completed,
         skipped=len(completed) - newly_completed if not truncated else gate.usage.skipped_on_resume,
@@ -185,4 +219,5 @@ def run_pilot(
         checkpoint_state=ck.state,
         network_occurred=gate.usage.network_occurred,
         database_mutated=db_mutated,
+        failure=failure,
     )

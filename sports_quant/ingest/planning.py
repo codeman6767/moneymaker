@@ -35,7 +35,7 @@ MLB_SKELETON_FAMILIES: frozenset[str] = frozenset({"schedule"})
 MLB_RICH_FAMILIES: frozenset[str] = frozenset({"results", "box", "inning", "rosters"})
 NBA_SKELETON_FAMILIES: frozenset[str] = frozenset({"games"})
 NBA_RICH_FAMILIES: frozenset[str] = frozenset(
-    {"box", "stats", "advanced", "plays", "lineups"}
+    {"box", "stats", "advanced", "plays", "lineups", "quarters"}
 )
 
 
@@ -204,6 +204,13 @@ def plan_mlb(
     fam = set(families)
     if stage == "rich" and fam & MLB_RICH_FAMILIES:
         gmax = bounds.max_games  # None => unbounded => non-executable
+        # Each rich game is fetched via single-game mode, which re-fetches that
+        # game's schedule (hydrated) before its per-game data -- modeled here so the
+        # plan maximum bounds the executor's ACTUAL fan-out.
+        contingents.append(Contingent(
+            kind="per_game", family="game_schedule", per_parent_min=1, per_parent_max=1,
+            parent_min=0, parent_max=gmax,
+            note="single-game schedule re-fetch per selected game; needs --max-games"))
         if fam & {"results", "inning"}:
             contingents.append(Contingent(
                 kind="per_game", family="game_linescore", per_parent_min=1, per_parent_max=1,
@@ -237,7 +244,7 @@ def plan_nba(
     bounds: Bounds,
 ) -> RequestPlan:
     rng = _range_key(from_date, to_date)
-    days = _days_in_range(from_date, to_date)
+    _days_in_range(from_date, to_date)  # validate range ordering (raises on reversed)
     fam = set(families)
     contingents: list[Contingent] = []
     # Games list is paginated (bounded by --max-pages); it is the skeleton.
@@ -246,11 +253,18 @@ def plan_nba(
         parent_min=1, parent_max=1, note="games list pages; needs --max-pages"))
     if stage == "rich" and fam & NBA_RICH_FAMILIES:
         gmax = bounds.max_games
-        if "box" in fam:
-            # Box is per-DATE (known from the range) -> bounded by day count.
+        # Each rich game is fetched via single-game mode: fetch_game(id) per game.
+        contingents.append(Contingent(
+            kind="per_game", family="game", per_parent_min=1, per_parent_max=1,
+            parent_min=0, parent_max=gmax,
+            note="single-game fetch per selected game; needs --max-games"))
+        if "box" in fam or "quarters" in fam:
+            # In single-game mode box is fetched once per selected game (that game's
+            # date); box also backs derived quarter lines (quarters -> box_scores).
             contingents.append(Contingent(
-                kind="per_team_date", family="box_scores", per_parent_min=1, per_parent_max=1,
-                parent_min=1, parent_max=days, note="box per date (bounded by date span)"))
+                kind="per_game", family="box_scores", per_parent_min=1, per_parent_max=1,
+                parent_min=0, parent_max=gmax,
+                note="box per selected game (also backs quarters); needs --max-games"))
         for family in ("stats", "advanced", "plays", "lineups"):
             if family in fam:
                 efam = {"stats": "stats", "advanced": "advanced_stats",

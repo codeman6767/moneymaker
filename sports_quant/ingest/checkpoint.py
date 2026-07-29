@@ -67,6 +67,9 @@ class Checkpoint:
     failed_identities: list[str] = field(default_factory=list)
     blocked_identities: list[str] = field(default_factory=list)
     incomplete_identities: list[str] = field(default_factory=list)
+    #: The frozen canonical selected game set (from the skeleton unit); resume uses
+    #: this exact set rather than re-deriving from a possibly-changed schedule.
+    stage_game_ids: list[str] = field(default_factory=list)
     usage: dict[str, Any] = field(default_factory=dict)
     last_boundary: str = ""
     state: str = "in_progress"  # in_progress|completed|truncated
@@ -90,6 +93,7 @@ class Checkpoint:
             "failed_identities": sorted(set(self.failed_identities)),
             "blocked_identities": sorted(set(self.blocked_identities)),
             "incomplete_identities": sorted(set(self.incomplete_identities)),
+            "stage_game_ids": list(self.stage_game_ids),
             "usage": self.usage,
             "last_boundary": self.last_boundary,
             "state": self.state,
@@ -203,6 +207,7 @@ def load_checkpoint(path: Path) -> Checkpoint:
         failed_identities=list(data.get("failed_identities", [])),
         blocked_identities=list(data.get("blocked_identities", [])),
         incomplete_identities=list(data.get("incomplete_identities", [])),
+        stage_game_ids=list(data.get("stage_game_ids", [])),
         usage=dict(data.get("usage", {})),
         last_boundary=data.get("last_boundary", ""),
         state=data.get("state", "in_progress"),

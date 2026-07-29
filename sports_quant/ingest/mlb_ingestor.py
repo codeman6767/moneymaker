@@ -77,6 +77,11 @@ class MlbIngestResult:
     requests_made: int = 0
     raw_responses_received: int = 0
     games_received: int = 0
+    #: B2: games truncated by ``max_games`` (schedule had more than the bound), and
+    #: the deterministic canonical-ordered provider game ids actually selected
+    #: (post-slice) -- consumed by the F1A per-game pilot executor for resumability.
+    games_truncated: int = 0
+    ordered_game_ids: tuple[str, ...] = ()
     games_inserted: int = 0
     games_unchanged: int = 0
     schedule_snapshots_inserted: int = 0
@@ -238,6 +243,61 @@ def _schedule_games(data: Any) -> list[dict[str, Any]]:
                 if isinstance(game, dict):
                     games.append(game)
     return games
+
+
+def validate_max_games(max_games: Optional[int]) -> None:
+    """B2: reject an invalid ``max_games`` BEFORE any network/DB side effect.
+
+    ``None`` = unlimited. A bool (even though ``bool`` is an ``int`` subclass), a
+    non-int, a negative value, or an unsafely large value is rejected. ``0`` is
+    valid and means "skeleton only, no per-game rich data".
+    """
+
+    if max_games is None:
+        return
+    if isinstance(max_games, bool) or not isinstance(max_games, int):
+        raise ValueError(f"max_games must be an int or None, not {type(max_games).__name__}")
+    if max_games < 0:
+        raise ValueError(f"max_games must be >= 0, got {max_games}")
+    if max_games > 100_000:
+        raise ValueError(f"max_games {max_games} exceeds the safe maximum (100000)")
+
+
+def _select_games(
+    games: list[dict[str, Any]], max_games: Optional[int]
+) -> tuple[list[dict[str, Any]], int]:
+    """Deterministic canonical game selection for ``max_games`` (B2).
+
+    Orders by ``(officialDate, gamePk)`` -- never provider response order --
+    deduplicates by ``gamePk`` (a corrected/repeated schedule record collapses to
+    one), then keeps the first ``max_games``. Returns ``(selected, truncated_n)``.
+    The same ordering is applied to every dependent rich-data family because the
+    whole pipeline consumes this selected list.
+    """
+
+    if max_games is None:
+        return games, 0  # unbounded: preserve provider order exactly (no behavior change)
+
+    def _key(g: dict[str, Any]) -> tuple[str, int]:
+        pk = _provider_id(g, "gamePk")
+        date = _opt_str(_as_dict(g).get("officialDate")) or _opt_str(g.get("gameDate")) or ""
+        try:
+            pk_int = int(pk) if pk is not None else 0
+        except (TypeError, ValueError):
+            pk_int = 0
+        return (date, pk_int)
+
+    seen: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for g in sorted(games, key=_key):
+        pk = _provider_id(g, "gamePk")
+        if pk is None or pk in seen:
+            continue
+        seen.add(pk)
+        deduped.append(g)
+    if max_games is None or len(deduped) <= max_games:
+        return deduped, 0
+    return deduped[:max_games], len(deduped) - max_games
 
 
 # --------------------------------------------------------------------------- #
@@ -443,11 +503,18 @@ async def ingest_mlb(
     to_date: Optional[str] = None,
     game_pk: Optional[int] = None,
     includes: tuple[str, ...] = (),
+    max_games: Optional[int] = None,
     dry_run: bool = False,
     tool_version: str = _TOOL_VERSION,
     command: str = _COMMAND,
 ) -> MlbIngestResult:
-    """Ingest MLB schedule (+ optional per-game data). ``--dry-run`` persists nothing."""
+    """Ingest MLB schedule (+ optional per-game data). ``--dry-run`` persists nothing.
+
+    ``max_games`` (B2) bounds the per-game rich-data fan-out to the first N games in
+    deterministic canonical order; validated before any network/DB work.
+    """
+
+    validate_max_games(max_games)  # fail before any side effect
 
     result = MlbIngestResult(dry_run=dry_run, status="succeeded", command=command)
     include_set = _requested_capabilities_available(set(includes), result)
@@ -471,8 +538,13 @@ async def ingest_mlb(
         return result
     result.requests_made += 1
 
-    games = _schedule_games(schedule.data)
-    result.games_received = len(games)
+    all_games = _schedule_games(schedule.data)
+    games, truncated = _select_games(all_games, max_games)
+    result.games_received = len(all_games)
+    result.games_truncated = truncated
+    result.ordered_game_ids = tuple(
+        pk for pk in (_provider_id(g, "gamePk") for g in games) if pk is not None
+    )
 
     # Per-game sub-fetches happen up front (GET-only, sequential -- no fan-out),
     # so a dry run performs the same reads but persists nothing.

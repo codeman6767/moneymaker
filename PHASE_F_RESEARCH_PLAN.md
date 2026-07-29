@@ -1,37 +1,61 @@
 # Phase F — Research & Recommendation Plan (authoritative)
 
 **Status:** F0 planning complete **and independently reviewed** (see §R). **F1A
-(request/credit safety controls) is now implemented and locally validated; its
-independent correctness review is still pending.** No corpus backfill, feature
-engineering, model training, calibration, simulation, EV evaluation, backtesting,
-or recommendation output has started. Schema remains **v16**. No live provider
-request or persisted ingestion has occurred (F1A is offline; all provider behavior
-is tested with mocked transports). **The live F1B pilot remains NOT authorized** —
-it may run only after F1A passes independent review (and the external
-prerequisites in §R.7 are met).
+(request/credit safety controls) is implemented AND has independently passed its
+correctness review — F1A is complete.** No corpus backfill, feature engineering,
+model training, calibration, simulation, EV evaluation, backtesting, or
+recommendation output has started. Schema remains **v16**. No live provider request
+or persisted ingestion has occurred (F1A is offline; all provider behavior is
+tested with mocked transports and a socket sentinel). **The live F1B pilot remains
+NOT authorized and unexecuted** — it requires its own separate authorization +
+prerequisite task (a confirmed GOAT subscription, an authoritative BALLDONTLIE
+credit-cost policy, and §R.7 prerequisites).
 
-> **F1A implementation (this pass) — offline, review pending.** A shared typed
-> request/credit control layer now gates the single transport chokepoint
+> **F1A independent-review resolution (B1 + B2).** The two review blockers are
+> resolved. **B1 — request-addressable resumability:** the pilot now checkpoints at
+> per-**game** semantic-unit granularity (skeleton unit, then one atomic single-game
+> ingest per selected game — reusing the audited ingestors' `game_pk`/`game_id`
+> mode, whose committed transaction is the exact durable persistence boundary). A
+> completed unit is skipped with ZERO transport on resume; an interrupted/failed
+> unit stays incomplete and is retried idempotently (content-hash append-only); a
+> completed resume performs zero transport; the selected game set is frozen in the
+> checkpoint (`stage_game_ids`) so a later schedule change cannot alter it; and the
+> manifest request/credit caps apply to the whole LOGICAL run across resumed
+> processes (`RequestGate.seed_prior`; prior vs current usage reported separately;
+> an uncertain interrupted request is counted conservatively). A non-budget failure
+> (or `KeyboardInterrupt`) records a failed, resumable checkpoint (never "complete"),
+> preserving durable units and the original error classification. **B2 — `max_games`
+> + planner fidelity:** `ingest_mlb`/`ingest_nba` now validate and enforce
+> `max_games` (reject negative/bool/oversized; zero = skeleton-only) using a
+> deterministic canonical ordering (date + provider id, deduped), applied to every
+> rich family, with honest truncation and a frozen `ordered_game_ids`; the planner
+> models the real per-game-invocation fan-out (single-game schedule/`game` re-fetch,
+> NBA `quarters`→`box_scores`) so a run's actual attempts never exceed the plan's
+> conservative maximum before the runtime gate blocks them. All prior F1A hardening
+> (legacy-bypass quarantine, ungated-transport refusal, credit fail-closed,
+> manifest-governed execution, WAL-aware content-digest scratch identity, hardened
+> checkpoints, accurate `network_occurred`) is preserved.
+>
+> **F1A implementation summary — offline.** A shared typed request/credit control
+> layer gates the single transport chokepoint
 > (`sports_quant/providers/base_provider.py:_get`): every attempt (initial call,
 > each retry, each page) must reserve budget first, so a zero request budget makes
 > zero transport calls and a run halts *before* exceeding a request or credit cap
 > (`sports_quant/request_control.py`). Typed endpoint-cost policies
-> (`sports_quant/ingest/cost_policies.py`) meter BALLDONTLIE credits (unknown
-> endpoint → fail closed) and mark MLB StatsAPI credits *not applicable* (no
-> fabricated balance). A genuine zero-network `--plan` mode + deterministic,
-> secret-free request plans and pilot manifests with stable hashes
-> (`planning.py`, `manifest.py`); a versioned external checkpoint with an atomic
-> temp-file+replace write, a precise persist-commit consistency boundary, and
-> verified resume (`checkpoint.py`, `pilot.py`); scratch-database isolation that
-> classifies new/empty-v16/authorized-resumable/unsafe and never migrates or
-> mutates (`scratch_db.py`); and CLI wiring on `ingest-mlb`/`ingest-nba`
-> (`--plan`, `--pilot`, `--request-cap`, `--credit-cap`, `--max-games/pages/records`,
-> `--scratch-db`, `--checkpoint`, `--resume`, `--manifest-out`) whose invalid
-> combinations fail before any network or database work, with a distinct
-> budget-exhaustion exit code (`4`). Reconstructed-corpus provenance is specified
-> **design-only** in `RECONSTRUCTED_CORPUS_PROVENANCE.md` (no rows, no migration);
-> the strict E1/E2 builder is unchanged. **No live request, ingestion, backfill,
-> feature, model, simulation, recommendation, or execution work occurred.**
+> (`sports_quant/ingest/cost_policies.py`) leave BALLDONTLIE credits **unknown →
+> fail closed** (no authoritative per-endpoint cost) and mark MLB StatsAPI credits
+> *not applicable*. A genuine zero-network `--plan`/`--manifest-out`; deterministic,
+> secret-free plans and pilot manifests with stable hashes (`planning.py`,
+> `manifest.py`); manifest-governed `--pilot` (tamper/version/dup-key/schema/
+> provider/policy-drift fail closed); a versioned external checkpoint with atomic
+> temp+replace, precise persist-commit boundary, and verified resume
+> (`checkpoint.py`, `pilot.py`); scratch-database isolation via a WAL-aware whole-DB
+> content digest (`scratch_db.py`); and CLI wiring on `ingest-mlb`/`ingest-nba` with
+> a distinct budget-exhaustion exit code (`4`) and run-failure exit code (`5`).
+> Reconstructed-corpus provenance is **design-only** in
+> `RECONSTRUCTED_CORPUS_PROVENANCE.md`; the strict E1/E2 builder is unchanged. **No
+> live request, ingestion, backfill, feature, model, simulation, recommendation, or
+> execution work occurred.**
 
 **Baseline commit:** `631377a` (Phase E complete and independently reviewed; CI #54
 green); F0 delivered at `06e8c55` and reviewed here. This document is the

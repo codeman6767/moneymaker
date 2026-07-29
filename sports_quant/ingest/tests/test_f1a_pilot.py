@@ -126,11 +126,13 @@ def test_completed_resume_makes_zero_calls(tmp_path: Path) -> None:
 
 def test_interrupted_before_persist_is_retried_on_resume(tmp_path: Path) -> None:
     ck = tmp_path / "p.ckpt"
-    # Unit index 2 raises after transport, before persist -> not checkpointed.
-    with pytest.raises(RuntimeError):
-        run_pilot(manifest=_manifest(), gate=_gate(100), executor=_FakeExecutor(4, fail_at=2),
-                  checkpoint_path=ck, scratch_fingerprint="FP")
+    # Unit index 2 raises after transport, before persist -> not checkpointed. The
+    # runner records a FAILED, resumable state (not success), preserving 0,1.
+    res0 = run_pilot(manifest=_manifest(), gate=_gate(100), executor=_FakeExecutor(4, fail_at=2),
+                     checkpoint_path=ck, scratch_fingerprint="FP")
+    assert res0.success is False and res0.failure is not None
     loaded = load_checkpoint(ck)
+    assert loaded.state == "failed"
     assert len(loaded.completed_identities) == 2  # only 0,1 crossed the boundary
     # Resume retries unit 2 (and does 3), idempotently.
     ex2 = _FakeExecutor(4)
@@ -157,6 +159,29 @@ def test_changed_database_cannot_reuse_checkpoint(tmp_path: Path) -> None:
     with pytest.raises(CheckpointError):
         run_pilot(manifest=_manifest(), gate=_gate(100), executor=_FakeExecutor(4),
                   checkpoint_path=ck, scratch_fingerprint="DIFFERENT-DB", resume=True)
+
+
+class _InterruptExecutor:
+    """Yields one unit, then raises KeyboardInterrupt (mid-run interruption)."""
+
+    def iter_units(self, *, gate: RequestGate, completed: set[str]) -> Iterator[UnitDone]:
+        u0 = RequestUnit(provider="balldontlie", league="nba", endpoint_family="games", page=1)
+        if u0.identity() not in completed:
+            gate.reserve(u0)
+            yield UnitDone(identity=u0.identity(), family="games")
+        raise KeyboardInterrupt
+
+
+def test_keyboard_interrupt_records_failed_resumable_state(tmp_path: Path) -> None:
+    ck = tmp_path / "p.ckpt"
+    # The interrupt is re-raised (never swallowed) AFTER a failed, resumable
+    # checkpoint is written preserving the one completed unit.
+    with pytest.raises(KeyboardInterrupt):
+        run_pilot(manifest=_manifest(), gate=_gate(100), executor=_InterruptExecutor(),
+                  checkpoint_path=ck, scratch_fingerprint="FP")
+    loaded = load_checkpoint(ck)
+    assert loaded.state == "failed"
+    assert len(loaded.completed_identities) == 1  # the durable unit is preserved
 
 
 def test_reports_deterministic_despite_reserve_order(tmp_path: Path) -> None:
