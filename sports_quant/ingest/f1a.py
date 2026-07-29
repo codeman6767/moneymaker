@@ -22,6 +22,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
+from datetime import date
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
@@ -74,15 +76,50 @@ def _f1b_authorized() -> bool:
     return os.environ.get(_F1B_AUTHORIZED_ENV) == "1"
 
 
+#: Strict manifest date shape; `date.fromisoformat` alone also accepts forms such as
+#: "20260105", which are not the canonical manifest representation.
+_ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
 def _provider_for(league: str) -> str:
     return "mlb_statsapi" if league == "mlb" else "balldontlie"
 
 
-def _parse_date_range(date_range: str) -> tuple[str, Optional[str]]:
-    if ".." in date_range:
-        a, b = date_range.split("..", 1)
-        return a, b
-    return date_range, None
+def _parse_date_range(date_range: str) -> tuple[str, str]:
+    """Split a manifest ``date_range`` into an INCLUSIVE ``(from_date, to_date)`` pair.
+
+    The canonical manifest representation of a single day is the bare date (the
+    planner's ``_range_key`` collapses ``from == to``), so a single day must expand
+    back to ``(d, d)`` -- an inclusive one-day range -- not ``(d, None)``. Returning
+    ``None`` left providers that require both range endpoints together (BALLDONTLIE
+    ``/v1/games``) raising before transport, which made every canonical single-day
+    manifest unexecutable.
+
+    Expanding here is hash-safe: the planner re-collapses ``to == from`` to the same
+    single-date ``date_range`` and ``_days_in_range`` still spans exactly one day, so
+    the rebuilt plan hash is unchanged.
+
+    Both endpoints are validated as strict ``YYYY-MM-DD`` calendar dates, so an
+    empty, malformed, or reversed range raises :class:`ValueError` at this boundary
+    -- before any client, authentication, database, or network work.
+    """
+
+    a, sep, b = date_range.partition("..")
+    from_date = _validate_range_endpoint(a, "from_date")
+    to_date = _validate_range_endpoint(b, "to_date") if sep else from_date
+    if to_date < from_date:  # ISO dates order lexicographically
+        raise ValueError(f"invalid date_range {date_range!r}: to_date precedes from_date")
+    return from_date, to_date
+
+
+def _validate_range_endpoint(value: str, label: str) -> str:
+    if not _ISO_DATE_RE.fullmatch(value):
+        raise ValueError(f"invalid {label} {value!r}: expected YYYY-MM-DD")
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        raise ValueError(f"invalid {label} {value!r}: not a real calendar date") from None
+    return value
 
 
 def _families_and_stage(league: str, includes: tuple[str, ...]) -> tuple[tuple[str, ...], str]:
@@ -407,7 +444,11 @@ def run_pilot_cli(
     # 3. Policy-consistency: rebuild the plan from the manifest's own fields and
     #    require its hash to match; a manifest from a different planner/policy
     #    version must be explicitly regenerated and re-reviewed.
-    from_date, to_date = _parse_date_range(manifest.date_range)
+    try:
+        from_date, to_date = _parse_date_range(manifest.date_range)
+    except ValueError as exc:
+        out(f"[FAILED ] manifest rejected: {exc}")
+        return EXIT_USAGE
     includes = tuple(f for f in manifest.families if f not in ("schedule", "games"))
     # Rebuild the exact plan bounds, incl. the request-rate bound recorded in the
     # signed plan body, so the recomputed plan_hash matches the reviewed manifest.
