@@ -24,6 +24,19 @@ the separate authorization boundary (`MONEYMAKER_F1B_AUTHORIZED=1`), which stays
 >   endpoints (advanced_stats, plays, lineups, box_scores, player_stats). No HTTP
 >   429s observed.
 >
+> Both audits were re-run independently on a **second, freshly initialised** scratch
+> DB (schema v16, explicitly initialised, `data/` is git-ignored) and reproduced the
+> same result: 14 GET requests total (5 MLB + 9 BALLDONTLIE), **every** request HTTP
+> 200, 0 active failures, no 429s, BALLDONTLIE `authenticated=true` / `tier=goat` /
+> `tier_restricted=false`. The only issues recorded were 2 `note`-severity
+> `DQ-CAP-001` entries for the declared-unavailable `confirmed_pregame_starters`
+> capability (expected, not a blocker). Scratch DB rows went 389 → 446 (+14
+> `raw_responses`, +39 `provider_capabilities`, +2 `ingestion_runs`, +2 notes) and the
+> development corpus (`data/corpus.db`) was **byte-identical** (same SHA-256) before
+> and after, confirming database isolation. The NBA key was verified absent from the
+> audit JSON, the scratch DB bytes, and all persisted headers/params; no
+> `Authorization`/`x-api-key` header was persisted.
+>
 > **Quota-model correction.** BALLDONTLIE is metered by a per-minute **request-rate**
 > limit per tier (Free 5, ALL-STAR 60, GOAT 600 req/min), **not** a monetary/credit
 > balance. The codebase now models BALLDONTLIE credits as **not applicable** (never
@@ -35,6 +48,13 @@ the separate authorization boundary (`MONEYMAKER_F1B_AUTHORIZED=1`), which stays
 > (`UNKNOWN_ENDPOINT`); resumes do not reset the aggregate budget. The four concepts
 > — aggregate request budget, requests attempted, provider tier rate limit,
 > configured safe rate — plus throttle wait and observed 429s are reported distinctly.
+> Re-verified against the official BALLDONTLIE documentation on 2026-07-28: the tier
+> table is stated purely as "Requests / Min" (Free 5, ALL-STAR 60, GOAT 600) with a
+> flat monthly subscription price; the documentation contains **no** credit balance
+> and **no** per-request/endpoint-weighted credit cost. No user-facing surface may
+> describe this rate limit as a billing credit: the `--credit-cap` CLI help now states
+> credits are not applicable to any current provider (a stale string had still called
+> a credit cap "required for a live NBA pilot"), covered by a regression test.
 >
 > **F1A audit-path defect (fixed).** The F1A ungated-transport guard blocked the
 > bounded provider-audit (the audit built self-owned clients without the sanctioned

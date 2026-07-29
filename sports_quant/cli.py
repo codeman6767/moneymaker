@@ -1544,7 +1544,9 @@ def _add_f1a_args(parser: Any) -> None:
     g.add_argument("--request-cap", dest="request_cap", type=int, default=None, metavar="N",
                    help="Hard maximum transport requests for the run (required for --pilot)")
     g.add_argument("--credit-cap", dest="credit_cap", type=int, default=None, metavar="N",
-                   help="Hard maximum BALLDONTLIE credits (required for a live NBA pilot)")
+                   help="Hard maximum provider credits. Not applicable to any current "
+                        "provider: MLB StatsAPI is keyless and BALLDONTLIE is "
+                        "request-rate limited, not credit metered")
     g.add_argument("--max-games", dest="max_games", type=int, default=None, metavar="N")
     g.add_argument("--max-pages", dest="max_pages", type=int, default=None, metavar="N")
     g.add_argument("--max-records", dest="max_records", type=int, default=None, metavar="N")

@@ -155,6 +155,29 @@ def test_balldontlie_credits_never_fabricated() -> None:
     assert gate.usage.credit_header_status == "not_applicable"
 
 
+def test_cli_help_never_claims_balldontlie_credits_are_required() -> None:
+    """`--credit-cap` help must not resurrect the credit model in user-facing text.
+
+    A request-rate limit is not a billing credit, so no CLI surface may tell a
+    user that BALLDONTLIE credits exist or that a credit cap is required for a
+    live NBA pilot.
+    """
+    import argparse
+
+    from ...cli import _add_f1a_args
+
+    parser = argparse.ArgumentParser(prog="sports_quant ingest-nba")
+    _add_f1a_args(parser)
+    # argparse hard-wraps help text; compare on a single whitespace-normalised line.
+    help_text = " ".join(parser.format_help().lower().split())
+
+    assert "required for a live nba pilot" not in help_text
+    assert "hard maximum balldontlie credits" not in help_text
+    # The rate contract stays documented, and credits are named as N/A.
+    assert "request-rate limited, not credit metered" in help_text
+    assert "verified tier max" in help_text
+
+
 def test_mlb_credits_remain_not_applicable() -> None:
     policy = build_mlb_policy()
     assert policy.credit_applicable is False
