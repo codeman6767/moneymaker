@@ -701,40 +701,148 @@ def _match_box_game(data: Any, norm: "_NormGame") -> tuple[Optional[dict[str, An
     return None, "no_match"
 
 
-def _parse_lineups(data: Any, game_id: str) -> list[tuple[str, list[LineupPlayerInput]]]:
-    """Parse a ``/v1/lineups`` payload into ``(provider_team_id, players)`` pairs.
+def _id_sort_key(value: Optional[str]) -> tuple[int, int, str]:
+    """Deterministic, numeric-aware sort key for a provider id.
+
+    Present ids sort before absent ones; numeric ids sort numerically (so "9"
+    precedes "10"); non-numeric ids fall back to a stable lexicographic compare.
+    """
+
+    if value is None:
+        return (1, 0, "")
+    try:
+        return (0, int(value), "")
+    except (TypeError, ValueError):
+        return (0, 0, str(value))
+
+
+@dataclass
+class _LineupsParse:
+    """Normalized lineup groups plus the honest accounting of what was discarded."""
+
+    groups: list[tuple[str, list[LineupPlayerInput]]]
+    #: Entries whose game matched the requested game (or carried no game id).
+    matching_rows: int = 0
+    #: Matching entries that could not be normalized (missing team/player id, or a
+    #: malformed entry object). Never silently dropped -- surfaced by the caller.
+    rejected_rows: int = 0
+
+    @property
+    def silent_loss(self) -> bool:
+        """True when the provider supplied usable-looking rows but none normalized.
+
+        A genuinely empty ``data`` list is NOT silent loss: it is an honest empty
+        family (``matching_rows == rejected_rows == 0``).
+        """
+
+        return not self.groups and (self.matching_rows > 0 or self.rejected_rows > 0)
+
+
+def _parse_lineups(data: Any, game_id: str) -> _LineupsParse:
+    """Parse a ``/v1/lineups`` payload into ``(provider_team_id, players)`` groups.
+
+    The official BALLDONTLIE shape is **FLAT**: one entry per player, carrying
+    ``game_id``, an individual ``player`` object, an individual ``team`` object,
+    ``position`` and ``starter``. An earlier implementation only understood a nested
+    per-team ``players`` array, so every official row was skipped and a 25-row
+    response normalized to zero lineups silently. Both shapes are handled here; the
+    flat ``player`` object takes precedence when an entry carries both, and grouping
+    de-duplicates by ``(team, player)`` so a mixed payload cannot double-count.
+
+    ``batting_order`` is **only the repository's ordered-child ordinal** for NBA
+    lineups -- basketball has no batting order and the provider supplies none. The
+    ordinal is assigned from real provider fields in a deterministic order: starters
+    first, then the provider's own lineup row id (present before absent, numerically),
+    then the provider player id as a total-order tiebreaker.
 
     Best-effort only: a posted lineup is NEVER a confirmed pregame starter set --
     the caller writes these with ``is_confirmed=False`` unconditionally.
     """
 
-    out: list[tuple[str, list[LineupPlayerInput]]] = []
     rows = data.get("data") if isinstance(data, dict) else None
-    for entry in rows if isinstance(rows, list) else []:
+    entries = rows if isinstance(rows, list) else []
+    matching = 0
+    rejected = 0
+    # team -> player -> (sort_key, position, is_starter). Keeping the lowest sort key
+    # per (team, player) makes a duplicated or mixed-shape row idempotent.
+    staged: dict[str, dict[str, tuple[tuple[Any, ...], Optional[str], Optional[bool]]]] = {}
+
+    def stage(team_id: str, pid: str, key: tuple[Any, ...],
+              position: Optional[str], starter: Optional[bool]) -> None:
+        slot = staged.setdefault(team_id, {})
+        existing = slot.get(pid)
+        if existing is None or key < existing[0]:
+            slot[pid] = (key, position, starter)
+
+    for entry in entries:
         if not isinstance(entry, dict):
+            rejected += 1              # malformed entry: counted, never silently dropped
             continue
         gid = _provider_id(_as_dict(entry.get("game"))) or _provider_id(entry, "game_id")
         if gid is not None and gid != game_id:
-            continue
+            continue                   # a different game: correctly ignored, not rejected
+        matching += 1
         team_id = _provider_id(_as_dict(entry.get("team"))) or _provider_id(entry, "team_id")
-        if team_id is None:
+        row_id = _provider_id(entry, "id")
+        flat_pid = _provider_id(_as_dict(entry.get("player"))) or _provider_id(
+            entry, "player_id")
+        nested = entry.get("players")
+
+        if flat_pid is not None:
+            # OFFICIAL FLAT SHAPE: one provider row per player.
+            if team_id is None:
+                rejected += 1
+                continue
+            starter = entry.get("starter")
+            stage(team_id, flat_pid,
+                  (0 if starter is True else 1, _id_sort_key(row_id),
+                   _id_sort_key(flat_pid)),
+                  _opt_str(entry.get("position")),
+                  starter if isinstance(starter, bool) else None)
             continue
-        players: list[LineupPlayerInput] = []
-        raw_players = entry.get("players")
-        for order, p in enumerate(raw_players if isinstance(raw_players, list) else [], start=1):
-            if not isinstance(p, dict):
+
+        if isinstance(nested, list):
+            # LEGACY NESTED SHAPE: one entry per team with a `players` array.
+            if team_id is None:
+                rejected += 1
                 continue
-            pid = _provider_id(_as_dict(p.get("player"))) or _provider_id(p, "player_id")
-            if pid is None:
-                continue
-            players.append(
-                LineupPlayerInput(
-                    batting_order=order, provider_player_id=pid, position=_opt_str(p.get("position"))
-                )
+            added = 0
+            for order, p in enumerate(nested, start=1):
+                if not isinstance(p, dict):
+                    rejected += 1
+                    continue
+                pid = _provider_id(_as_dict(p.get("player"))) or _provider_id(p, "player_id")
+                if pid is None:
+                    rejected += 1
+                    continue
+                starter = p.get("starter")
+                stage(team_id, pid,
+                      (0 if starter is True else 1, _id_sort_key(row_id), (0, order, "")),
+                      _opt_str(p.get("position")),
+                      starter if isinstance(starter, bool) else None)
+                added += 1
+            if not added:
+                rejected += 1
+            continue
+
+        rejected += 1                  # neither shape present: nothing to normalize
+
+    groups: list[tuple[str, list[LineupPlayerInput]]] = []
+    for team_id in sorted(staged, key=_id_sort_key):
+        ordered = sorted(staged[team_id].items(), key=lambda kv: kv[1][0])
+        players = [
+            LineupPlayerInput(
+                # Ordered-child ordinal only -- see the note above; not a batting order.
+                batting_order=ordinal,
+                provider_player_id=pid,
+                position=position,
+                is_starter=starter,
             )
+            for ordinal, (pid, (_key, position, starter)) in enumerate(ordered, start=1)
+        ]
         if players:
-            out.append((team_id, players))
-    return out
+            groups.append((team_id, players))
+    return _LineupsParse(groups=groups, matching_rows=matching, rejected_rows=rejected)
 
 
 # --------------------------------------------------------------------------- #
@@ -1238,13 +1346,22 @@ def _count_plan(fetched: _Fetched, include_set: set[str], result: NbaIngestResul
                         ref("player", pl.provider_player_id)
                     observe("play_observations")
         if "lineups" in include_set and norm.game_id in fetched.lineup_by_game:
-            for _team_id, plist in _parse_lineups(
-                fetched.lineup_by_game[norm.game_id].data, norm.game_id
-            ):
+            parsed = _parse_lineups(
+                fetched.lineup_by_game[norm.game_id].data, norm.game_id)
+            for _team_id, plist in parsed.groups:
                 observe("lineup_observations")
                 result.lineup_players_observed += len(plist)
                 for p in plist:
                     ref("player", p.provider_player_id)
+            # Dry-run must account for discarded rows exactly as persisted mode does,
+            # so a counting run can never imply a clean empty family either.
+            result.records_rejected += parsed.rejected_rows
+            if parsed.silent_loss:
+                result.data_quality_issues += 1
+                result.note(
+                    f"lineups for game {norm.game_id}: "
+                    f"{parsed.matching_rows} provider row(s) matched but none normalized"
+                )
 
     result.teams_observed = len(teams)
     result.players_observed = len(players)
@@ -1636,7 +1753,24 @@ def _persist_lineups(
 ) -> None:
     raw_id, raw_hash, observed = ctx.raws[id(lineup_resp)]
     lineup_repo = SqliteLineupRepository(ctx.conn)
-    for provider_team_id, players in _parse_lineups(lineup_resp.data, norm.game_id):
+    parsed = _parse_lineups(lineup_resp.data, norm.game_id)
+    if parsed.rejected_rows:
+        ctx.result.records_rejected += parsed.rejected_rows
+    if parsed.silent_loss:
+        # A nonempty matching payload that normalizes to nothing is NEVER reported as a
+        # legitimately empty family. Sanitized: counts only, no player names, no body.
+        ctx.dq.record(
+            severity="issue", rule_code="DQ-NBA-LINEUP-001", entity_type="game",
+            description=(
+                f"lineups for game {norm.game_id}: {parsed.matching_rows} provider "
+                f"row(s) matched the game but none could be normalized "
+                f"({parsed.rejected_rows} rejected); no lineup row was fabricated"
+            ),
+            provider=PROVIDER_BALLDONTLIE, run_id=ctx.run_id, raw_response_id=raw_id,
+            entity_id=norm.game_id,
+        )
+        ctx.result.data_quality_issues += 1
+    for provider_team_id, players in parsed.groups:
         for p in players:
             _ref(ctx, "player", p.provider_player_id, lineup_resp)
         # A posted lineup is NEVER a confirmed pregame starter set: is_confirmed=False.
