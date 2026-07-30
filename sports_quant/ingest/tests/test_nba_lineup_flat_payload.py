@@ -556,3 +556,61 @@ def test_reporting_never_shows_a_clean_zero_for_discarded_lineup_rows(
     assert j["lineup_observations"] == 0
     assert j["records_rejected"] >= 5
     assert j["data_quality_issues"] >= 1
+
+
+# ===================================================================== #
+# Independent review: _id_sort_key must be a TOTAL order
+# ===================================================================== #
+def test_id_sort_key_is_total_for_numerically_equal_distinct_ids() -> None:
+    """"1" and "01" are distinct ids that compare numerically equal.
+
+    `_provider_id` stringifies whatever JSON supplies, so both are reachable. If the
+    key collided, `sorted` being stable would make the assigned ordinal depend on
+    provider row order -- a real non-determinism found by the independent review.
+    """
+
+    from sports_quant.ingest.nba_ingestor import _id_sort_key
+
+    assert _id_sort_key("1") != _id_sort_key("01")
+    assert _id_sort_key("1") != _id_sort_key("001")
+    assert _id_sort_key("01") != _id_sort_key("001")
+    # Numeric ordering is preserved, and absent ids still sort last.
+    assert _id_sort_key("9") < _id_sort_key("10")
+    assert _id_sort_key("10") < _id_sort_key(None)
+    assert _id_sort_key("abc") != _id_sort_key("abd")
+    # Every distinct id string yields a distinct key (totality on a reachable set).
+    ids = ["1", "01", "001", "9", "10", "0", "abc", "abd", "1e2", None]
+    keys = [_id_sort_key(i) for i in ids]
+    assert len(set(keys)) == len(ids)
+
+
+def test_numerically_equal_distinct_player_ids_order_deterministically() -> None:
+    def row(pid: str) -> dict[str, Any]:
+        return {"game_id": int(GAME), "starter": False, "position": "G",
+                "player": {"id": pid}, "team": {"id": int(TEAM_A)}}
+
+    forward = _parse_lineups({"data": [row("1"), row("01")]}, GAME)
+    reverse = _parse_lineups({"data": [row("01"), row("1")]}, GAME)
+    assert _flat(forward.groups) == _flat(reverse.groups)
+    # Both distinct players survive; neither is collapsed into the other.
+    assert sum(len(pl) for _t, pl in forward.groups) == 2
+
+
+def test_numerically_equal_distinct_team_ids_order_deterministically() -> None:
+    def row(team: str, pid: str) -> dict[str, Any]:
+        return {"game_id": int(GAME), "starter": False, "position": "G",
+                "player": {"id": pid}, "team": {"id": team}}
+
+    forward = _parse_lineups({"data": [row("9", "1"), row("09", "2")]}, GAME)
+    reverse = _parse_lineups({"data": [row("09", "2"), row("9", "1")]}, GAME)
+    assert [t for t, _ in forward.groups] == [t for t, _ in reverse.groups]
+    assert _flat(forward.groups) == _flat(reverse.groups)
+
+
+def test_preserved_payload_shape_is_unaffected_by_the_totality_fix() -> None:
+    """The real provider ids are plain integers, so the fix changes nothing there."""
+
+    p = _parse_lineups(official_payload(), GAME)
+    assert len(p.groups) == 2
+    assert sum(len(pl) for _t, pl in p.groups) == 25
+    assert sum(1 for _t, pl in p.groups for x in pl if x.is_starter is True) == 10

@@ -208,7 +208,9 @@ matching is a separate later step and was deliberately not run.
 * **All four skeleton artifacts unchanged** — MLB and NBA skeleton databases and
   checkpoints byte-identical.
 * **NBA rich artifacts do not exist** — neither `data/f1b_nba_rich_scratch.db` nor
-  `data/f1b_nba_rich.ckpt`, confirming NBA rich was never executed.
+  `data/f1b_nba_rich.ckpt`, confirming NBA rich had not executed **as of this review**.
+  (Historical note: the NBA rich pilot executed later and was independently reviewed —
+  see `F1B_NBA_RICH_PILOT_REPORT.md`. This finding is preserved as it stood at `4a0e0a7`.)
 * **No cross-contamination** — the rich database holds zero BALLDONTLIE rows; the MLB
   skeleton database still holds exactly its original single raw response.
 * **No aliasing** — all nine reviewed artifacts are regular files (no symlinks, no

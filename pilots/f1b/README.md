@@ -7,7 +7,7 @@ Canonical, secret-free, deterministic pilot manifests produced offline by
 |---|---|
 | **Skeleton** (`*_skeleton.manifest.json`) | **executed live and independently reviewed** |
 | **Rich — MLB** (`mlb_rich.manifest.json`) | **executed live and independently reviewed** (`F1B_MLB_RICH_PILOT_REPORT.md`) |
-| **Rich — NBA** (`nba_rich.manifest.json`) | **prepared and validated offline — NOT executed, NOT authorized** |
+| **Rich — NBA** (`nba_rich.manifest.json`) | **executed live and independently reviewed** (`F1B_NBA_RICH_PILOT_REPORT.md`) |
 
 **Both have since been executed as live skeleton pilots and independently
 reviewed** (see `F1B_SKELETON_PILOT_REPORT.md`): MLB on 2026-07-29 (1 request,
@@ -24,10 +24,24 @@ The **MLB rich pilot has executed and been independently reviewed**: 6 requests 
 12, 30 games received → 1 selected (`822788`) → 29 excluded, 551 rows, grade A, and a
 completed resume that made zero requests. See `F1B_MLB_RICH_PILOT_REPORT.md`.
 
-The **NBA rich pilot has NOT executed and remains unauthorized** — it requires separate
-explicit user authorization and an approved per-run request budget. **F1B rich is not
-complete** until NBA executes and passes its own independent review. MLB and NBA are
-executed and reviewed **separately**.
+The **NBA rich pilot has executed and been independently reviewed**: **7 requests of
+cap 14**, **8 games received → 1 selected (`18447316`) → 7 excluded**, 960 rows
+(60 player stats incl. 25 advanced, 8 quarter lines, 431 plays), grade A, and a
+completed resume that made zero requests and constructed no client.
+
+Its live `/v1/lineups` response exposed a **flat-payload parser defect**: 25 real rows
+returned HTTP 200 but normalized to zero lineups silently. **The original evidence
+remains unchanged** (`lineup_snapshots=0`, `lineup_players=0`) as the historical record
+of what the pre-repair code persisted. The parser was **repaired at `9386b54`**, and
+exact-response offline replay proves **2 lineup snapshots, 25 players and 10 starters**.
+See `F1B_NBA_RICH_PILOT_REPORT.md`.
+
+**Both MLB and NBA F1B rich pilots are now independently complete, so F1B capability
+verification is complete.** This does **not** mean Phase F1 as a whole is complete:
+canonical entity matching and broader coverage measurement have not run. F2 backfill is
+**not** authorized, historical corpus acceptance gates have **not** passed, historical
+sportsbook-odds licensing is **unresolved**, and no feature engineering or modeling may
+begin.
 
 ## Manifests
 

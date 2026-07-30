@@ -8,11 +8,63 @@ independently reviewed — the skeleton stage is complete** (see
 training, calibration, simulation, EV evaluation, backtesting, or recommendation
 output has started. Schema remains **v16**.
 
-**The F1B *rich-data* pilot is PARTIALLY complete: MLB executed successfully and has
-been independently reviewed; NBA remains prepared but unexecuted and unauthorized.**
-**F1B rich is NOT complete** until the NBA rich pilot executes and passes its own
-independent review. Each execution requires separate explicit user authorization and an
-approved per-run request budget; MLB and NBA are executed and reviewed **separately**.
+**The F1B *rich-data* pilots are COMPLETE for both leagues: MLB and NBA each executed
+successfully and each passed its own independent review — so F1B capability
+verification is complete.**
+
+> **NBA rich pilot executed + independently reviewed (2026-07-30).** See
+> `F1B_NBA_RICH_PILOT_REPORT.md`. Manifest `9de5d312b99c3e85…`
+> (plan `1c896ae16a13c10b…`), `2026-01-05`, families `games` + `box`, `quarters`,
+> `stats`, `advanced`, `plays`, `lineups`; `max_games=1`, `max_pages=1`,
+> `max_records=100`, `max_retries=1`; 60/min ≤ 600/min; schema **v16**.
+>
+> - **7 requests of cap 14** (exactly the planner's semantic maximum): games listing,
+>   selected-game re-fetch, **one** box score shared by `box`+`quarters`, traditional
+>   stats, advanced stats, plays, lineups. All HTTP 200; 0 failures, 0 retries,
+>   0 blocked, **1** listing page, **0** × 429, **0 s** throttle.
+> - **8 games received → 1 selected (`18447316`) → 7 excluded** by `max_games=1`.
+> - **389 → 960 rows (+571)**: 7 raw responses, 1 schedule snapshot, 2 team stats,
+>   **60** player stats (35 traditional + **25 advanced**), **8** quarter lines,
+>   **431** plays, 1 game / 2 team / 35 player references, 18 declared capability rows,
+>   2 ingestion runs, 4 nonblocking capability-honesty notes. Grade **A**, score 1.00.
+> - **Authentication succeeded; tier NOT verified** (`configured_not_verified:goat`,
+>   `tier_evidence_source=none`). `/v1/games` is available below GOAT, so a 200 proves
+>   authentication only; the 18 capability rows are **declared** (`is_observed=0`).
+>   GOAT reachability evidence remains the separate 2026-07-28 capability audit.
+> - **Completed resume made zero requests**, zero pages, zero mutation, and constructed
+>   **no provider client** and performed **no authentication**, while preserving
+>   provenance (`prior_transport_starts=7`, `prior_pages_fetched=1`).
+>
+> **Lineup defect and repair.** The live `/v1/lineups` response returned HTTP 200 with
+> 25 real flat rows (2 teams, 25 players, 10 starters) but the then-current parser
+> expected a nested per-team `players` array, so it normalized to **zero** lineups
+> silently. **The original NBA rich database is deliberately unchanged**
+> (`lineup_snapshots=0`, `lineup_players=0`) as historical evidence of what the
+> pre-repair code persisted. The parser was **repaired at `9386b54`**; replaying the
+> exact preserved response through the repaired path yields **2 lineup snapshots,
+> 25 players and 10 starters**, is idempotent, and is identical across shuffled input
+> seeds. The independent review additionally found and repaired a non-total
+> `_id_sort_key` ordering key (`"1"` vs `"01"` collided, making ordinals depend on
+> provider row order).
+>
+> **Scope limits.** These retrospective pilots created **no strict historical
+> point-in-time corpus** — every observation carries current receipt time, which is not
+> historical pregame availability. **Canonical entity matching has not run**
+> (`canonical_games=0`; provider references intentionally unresolved).
+
+**F1B capability verification is complete. Phase F1 as a whole is NOT complete**, and
+nothing below is authorized by this milestone:
+
+- Canonical entity matching and broader coverage/depth measurement have **not** run.
+- **F2 backfill is not authorized.**
+- Historical corpus acceptance gates have **not** passed.
+- Historical sportsbook-odds licensing is **unresolved**.
+- Feature engineering, modeling, calibration, simulation, EV, recommendations, staking
+  and execution have **not** started and may **not** begin.
+
+**Next planned phase boundary (not started):** the remaining F1 work — canonical
+entity matching over the pilot corpora plus coverage/depth measurement — which must be
+specified and reviewed before any F2 backfill authorization is considered.
 
 > **MLB rich pilot executed + independently reviewed (2026-07-29).** See
 > `F1B_MLB_RICH_PILOT_REPORT.md`. Manifest `f56b5c5da53d86c9…`

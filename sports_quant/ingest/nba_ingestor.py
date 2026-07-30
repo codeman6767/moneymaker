@@ -702,16 +702,22 @@ def _match_box_game(data: Any, norm: "_NormGame") -> tuple[Optional[dict[str, An
 
 
 def _id_sort_key(value: Optional[str]) -> tuple[int, int, str]:
-    """Deterministic, numeric-aware sort key for a provider id.
+    """Deterministic, numeric-aware TOTAL sort key for a provider id.
 
     Present ids sort before absent ones; numeric ids sort numerically (so "9"
     precedes "10"); non-numeric ids fall back to a stable lexicographic compare.
+
+    The exact id string is always carried in the final component, so numerically
+    equal but textually distinct ids (e.g. "1" and "01", both reachable because
+    ``_provider_id`` stringifies whatever JSON supplies) cannot collide. Without it
+    two such ids produced an identical key and, since ``sorted`` is stable, the
+    resulting ordinal assignment depended on provider row order.
     """
 
     if value is None:
         return (1, 0, "")
     try:
-        return (0, int(value), "")
+        return (0, int(value), str(value))
     except (TypeError, ValueError):
         return (0, 0, str(value))
 

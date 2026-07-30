@@ -262,13 +262,23 @@ hides it.
 > (2026-07-29; `F1B_SKELETON_PILOT_REPORT.md`): MLB 1 request (30 games → 2 selected)
 > and NBA 1 request (8 games → 2 selected), both discovery-only, each completed
 > resume making **zero** additional requests, development corpus byte-identical, no
-> secret leakage, schema v16. The **F1B *rich-data* pilot has not started and remains
-> unauthorized** pending an approved per-run request budget and separate explicit
-> authorization per league (`MONEYMAKER_F1B_AUTHORIZED=1` is off by default and
-> process-scoped when used). Its two manifests are **prepared and validated offline**
-> (2026-07-29): MLB `2026-07-20..2026-07-21` (`results`/`box`/`inning`/`rosters`,
-> cap 12) and NBA `2026-01-05` (`box`/`stats`/`advanced`/`plays`/`lineups`/`quarters`,
-> cap 14), both `max_games=1`, `max_retries=1`, schema v16. Nothing has executed.
+> secret leakage, schema v16. The **F1B *rich-data* pilots have since EXECUTED and been
+> independently reviewed for BOTH leagues**, so F1B capability verification is complete:
+> MLB `2026-07-20..2026-07-21` (`results`/`box`/`inning`/`rosters`, cap 12) used
+> **6 requests**, 30 games → 1 selected (`F1B_MLB_RICH_PILOT_REPORT.md`); NBA
+> `2026-01-05` (`box`/`stats`/`advanced`/`plays`/`lineups`/`quarters`, cap 14) used
+> **7 requests**, 8 games → 1 selected (`F1B_NBA_RICH_PILOT_REPORT.md`). Both used
+> `max_games=1`, `max_retries=1`, schema v16, and each completed resume made **zero**
+> additional requests. The NBA run exposed a flat-payload lineup parser defect repaired
+> at `9386b54`; the original NBA evidence is intentionally unchanged and the repair is
+> proven by exact-response offline replay (2 snapshots, 25 players, 10 starters).
+>
+> **These retrospective pilots created no strict-PIT corpus.** All four windows are
+> completed past dates, so every observation carries current receipt time — which is NOT
+> historical pregame availability — and the E2 feature-cutoff guard continues to exclude
+> them. **Canonical entity matching has not run**, F2 backfill is **not** authorized,
+> historical corpus acceptance gates have **not** passed, and historical
+> sportsbook-odds licensing remains **unresolved**.
 > Prerequisites were discharged 2026-07-28: a bounded GET-only `provider-audit`
 > confirmed MLB (keyless) and BALLDONTLIE **GOAT**
 > (`authenticated=true`, `tier_restricted=false`) access; BALLDONTLIE is request-**rate**
