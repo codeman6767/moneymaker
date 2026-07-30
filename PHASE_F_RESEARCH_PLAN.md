@@ -8,10 +8,44 @@ independently reviewed — the skeleton stage is complete** (see
 training, calibration, simulation, EV evaluation, backtesting, or recommendation
 output has started. Schema remains **v16**.
 
-**The F1B *rich-data* pilot has NOT been executed and remains unauthorized.** Its two
-manifests are now **prepared and validated offline** (see the rich-manifest box below);
-**each future execution requires separate explicit user authorization** and an approved
-per-run request budget, and MLB and NBA must be executed and reviewed **separately**.
+**The F1B *rich-data* pilot is PARTIALLY complete: MLB executed successfully and has
+been independently reviewed; NBA remains prepared but unexecuted and unauthorized.**
+**F1B rich is NOT complete** until the NBA rich pilot executes and passes its own
+independent review. Each execution requires separate explicit user authorization and an
+approved per-run request budget; MLB and NBA are executed and reviewed **separately**.
+
+> **MLB rich pilot executed + independently reviewed (2026-07-29).** See
+> `F1B_MLB_RICH_PILOT_REPORT.md`. Manifest `f56b5c5da53d86c9…`
+> (plan `73e887229ce20b8c…`), `2026-07-20..2026-07-21`, families `schedule` + `results`,
+> `box`, `inning`, `rosters`, `max_games=1`, `max_retries=1`, schema **v16**.
+>
+> - **6 requests of cap 12** (exactly the planner's semantic maximum): range
+>   `/schedule`, selected-game `/schedule`, `/game/822788/boxscore`,
+>   `/game/822788/linescore`, and **two** team/date rosters. All HTTP 200, 0 failures,
+>   0 retries, 0 blocked, 2 listing pages, 0 × 429, 0 s throttle.
+> - **30 games received → 1 selected (`822788`) → 29 excluded** by `max_games=1`.
+>   Selection is canonical, not provider order: the provider's first game was `824410`
+>   while the canonical `(officialDate, gamePk)` first — and the game actually selected
+>   — was `822788`.
+> - **389 → 551 rows (+162)**: 6 raw responses, 1 schedule snapshot, 1 game + 2 team +
+>   52 player references, 1 result, **18** inning lines, 2 team-stat and 25 player-stat
+>   rows, **52** roster snapshots, 2 ingestion runs, **0** data-quality issues.
+> - `results` and `inning` derived from **one shared linescore** response; inning rows
+>   sum exactly to the persisted result on runs, hits and errors.
+> - **Completed resume made zero requests**, zero pages, zero database mutation, and
+>   built **no provider client**, while preserving the first run's provenance
+>   (`prior_transport_starts=6`, `prior_pages_fetched=2`).
+> - `data-quality` **grade A**, score 1.00, 0 blocking findings. **No secret was
+>   persisted.** The **development corpus and all four skeleton artifacts were
+>   unchanged**, and no NBA rich artifact exists.
+> - The independent review found **no reporting defect** and added 7 regression tests
+>   (`test_f1b_mlb_rich_review.py`), including explicit rich-stage protection of the
+>   probable-pitcher inline-hydration policy (`probable_pitcher_snapshots=0` is
+>   expected, costs no request, and hides no planner unit).
+>
+> **Matching and canonical corpus construction have not run** (`canonical_games=0`;
+> provider references intentionally unresolved), and this retrospective pilot did **not**
+> create a strict historical PIT corpus — every observation carries current receipt time.
 
 > **F1B rich-data manifests prepared (2026-07-29, offline, zero provider requests).**
 > `pilots/f1b/mlb_rich.manifest.json` (`f56b5c5da53d86c9…`, plan `73e887229ce20b8c…`)

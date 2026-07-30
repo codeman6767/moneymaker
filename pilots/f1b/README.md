@@ -6,7 +6,8 @@ Canonical, secret-free, deterministic pilot manifests produced offline by
 | Stage | Status |
 |---|---|
 | **Skeleton** (`*_skeleton.manifest.json`) | **executed live and independently reviewed** |
-| **Rich** (`*_rich.manifest.json`) | **prepared and validated offline — NOT executed** |
+| **Rich — MLB** (`mlb_rich.manifest.json`) | **executed live and independently reviewed** (`F1B_MLB_RICH_PILOT_REPORT.md`) |
+| **Rich — NBA** (`nba_rich.manifest.json`) | **prepared and validated offline — NOT executed, NOT authorized** |
 
 **Both have since been executed as live skeleton pilots and independently
 reviewed** (see `F1B_SKELETON_PILOT_REPORT.md`): MLB on 2026-07-29 (1 request,
@@ -19,10 +20,13 @@ Executing a manifest requires the separate, reviewed authorization boundary
 (`MONEYMAKER_F1B_AUTHORIZED=1`), which is **off** by default and is set only for
 the single authorized process.
 
-The **F1B rich-data pilot has NOT been executed and remains unauthorized.** Its two
-manifests are now prepared and validated offline (see *Rich manifests* below), but
-**each future execution requires separate explicit user authorization** and an
-approved per-run request budget. Nothing here authorizes it. MLB and NBA must be
+The **MLB rich pilot has executed and been independently reviewed**: 6 requests of cap
+12, 30 games received → 1 selected (`822788`) → 29 excluded, 551 rows, grade A, and a
+completed resume that made zero requests. See `F1B_MLB_RICH_PILOT_REPORT.md`.
+
+The **NBA rich pilot has NOT executed and remains unauthorized** — it requires separate
+explicit user authorization and an approved per-run request budget. **F1B rich is not
+complete** until NBA executes and passes its own independent review. MLB and NBA are
 executed and reviewed **separately**.
 
 ## Manifests
