@@ -25,9 +25,10 @@ import os
 import re
 from datetime import date
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, Mapping, Optional
 
 from ..request_control import (
+    RATE_BASIS_PROJECT_COURTESY,
     BudgetExhausted,
     CreditBudget,
     RequestBudget,
@@ -431,11 +432,23 @@ class _IngestorExecutor:
 def _make_gate(*, league: str, request_cap: int, credit_cap: Optional[int],
                rate_per_min: Optional[int] = None) -> RequestGate:
     if league == "mlb":
+        # MLB StatsAPI is keyless, unmetered and publishes no rate ceiling we can
+        # verify. The aggregate cap bounds TOTAL attempts but says nothing about
+        # rate, so a month-scale run would otherwise go as fast as responses
+        # return. Attach our own versioned courtesy pacing policy -- 30/min,
+        # burst 1, so one request goes immediately and every later one is spaced
+        # two seconds. Pacing is the DEFAULT, not opt-in: a manifest that predates
+        # pacing (rate_per_min null) still runs paced at the default rate.
+        from .cost_policies import MLB_DEFAULT_RATE_PER_MIN, build_mlb_rate_policy
+        rate_policy = build_mlb_rate_policy(
+            configured_per_min=rate_per_min or MLB_DEFAULT_RATE_PER_MIN)
         gate = RequestGate(
             request_budget=RequestBudget(max_requests=request_cap),
             credit_budget=CreditBudget(applicable=False),
-            cost_policy=build_mlb_policy())
+            cost_policy=build_mlb_policy(),
+            rate_policy=rate_policy)
         # MLB StatsAPI is keyless: authentication (and therefore any tier) is N/A.
+        # The pacing policy is ours; it makes no tier or provider-limit claim.
         gate.set_auth_context(auth_applicable=False)
         return gate
     # BALLDONTLIE: credits N/A (request-rate limited). Attach the versioned rate
@@ -454,6 +467,35 @@ def _make_gate(*, league: str, request_cap: int, credit_cap: Optional[int],
     # capability audit that observed tier-gated endpoints may promote tier_verified.
     gate.set_auth_context(auth_applicable=True, configured_tier=rate_policy.tier)
     return gate
+
+
+def _render_rate_line(u: Mapping[str, Any]) -> str:
+    """The human ``rate:`` line, extracted so its wording is directly testable.
+
+    The BASIS is printed next to the number, because a courtesy rate we chose must
+    never read as a ceiling the provider published. An unknown provider maximum
+    prints as ``unknown``, not ``None/min``. ``rate_limited`` reflects an ACTUAL
+    delay or a 429 -- never the mere existence of a policy.
+    """
+
+    basis = u.get("rate_policy_basis") or "none"
+    provider_max = u.get("provider_rate_limit_per_min")
+    courtesy = " (PROJECT COURTESY CAP, not a provider limit)" if (
+        basis == RATE_BASIS_PROJECT_COURTESY) else ""
+    return (
+        f"  rate:      policy_active={u.get('rate_policy_active', False)} "
+        f"basis={basis} "
+        f"version={u.get('rate_policy_version') or 'n/a'} "
+        f"configured={u.get('configured_rate_per_min')}/min{courtesy} "
+        f"provider_max="
+        f"{'unknown' if provider_max is None else str(provider_max) + '/min'} "
+        f"burst={u.get('rate_burst')} "
+        f"min_interval={u.get('rate_min_interval_seconds')}s "
+        f"throttle_events={u.get('throttle_events', 0)} "
+        f"throttle_wait={float(u.get('throttle_wait_seconds', 0.0)):.3f}s "
+        f"http_429s={u.get('http_429s', 0)} "
+        f"rate_limited={u.get('rate_limited', False)}"
+    )
 
 
 def run_pilot_cli(
@@ -601,9 +643,23 @@ def run_pilot_cli(
 
     # Logical-run budget: on resume, pre-charge the gate with the prior process's
     # usage so the manifest caps span all resumed processes (no fresh budget).
+    # Pacing must agree BEFORE any client exists. A manifest that declares a
+    # configured rate is authoritative: if the runtime policy would pace at a
+    # different rate, the declared bound would be silently ignored, so refuse.
+    _declared_rate = manifest.configured_rate_per_min
     gate = _make_gate(league=league, request_cap=manifest.request_cap,
                       credit_cap=manifest.credit_cap,
                       rate_per_min=manifest.configured_rate_per_min)
+    _runtime_policy = gate.rate_policy
+    if _declared_rate is not None and (
+        _runtime_policy is None
+        or _runtime_policy.configured_per_min != _declared_rate
+    ):
+        out(f"[FAILED ] manifest declares {_declared_rate}/min pacing but the runtime "
+            f"policy would pace at "
+            f"{None if _runtime_policy is None else _runtime_policy.configured_per_min}"
+            "/min; refusing to execute a manifest whose pacing bound would be ignored")
+        return EXIT_USAGE
     if resume_ck is not None:
         _u = resume_ck.usage
         gate.seed_prior(
@@ -652,13 +708,7 @@ def run_pilot_cli(
             f"blocked_requests={u.get('blocked_requests', 0)} "
             f"budget_exhausted={u.get('budget_exhausted') is not None}")
         # Rate: a policy being active is not the same as having been rate limited.
-        out(f"  rate:      policy_active={u.get('rate_policy_active', False)} "
-            f"configured={u.get('configured_rate_per_min')}/min "
-            f"provider_max={u.get('provider_rate_limit_per_min')}/min "
-            f"throttle_events={u.get('throttle_events', 0)} "
-            f"throttle_wait={float(u.get('throttle_wait_seconds', 0.0)):.3f}s "
-            f"http_429s={u.get('http_429s', 0)} "
-            f"rate_limited={u.get('rate_limited', False)}")
+        out(_render_rate_line(u))
         out(f"  auth:      status={u.get('authentication_status', 'not_applicable')} "
             f"succeeded={u.get('authentication_succeeded')}  "
             f"tier={u.get('tier_status', 'unknown')} "

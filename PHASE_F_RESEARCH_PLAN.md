@@ -178,6 +178,37 @@ nothing below is authorized by this milestone:
 > acceptance gates in section 3.2 have **not** passed and have not been
 > approached: one season-month is a provider-depth pilot, not corpus acceptance.
 
+> **MLB request pacing added before authorizing execution (2026-07-31).** A fresh
+> MLB StatsAPI audit passed (5 canonical probes, 5 requests, no active failure, no
+> persistence), and reviewing the manifest immediately afterwards exposed a
+> separate safety gap: the MLB month manifest recorded
+> `rate_per_min=null` / `configured_rate_per_min=null` /
+> `provider_rate_limit_per_min=null`, and the MLB branch of `_make_gate` attached
+> no rate policy at all. The 6,002 aggregate cap bounded total attempts but
+> nothing bounded the RATE, so a 3,001-request month would have run as fast as
+> responses returned. **Live execution was withheld and pacing added first.**
+>
+> MLB now carries a project-owned, versioned courtesy policy `mlb-pacing-v1`:
+> **30 requests/minute, burst 1**, a derived **2.0 s** minimum interval between
+> transport starts, on a monotonic clock. **No official provider maximum is
+> claimed** — MLB StatsAPI publishes none this repository can verify, so
+> `provider_rate_limit_per_min` stays null and the policy records
+> `basis=project_courtesy_cap`. NBA's reviewed `bdl-rate-v1` verified-tier
+> behaviour is unchanged (60/min configured, 600/min GOAT ceiling, sliding window).
+>
+> The MLB month manifest was regenerated: rate is part of plan identity, so the
+> plan hash and manifest hash both changed, while the date range, families,
+> `max_games=600`, `max_retries=1`, scratch/checkpoint paths, declared schema v17,
+> **semantic maximum 3,001** and **hard cap 6,002** are all unchanged. The NBA
+> month manifest and all four F1B manifests are byte-identical.
+>
+> **A NEW fresh MLB audit is required before execution.** The earlier audit passed
+> but is no longer the immediately preceding audit for the manifest that will
+> actually run.
+>
+> **The MLB month pilot has NOT executed.** F1 remains incomplete and F2 remains
+> unauthorized.
+
 **Next planned phase boundary (not started):** the remaining F1 work — canonical
 entity matching over the pilot corpora plus coverage/depth measurement — which must be
 specified and reviewed before any F2 backfill authorization is considered.

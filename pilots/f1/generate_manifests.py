@@ -41,6 +41,14 @@ MLB_MONTH: dict[str, object] = {
     "max_games": 600,
     # One retry per semantic request. Every attempt is counted against the cap.
     "max_retries": 1,
+    # PROJECT COURTESY pacing, not a provider limit: MLB StatsAPI is keyless
+    # and publishes no ceiling we can verify. 30/min with burst 1 (see
+    # cost_policies.build_mlb_rate_policy, mlb-pacing-v1) means one request
+    # immediately and then one every two seconds. The rate is part of the plan
+    # identity, so changing it changes both the plan and manifest hashes; it
+    # does NOT change request counts, so the semantic maximum stays 3001 and
+    # the retry-inclusive cap stays 6002.
+    "rate_per_min": 30,
     "scratch_db": "data\\f1_mlb_2026_06_scratch.db",
     "checkpoint": "data\\f1_mlb_2026_06.ckpt",
     "manifest_out": HERE / "mlb_coverage_2026_06.manifest.json",

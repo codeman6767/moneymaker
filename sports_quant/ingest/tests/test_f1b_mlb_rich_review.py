@@ -104,7 +104,15 @@ def _mlb_factory(seen: list[str]):
             base_url="https://statsapi.mlb.com/api/v1",
             policy=ReadOnlyHTTPPolicy.for_mlb_statsapi(),
             inner_transport=httpx.MockTransport(handler))
-        return MlbStatsApiClient(client=http, gate=gate, league="mlb", max_retries=1)
+        client = MlbStatsApiClient(client=http, gate=gate, league="mlb", max_retries=1)
+        # MLB now paces at 30/min. The delay itself is verified with a mocked
+        # clock in test_mlb_pacing.py; here the returned wait is swallowed so the
+        # fixture still traverses the real pacing chokepoint without sleeping.
+        async def _no_wait(_seconds: float) -> None:
+            return None
+
+        client._sleep = _no_wait  # noqa: SLF001 - deterministic test pacing
+        return client
 
     return factory
 
@@ -203,9 +211,17 @@ def test_rich_reviewed_request_and_selection_accounting(
     assert u["tier_verified"] is False
     assert u["tier_evidence_source"] == "none"
     # No rate policy for a keyless provider, and nothing was throttled.
-    assert u["rate_policy_active"] is False
-    assert u["rate_limited"] is False
-    assert u["throttle_events"] == 0
+    # MLB now carries a project courtesy pacing policy (30/min, burst 1). This
+    # fixture issues SIX requests, so requests 2..6 were each genuinely delayed:
+    # `rate_limited` is true because a real wait happened, and the wait is
+    # courtesy pacing -- not a provider 429, which stays at zero.
+    assert u["rate_policy_active"] is True
+    assert u["rate_policy_basis"] == "project_courtesy_cap"
+    assert u["configured_rate_per_min"] == 30
+    assert u["provider_rate_limit_per_min"] is None
+    assert u["rate_limited"] is True
+    assert u["throttle_events"] == 5
+    assert u["throttle_wait_seconds"] > 0.0
     assert u["http_429s"] == 0
 
 
@@ -273,7 +289,15 @@ def test_results_and_innings_share_one_linescore_and_sum_consistently(
             base_url="https://statsapi.mlb.com/api/v1",
             policy=ReadOnlyHTTPPolicy.for_mlb_statsapi(),
             inner_transport=httpx.MockTransport(handler))
-        return MlbStatsApiClient(client=http, gate=gate, league="mlb", max_retries=1)
+        client = MlbStatsApiClient(client=http, gate=gate, league="mlb", max_retries=1)
+        # MLB now paces at 30/min. The delay itself is verified with a mocked
+        # clock in test_mlb_pacing.py; here the returned wait is swallowed so the
+        # fixture still traverses the real pacing chokepoint without sleeping.
+        async def _no_wait(_seconds: float) -> None:
+            return None
+
+        client._sleep = _no_wait  # noqa: SLF001 - deterministic test pacing
+        return client
 
     rc, lines, db, _ck = _run(tmp_path, "mlb", MLB_RICH, factory)
     assert rc == 0, "\n".join(lines)

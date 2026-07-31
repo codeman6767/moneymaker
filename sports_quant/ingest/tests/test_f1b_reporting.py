@@ -3,7 +3,9 @@
 The independent review of the completed MLB and NBA skeleton pilots found that the
 runs were correct but their reports were not. These tests pin the repaired contract:
 
-* A: an attached rate policy is ``rate_policy_active``, never ``rate_limited``.
+* A: an attached rate policy is ``rate_policy_active``, never ``rate_limited``
+  -- for BALLDONTLIE's verified tier policy and for MLB's project courtesy
+  policy alike.
   ``rate_limited`` is true only when a request actually waited or got a 429.
 * B: ``max_games`` SELECTION accounting (received / selected / excluded /
   ``selection_truncated``) is reported separately from BUDGET truncation
@@ -36,7 +38,12 @@ from sports_quant.ingest.cost_policies import (
     build_balldontlie_rate_policy,
     build_mlb_policy,
 )
-from sports_quant.ingest.f1a import _F1B_AUTHORIZED_ENV, emit_plan, run_pilot_cli
+from sports_quant.ingest.f1a import (
+    _F1B_AUTHORIZED_ENV,
+    _make_gate,
+    emit_plan,
+    run_pilot_cli,
+)
 from sports_quant.ingest.tests.test_phase_d2_mlb import game as mlb_game
 from sports_quant.ingest.tests.test_phase_d3_nba import game as nba_game
 from sports_quant.ingest.tests.test_phase_d3_nba import page as nba_page
@@ -145,18 +152,33 @@ def test_http_429_sets_rate_limited() -> None:
     assert gate.usage.reported_credits_consumed is None
 
 
-def test_mlb_gate_has_no_rate_policy_and_is_not_rate_limited() -> None:
-    gate = _mlb_gate()
-    assert gate.rate_policy is None
-    assert gate.usage.rate_policy_active is False
-    assert gate.usage.rate_limited is False
-    assert gate.usage.configured_rate_per_min is None
+def test_mlb_gate_carries_a_project_courtesy_policy_and_is_not_rate_limited() -> None:
+    """MLB is now PACED, but a policy existing is still not rate limiting.
+
+    This test previously asserted the MLB gate had NO rate policy at all. That was
+    the accurate description of the code at the time and it was the safety gap:
+    the aggregate cap bounded total attempts while nothing bounded the rate. MLB
+    now carries a project-owned courtesy pacing policy (30/min, burst 1). The
+    distinction the original test protected is preserved and re-asserted:
+    ``rate_policy_active`` is about a policy being attached, ``rate_limited`` only
+    about a request actually being delayed.
+    """
+
+    gate = _make_gate(league="mlb", request_cap=12, credit_cap=None)
+    assert gate.rate_policy is not None
+    assert gate.usage.rate_policy_active is True
+    assert gate.usage.rate_limited is False, "no request has been delayed yet"
+    assert gate.usage.throttle_events == 0
+    # Our own rate, and no fabricated provider ceiling.
+    assert gate.usage.configured_rate_per_min == 30
     assert gate.usage.provider_rate_limit_per_min is None
+    assert gate.usage.rate_policy_basis == "project_courtesy_cap"
+    assert gate.usage.rate_policy_version == "mlb-pacing-v1"
+    # Authentication and tier remain not applicable: MLB StatsAPI is keyless and
+    # the pacing policy makes no tier claim.
+    assert gate.usage.authentication_status == "not_applicable"
+    assert gate.usage.tier_status == "not_applicable"
 
-
-# ===================================================================== #
-# C. page accounting
-# ===================================================================== #
 def test_one_successful_listing_page_counts_one_page() -> None:
     gate = _bdl_gate()
     gate.reserve(_unit(page=0))
@@ -358,7 +380,15 @@ def _mlb_factory(seen: list[httpx.Request], n_games: int = 30):
     def factory(gate: RequestGate) -> MlbStatsApiClient:
         http = httpx.AsyncClient(transport=httpx.MockTransport(handler),
                                  base_url="http://mlb.invalid")
-        return MlbStatsApiClient(client=http, gate=gate, league="mlb", max_retries=0)
+        client = MlbStatsApiClient(client=http, gate=gate, league="mlb", max_retries=0)
+        # MLB now paces at 30/min. The delay itself is verified with a mocked
+        # clock in test_mlb_pacing.py; here the returned wait is swallowed so the
+        # fixture still traverses the real pacing chokepoint without sleeping.
+        async def _no_wait(_seconds: float) -> None:
+            return None
+
+        client._sleep = _no_wait  # noqa: SLF001 - deterministic test pacing
+        return client
 
     return factory
 
@@ -422,7 +452,13 @@ def test_mlb_skeleton_reconstruction_reports_one_page_and_selection(
     assert u["attempted_requests"] == 1
     assert u["authentication_status"] == "not_applicable"  # defect D: MLB is keyless
     assert u["tier_status"] == "not_applicable"
-    assert u["rate_policy_active"] is False
+    # MLB is now paced by a project courtesy policy; a single request never waits.
+    assert u["rate_policy_active"] is True
+    assert u["rate_policy_basis"] == "project_courtesy_cap"
+    assert u["configured_rate_per_min"] == 30
+    assert u["provider_rate_limit_per_min"] is None
+    assert u["rate_limited"] is False
+    assert u["throttle_events"] == 0
     assert u["rate_limited"] is False
     text = "\n".join(lines)
     assert "selection_truncated=True" in text

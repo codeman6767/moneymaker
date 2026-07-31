@@ -199,6 +199,12 @@ def build_manifest(
     cr_cap = credit_cap if credit_cap is not None else plan.required_credit_cap()
     configured_rate: Optional[int] = None
     provider_rate: Optional[int] = None
+    if plan.provider == "mlb_statsapi" and plan.bounds.rate_per_min is not None:
+        # A project courtesy cap: the configured rate is ours and the provider
+        # maximum stays None because MLB publishes none we can verify. Populated
+        # ONLY when the plan declares a rate, so a manifest authored before pacing
+        # existed (rate_per_min null) regenerates byte-identically.
+        configured_rate, provider_rate = plan.bounds.rate_per_min, None
     if plan.provider == "balldontlie":
         from .cost_policies import (
             BALLDONTLIE_DEFAULT_RATE_PER_MIN,

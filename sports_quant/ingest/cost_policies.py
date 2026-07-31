@@ -22,7 +22,11 @@ fail closed on an unclassifiable one.
 
 from __future__ import annotations
 
-from ..request_control import EndpointCostPolicy, RequestRatePolicy
+from ..request_control import (
+    RATE_BASIS_PROJECT_COURTESY,
+    EndpointCostPolicy,
+    RequestRatePolicy,
+)
 
 # --- MLB StatsAPI (keyless; credits N/A) ----------------------------------- #
 MLB_FAMILIES: frozenset[str] = frozenset(
@@ -73,6 +77,15 @@ BALLDONTLIE_TIER_RATES: dict[str, int] = {"free": 5, "all-star": 60, "goat": 600
 
 #: Conservative default operating rate, well below the GOAT tier maximum. A pilot
 #: manifest may lower it further; it can never exceed the verified tier maximum.
+#: MLB StatsAPI publishes no rate limit we can verify, so this is OUR OWN
+#: courtesy pacing rate, not a provider ceiling. 30/min with burst 1 means one
+#: request immediately and then a request every two seconds -- deliberately slow
+#: for a month-scale run against a free, keyless, unmetered public endpoint.
+MLB_DEFAULT_RATE_PER_MIN = 30
+MLB_PACING_BURST = 1
+MLB_PACING_POLICY_VERSION = "mlb-pacing-v1"
+_SUPPORTED_MLB_PACING_VERSIONS = frozenset({MLB_PACING_POLICY_VERSION})
+
 BALLDONTLIE_DEFAULT_RATE_PER_MIN = 100
 BALLDONTLIE_RATE_POLICY_VERSION = "bdl-rate-v1"
 
@@ -132,4 +145,34 @@ def build_balldontlie_rate_policy(
         tier=tier_key,
         tier_max_per_min=BALLDONTLIE_TIER_RATES[tier_key],
         configured_per_min=configured_per_min,
+    )
+
+
+def build_mlb_rate_policy(
+    configured_per_min: int = MLB_DEFAULT_RATE_PER_MIN,
+    *,
+    version: str = MLB_PACING_POLICY_VERSION,
+) -> RequestRatePolicy:
+    """The versioned MLB StatsAPI **project courtesy** pacing policy.
+
+    This is an internal safety setting, not an assertion about an official MLB
+    rate limit: MLB StatsAPI is keyless and publishes no ceiling we can verify, so
+    ``tier`` and ``tier_max_per_min`` stay None and the basis records that the
+    number is ours. Burst is 1, giving steady pacing with no opening burst; the
+    minimum interval is derived from the rate (30/min -> 2.0s), so the two can
+    never disagree.
+    """
+
+    if version not in _SUPPORTED_MLB_PACING_VERSIONS:
+        raise ValueError(
+            f"unsupported MLB pacing policy version {version!r}; expected one of "
+            f"{sorted(_SUPPORTED_MLB_PACING_VERSIONS)}")
+    return RequestRatePolicy(
+        provider="mlb_statsapi",
+        version=version,
+        configured_per_min=configured_per_min,
+        tier=None,
+        tier_max_per_min=None,
+        basis=RATE_BASIS_PROJECT_COURTESY,
+        burst=MLB_PACING_BURST,
     )

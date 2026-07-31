@@ -278,7 +278,15 @@ def _mlb_factory(seen: list[str], *, fail_first: Optional[str] = None):
             base_url="https://statsapi.mlb.com/api/v1",
             policy=ReadOnlyHTTPPolicy.for_mlb_statsapi(),
             inner_transport=httpx.MockTransport(handler))
-        return MlbStatsApiClient(client=http, gate=gate, league="mlb", max_retries=1)
+        client = MlbStatsApiClient(client=http, gate=gate, league="mlb", max_retries=1)
+        # MLB now paces at 30/min. The delay itself is verified with a mocked
+        # clock in test_mlb_pacing.py; here the returned wait is swallowed so the
+        # fixture still traverses the real pacing chokepoint without sleeping.
+        async def _no_wait(_seconds: float) -> None:
+            return None
+
+        client._sleep = _no_wait  # noqa: SLF001 - deterministic test pacing
+        return client
 
     return factory
 
@@ -703,13 +711,19 @@ def test_nba_rich_persists_only_its_own_families(
         con.close()
 
 
-@pytest.mark.parametrize("league,manifest,factory_for,rate_active", [
-    ("mlb", MLB_RICH, _mlb_factory, False),
-    ("nba", NBA_RICH, _nba_factory, True),
+# Both providers now report an ACTIVE rate policy: BALLDONTLIE's verified tier
+# policy and MLB's project courtesy pacing policy.
+# Both providers report an ACTIVE rate policy. Only MLB is actually DELAYED by it:
+# its project courtesy policy paces at 30/min (burst 1), so a multi-request rich
+# run genuinely waits, while BALLDONTLIE's 60/min sliding window has slack for
+# this fixture's request count.
+@pytest.mark.parametrize("league,manifest,factory_for,rate_active,delayed", [
+    ("mlb", MLB_RICH, _mlb_factory, True, True),
+    ("nba", NBA_RICH, _nba_factory, True, False),
 ])
 def test_rich_reports_are_deterministic_and_secret_free(
     tmp_path: Path, f1b_authorized: None, no_external_network: None,
-    league: str, manifest: Path, factory_for, rate_active: bool
+    league: str, manifest: Path, factory_for, rate_active: bool, delayed: bool
 ) -> None:
     seen: list[str] = []
     rc, lines, _db, ckpt = _run(tmp_path, league, manifest, factory_for(seen))
@@ -726,10 +740,12 @@ def test_rich_reports_are_deterministic_and_secret_free(
         assert field in u, field
 
     assert u["rate_policy_active"] is rate_active
-    assert u["rate_limited"] is False                 # nothing was throttled
-    assert u["throttle_events"] == 0
-    assert float(u["throttle_wait_seconds"]) == 0.0
-    assert u["http_429s"] == 0
+    # `rate_limited` reflects an ACTUAL delay, never the mere presence of a policy.
+    assert u["rate_limited"] is delayed
+    assert (u["throttle_events"] > 0) is delayed
+    # A courtesy wait is accounted separately from any provider 429.
+    assert (float(u["throttle_wait_seconds"]) > 0.0) is delayed
+    assert u["http_429s"] == 0                        # no provider 429 either way
     # Selection truncation is reported, and stays separate from budget truncation.
     assert u["selection_truncated"] is True
     assert u["games_excluded_by_max_games"] == 1
@@ -754,7 +770,16 @@ def test_rich_reports_are_deterministic_and_secret_free(
     for banned in ("api_key", "apikey", "authorization", "bearer"):
         assert banned not in blob.lower()
     assert "selection_truncated=True" in text
-    assert "rate_limited=False" in text
+    # The human line states the ACTUAL outcome, and for a project courtesy cap it
+    # says so in words so the rate is never read as a provider limit.
+    assert f"rate_limited={delayed}" in text
+    if league == "mlb":
+        assert "basis=project_courtesy_cap" in text
+        assert "PROJECT COURTESY CAP" in text
+        assert "provider_max=unknown" in text
+    else:
+        assert "basis=verified_tier_max" in text
+        assert "provider_max=600/min" in text
 
 
 def test_rich_totals_expose_logical_run_transport_provenance() -> None:

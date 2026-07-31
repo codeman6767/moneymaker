@@ -22,6 +22,21 @@ This module performs **no** network or database I/O. It is pure accounting:
 Credit values are kept strictly separate: *estimated* (planner), *reserved*
 (conservative maximum taken before a call), *reported-consumed* (provider), and
 *provider-reported-remaining* (provider). A remaining figure is never invented.
+
+Two kinds of rate contract, deliberately not conflated (see
+``RequestRatePolicy.basis``):
+
+* ``verified_tier_max`` -- the provider publishes a per-tier ceiling
+  (BALLDONTLIE). The configured rate is validated against it.
+* ``project_courtesy_cap`` -- the provider publishes nothing we can verify (MLB
+  StatsAPI, which is keyless and unmetered), so the rate is OURS.
+  ``tier_max_per_min`` stays None rather than being filled with an invented
+  number, and reporting labels it as a courtesy cap so it is never read as a
+  provider limit.
+
+``rate_policy_active`` means a policy is attached. ``rate_limited`` means a
+request was ACTUALLY delayed or a 429 was observed. They are not the same thing
+and reporting keeps them apart.
 """
 
 from __future__ import annotations
@@ -233,50 +248,138 @@ class CreditBudget:
             raise ValueError("an applicable credit budget requires max_credits >= 0")
 
 
+#: The policy is grounded in a maximum the PROVIDER publishes per subscription
+#: tier (BALLDONTLIE). ``tier`` and ``tier_max_per_min`` are required.
+RATE_BASIS_VERIFIED_TIER = "verified_tier_max"
+#: The policy is a rate WE chose, because the provider publishes no limit we can
+#: verify (MLB StatsAPI). ``tier_max_per_min`` stays None: inventing a number to
+#: satisfy a type would turn our own courtesy setting into a false provider claim.
+RATE_BASIS_PROJECT_COURTESY = "project_courtesy_cap"
+_RATE_BASES = frozenset({RATE_BASIS_VERIFIED_TIER, RATE_BASIS_PROJECT_COURTESY})
+
+#: The window every per-minute rate is expressed against.
+RATE_WINDOW_SECONDS = 60.0
+
+#: ``burst`` sentinel meaning "sliding window only, no minimum spacing" -- the
+#: reviewed BALLDONTLIE behaviour, preserved byte-for-byte.
+BURST_WINDOW_ONLY = 0
+
+
 @dataclass(frozen=True)
 class RequestRatePolicy:
-    """A versioned provider request-RATE contract (requests per minute).
+    """A versioned request-RATE contract (requests per minute).
 
-    Some providers (BALLDONTLIE) meter by a per-minute REQUEST-RATE limit per
-    subscription tier, NOT by a monetary/credit balance. This is distinct from the
-    aggregate request budget (a hard total-call ceiling for the whole logical run):
-    the rate policy bounds how FAST calls may be issued. ``configured_per_min`` is
-    the safe operating rate the runtime honours and MUST be <= the provider's
-    ``tier_max_per_min`` (a conservative default sits well below the tier maximum).
+    Two distinct kinds of contract, told apart by ``basis`` rather than conflated:
+
+    * ``verified_tier_max`` -- the provider publishes a per-tier ceiling
+      (BALLDONTLIE). ``tier`` and ``tier_max_per_min`` are required and
+      ``configured_per_min`` must not exceed the ceiling.
+    * ``project_courtesy_cap`` -- the provider publishes nothing we can verify
+      (MLB StatsAPI), so the rate is OURS. ``tier`` and ``tier_max_per_min`` must
+      both be None. Reporting must never present this as a provider limit.
+
+    Distinct from the aggregate request budget, which is a hard total-call ceiling
+    for the whole logical run: this bounds how FAST calls may be issued.
+
+    ``burst`` controls the shape. ``BURST_WINDOW_ONLY`` keeps the sliding-window
+    behaviour, where the first ``configured_per_min`` calls in a window are free.
+    A positive ``burst`` additionally enforces a minimum spacing between transport
+    starts, so ``burst=1`` gives steady pacing with no opening burst at all.
     """
 
     provider: str
     version: str
-    tier: str
-    tier_max_per_min: int
     configured_per_min: int
+    tier: Optional[str] = None
+    tier_max_per_min: Optional[int] = None
+    basis: str = RATE_BASIS_VERIFIED_TIER
+    burst: int = BURST_WINDOW_ONLY
 
     def __post_init__(self) -> None:
-        if self.tier_max_per_min <= 0 or self.configured_per_min <= 0:
-            raise ValueError("rate limits must be positive")
-        if self.configured_per_min > self.tier_max_per_min:
+        if self.configured_per_min <= 0:
+            raise ValueError("configured_per_min must be positive")
+        if self.burst < 0:
+            raise ValueError("burst must not be negative")
+        if self.basis not in _RATE_BASES:
             raise ValueError(
-                f"configured rate {self.configured_per_min}/min exceeds the verified "
-                f"tier maximum {self.tier_max_per_min}/min for {self.provider} ({self.tier})")
+                f"unknown rate policy basis {self.basis!r}; expected one of "
+                f"{sorted(_RATE_BASES)}")
+        if self.basis == RATE_BASIS_VERIFIED_TIER:
+            if self.tier is None or self.tier_max_per_min is None:
+                raise ValueError(
+                    f"{self.basis} requires a tier and a verified tier maximum")
+            if self.tier_max_per_min <= 0:
+                raise ValueError("rate limits must be positive")
+            if self.configured_per_min > self.tier_max_per_min:
+                raise ValueError(
+                    f"configured rate {self.configured_per_min}/min exceeds the verified "
+                    f"tier maximum {self.tier_max_per_min}/min for {self.provider} "
+                    f"({self.tier})")
+        else:
+            # A courtesy cap must not smuggle in a fabricated provider ceiling.
+            if self.tier_max_per_min is not None:
+                raise ValueError(
+                    f"{self.basis} must leave tier_max_per_min None: the provider "
+                    "publishes no verified maximum")
+            if self.tier is not None:
+                raise ValueError(f"{self.basis} must leave tier None: no tier applies")
+            if self.burst < 1:
+                raise ValueError(
+                    f"{self.basis} requires an explicit positive burst (use 1 for "
+                    "steady pacing with no opening burst)")
+
+    @property
+    def is_project_courtesy(self) -> bool:
+        return self.basis == RATE_BASIS_PROJECT_COURTESY
+
+    @property
+    def min_interval_seconds(self) -> float:
+        """Minimum monotonic seconds between transport starts.
+
+        Derived, never separately configured, so the stated interval and the stated
+        rate can never disagree: at 30/min over a 60s window this is exactly 2.0s.
+        ``BURST_WINDOW_ONLY`` yields 0.0 (window-only pacing).
+        """
+
+        if self.burst < 1:
+            return 0.0
+        return RATE_WINDOW_SECONDS / float(self.configured_per_min)
 
 
 class RateLimiter:
-    """A client-side sliding-window rate limiter (requests per ``window`` seconds).
+    """A client-side rate limiter: sliding window, optionally steadily paced.
 
     Concurrency-safe. :meth:`acquire_wait` returns the seconds the caller must wait
-    (0 when a slot is free now) before issuing a request to stay within
-    ``per_min``, reserving the slot. The clock is injectable for deterministic
-    tests; the async transport awaits the returned delay before sending.
+    (0 when a slot is free now) before issuing a request, reserving the slot. The
+    clock is injectable for deterministic tests, and it is a MONOTONIC clock, so a
+    system wall-clock change cannot alter pacing. The async transport awaits the
+    returned delay before sending.
+
+    Two bounds, applied together, and the caller waits for whichever is longer:
+
+    * the sliding window -- at most ``per_min`` reservations in any ``window``;
+    * ``min_interval`` -- a minimum spacing between consecutive reservations.
+
+    ``min_interval=0.0`` (the default) is exactly the original window-only
+    behaviour, where the first ``per_min`` calls in a window are free. A positive
+    ``min_interval`` removes that opening burst: with ``per_min=30`` and
+    ``min_interval=2.0`` the first call goes immediately and every later call is
+    spaced two seconds, which is steady 30/minute with no burst.
     """
 
     def __init__(self, per_min: int, *, clock: Callable[[], float] = time.monotonic,
-                 window: float = 60.0) -> None:
+                 window: float = 60.0, min_interval: float = 0.0) -> None:
         if per_min <= 0:
             raise ValueError("per_min must be positive")
+        if min_interval < 0:
+            raise ValueError("min_interval must not be negative")
         self._per_min = per_min
         self._clock = clock
         self._window = window
+        self._min_interval = min_interval
         self._times: "deque[float]" = deque()
+        #: The instant the most recent reservation is scheduled to start.
+        self._last_reserved: Optional[float] = None
         self._lock = threading.Lock()
 
     def acquire_wait(self) -> float:
@@ -285,14 +388,20 @@ class RateLimiter:
             horizon = now - self._window
             while self._times and self._times[0] <= horizon:
                 self._times.popleft()
-            if len(self._times) < self._per_min:
-                self._times.append(now)
-                return 0.0
-            # Wait until the oldest reservation leaves the window; reserve the slot
-            # at that future instant so concurrent callers serialise correctly.
-            wait = self._times[0] + self._window - now
-            self._times.append(now + max(0.0, wait))
-            return max(0.0, wait)
+            window_wait = 0.0
+            if len(self._times) >= self._per_min:
+                # Wait until the oldest reservation leaves the window.
+                window_wait = max(0.0, self._times[0] + self._window - now)
+            interval_wait = 0.0
+            if self._min_interval > 0 and self._last_reserved is not None:
+                interval_wait = max(0.0, self._last_reserved + self._min_interval - now)
+            wait = max(window_wait, interval_wait)
+            # Reserve at the future instant, so concurrent callers serialise
+            # against the same schedule rather than all reading the same "now".
+            reserved_at = now + wait
+            self._times.append(reserved_at)
+            self._last_reserved = reserved_at
+            return wait
 
 
 @dataclass
@@ -345,6 +454,13 @@ class UsageReport:
     configured_rate_per_min: Optional[int] = None
     throttle_events: int = 0
     throttle_wait_seconds: float = 0.0
+    #: Whether the configured rate is a provider-published ceiling or our own
+    #: courtesy cap. Reporting must not present the latter as the former.
+    rate_policy_basis: Optional[str] = None
+    rate_policy_version: Optional[str] = None
+    #: Pacing shape: burst 0 = sliding window only; 1 = steady, no opening burst.
+    rate_burst: Optional[int] = None
+    rate_min_interval_seconds: Optional[float] = None
     http_429s: int = 0
     # GAME-SELECTION accounting (``max_games``), kept strictly separate from BUDGET
     # truncation below: a bounded selection is a planned, successful outcome, whereas
@@ -419,7 +535,11 @@ class RequestGate:
         self._lock = threading.Lock()
         self._resumable = resumable
         self._rate_policy = rate_policy
-        self._limiter = RateLimiter(rate_policy.configured_per_min) if rate_policy else None
+        self._limiter = (
+            RateLimiter(rate_policy.configured_per_min,
+                        min_interval=rate_policy.min_interval_seconds)
+            if rate_policy else None
+        )
         self.usage = usage or UsageReport(provider=cost_policy.provider)
         self.usage.credits_applicable = credit_budget.applicable
         if not credit_budget.applicable:
@@ -429,8 +549,14 @@ class RequestGate:
             # A policy being attached is NOT rate limiting; only an actual wait,
             # block, or provider 429 sets ``rate_limited``.
             self.usage.rate_policy_active = True
+            # None for a courtesy cap: we do not know the provider's ceiling and
+            # will not invent one.
             self.usage.provider_rate_limit_per_min = rate_policy.tier_max_per_min
             self.usage.configured_rate_per_min = rate_policy.configured_per_min
+            self.usage.rate_policy_basis = rate_policy.basis
+            self.usage.rate_policy_version = rate_policy.version
+            self.usage.rate_burst = rate_policy.burst
+            self.usage.rate_min_interval_seconds = rate_policy.min_interval_seconds
 
     @property
     def cost_policy(self) -> EndpointCostPolicy:

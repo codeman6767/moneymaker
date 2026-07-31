@@ -137,6 +137,91 @@ and is not a budget risk, but it is a bounded redundancy of roughly
 a saving, and reducing it would mean caching responses across pilot units, which
 is a change to the pilot loop and out of scope for manifest preparation.
 
+## Request pacing
+
+Both pilots are paced, and the two policies are **different kinds of claim**.
+
+| | MLB | NBA |
+| --- | --- | --- |
+| policy version | `mlb-pacing-v1` | `bdl-rate-v1` |
+| basis | `project_courtesy_cap` | `verified_tier_max` |
+| configured rate | **30 / minute** | 60 / minute |
+| burst | **1** (no opening burst) | sliding window |
+| minimum interval between starts | **2.0 s** (derived from the rate) | none |
+| provider-published maximum | **unknown / null** | 600 / minute (GOAT tier) |
+| authentication | not applicable | applies |
+| tier | not applicable | `goat` |
+| credits | not applicable | not applicable |
+
+**The MLB rate is ours, not the provider's.** MLB StatsAPI is keyless, unmetered
+and publishes no rate ceiling this repository can verify, so
+`provider_rate_limit_per_min` stays **null** and the policy records
+`basis=project_courtesy_cap`. Inventing a number to fill that field would turn our
+own safety setting into a false provider claim. Reporting says so in words: the
+human line prints `basis=project_courtesy_cap`, the parenthetical
+`(PROJECT COURTESY CAP, not a provider limit)`, and `provider_max=unknown` rather
+than `None/min`.
+
+### Why it was added before authorizing execution
+
+The first MLB month manifest was correctly **aggregate-capped** at 6,002 attempts,
+but the MLB branch of `_make_gate` attached no rate policy at all: only a request
+budget, a credits-not-applicable policy and the endpoint-cost classifier. The cap
+bounded *how many* requests a month could make and nothing bounded *how fast*, so
+a 3,001-request month would have gone as quickly as sequential responses returned.
+Live execution was withheld and the pacing policy added first.
+
+### Shape
+
+`burst=1` means the first request goes immediately and every later transport start
+is separated by at least two monotonic seconds. The interval is **derived** from
+the configured rate (60 s / 30 per min = 2.0 s) so the stated rate and the stated
+interval can never disagree. The clock is monotonic, so a system wall-clock change
+cannot compress the spacing, and concurrent callers serialize onto distinct future
+slots rather than all reading the same instant.
+
+At 30/minute a full 3,001-request MLB month paces to roughly **100 minutes** of
+client-side wait, on top of provider response time.
+
+`rate_limited` remains reserved for an **actual** event: a request that really
+waited, or a provider 429. A policy merely being attached sets
+`rate_policy_active`, never `rate_limited`. Courtesy pacing accumulates in
+`throttle_events` / `throttle_wait_seconds`; a provider 429 is counted separately
+in `http_429s`, and its `Retry-After` backoff is a distinct sleep that does not
+inflate the courtesy-wait total.
+
+### Retries and 429s
+
+Every retry re-enters the same chokepoint — `reserve()` then `rate_acquire()` then
+`mark_transport()` — so a retry is both budgeted and paced. `max_retries` stays at
+the committed **1**; this change added no retries. A numeric `Retry-After` is
+honoured, bounded by the backoff cap; a malformed (HTTP-date) value falls back to
+bounded exponential backoff. No header value is ever exposed in output.
+
+### Resume
+
+A **completed** resume short-circuits: zero transport calls, zero pacing delay,
+zero throttle events, and the prior request and pacing provenance is preserved in
+the checkpoint (`prior_transport_starts`, `prior_pages_fetched`). An
+**interrupted** resume starts a fresh *process-local* pacing window — the limiter
+holds no cross-process state — but it does **not** get a fresh aggregate request
+budget: cumulative request usage and prior throttle provenance carry forward, and
+the pacing policy applies before every new transport.
+
+### Fail-closed conditions
+
+Refused before any client is constructed: a nonpositive configured rate, a
+nonpositive burst on a courtesy policy, an unsupported policy version, a courtesy
+policy carrying a tier or a provider maximum, and a manifest whose declared
+`configured_rate_per_min` disagrees with the runtime policy — because a declared
+pacing bound that the runtime would ignore is worse than no bound at all.
+
+> **The regenerated MLB manifest needs a NEW fresh provider audit.** The audit run
+> immediately before this change passed, but it is no longer the immediately
+> preceding audit for the manifest that will actually execute: the manifest hash
+> and plan hash both changed. A fresh MLB StatsAPI audit is required again before
+> MLB month execution is authorized.
+
 ## Truncation and record-loss guarantees
 
 Nothing truncates silently. Verified in
@@ -225,5 +310,7 @@ python pilots/f1/generate_manifests.py
 `generate_manifests.py` holds every semantic input and is the single source of
 truth. Regeneration is byte-identical and CI asserts it. Changing any semantic
 input — date, family, `max_games` / `max_pages` / `max_records` / `max_retries`,
-rate, scratch path, checkpoint path, declared schema version — changes the
-manifest hash by construction.
+**rate**, scratch path, checkpoint path, declared schema version — changes the
+manifest hash by construction. The MLB rate is part of plan identity, so adding
+the 30/minute courtesy cap changed both the MLB plan hash and the MLB manifest
+hash while leaving the semantic maximum at 3,001 and the hard cap at 6,002.
