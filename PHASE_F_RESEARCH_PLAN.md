@@ -55,12 +55,66 @@ verification is complete.**
 **F1B capability verification is complete. Phase F1 as a whole is NOT complete**, and
 nothing below is authorized by this milestone:
 
-- Canonical entity matching and broader coverage/depth measurement have **not** run.
+- Canonical entity matching **mechanics** are now proven offline on one game per
+  league (schema v17, see the note below); broader coverage/depth measurement has
+  **not** run.
 - **F2 backfill is not authorized.**
 - Historical corpus acceptance gates have **not** passed.
 - Historical sportsbook-odds licensing is **unresolved**.
 - Feature engineering, modeling, calibration, simulation, EV, recommendations, staking
   and execution have **not** started and may **not** begin.
+
+> **F1 canonical matching mechanics pilot ran, returned 0%, and has now been
+> unblocked (2026-07-31, schema v17).** The one-game matching pilot resolved
+> nothing — 0 of 1 game, 0 of 2 teams, 0 of 52 (MLB) / 35 (NBA) players, both
+> leagues. **The refusal was correct**: structured official identity did not
+> exist. `game_schedule_snapshots` and `provider_team_references` stored provider
+> ids and no names, so `TeamResolver` was handed the numeric id `'141'`; `players`
+> and `player_aliases` were empty, so every player had an empty candidate pool.
+> The provider-written names were in `raw_responses` all along.
+>
+> Migration `e017_provider_identity` (schema **v17**) adds append-only
+> `provider_team_identity_snapshots` and `provider_player_identity_snapshots`;
+> ingestion now lands the structured names it already receives, and matching reads
+> them. Teams still resolve to the **seeded** canonical teams and are never
+> invented. A canonical **player** may now be bootstrapped, but only by the
+> league's designated official provider (`mlb_statsapi`, `balldontlie`) from a
+> stable provider id plus a structured identity observation, under an explicit
+> `official_provider_bootstrap` method at 1.00. Unknown and nonofficial names
+> still never create anything. Full design: `ENTITY_MATCHING.md` §3.4.
+>
+> **Exact offline replay result** (preserved F1B rich corpora, zero provider
+> requests, fresh temporary v16→v17 copies, originals untouched):
+>
+> | | MLB | NBA |
+> | --- | --- | --- |
+> | team identity observations | 34 | 42 |
+> | player identity observations | 180 | 365 |
+> | identities rejected | 0 | 0 |
+> | provider teams linked | 2 / 2 | 2 / 2 |
+> | canonical game | 1 created | 0 (separate blocker) |
+> | provider players linked | 52 / 52 | 35 / 35 |
+> | canonical players bootstrapped | 52 | 35 |
+>
+> Determinism: two independent replays per league varying raw-response order,
+> endpoint-family order and player-reference traversal order produced **identical
+> semantic serializations and identical logical hashes**. Idempotency: a second
+> full pass inserted zero identity rows and created zero duplicate player, alias,
+> link, game or DQ row.
+>
+> **Separate confirmed blocker — NBA game canonicalization.** The NBA game refuses
+> with `no scheduled start to match a game on`. This is not an identity gap (both
+> teams resolved; all 35 players bootstrapped). Root cause:
+> `nba_ingestor._normalize_game` sets `scheduled_start` only for a *scheduled*
+> game, so a finished game stores `NULL` despite the payload carrying `datetime`.
+> Fixing it requires changing NBA schedule normalization and re-deriving the
+> affected snapshots — a separate task. No matching rule was weakened.
+>
+> **This does NOT make F1 complete.** One game per league establishes matching
+> *mechanics* only. It establishes **no** month coverage, **no** season coverage,
+> and does **not** approach the 99% acceptance gate in §3.2. The bounded
+> season-month coverage/depth pilot is still required, and **F2 remains
+> unauthorized.**
 
 **Next planned phase boundary (not started):** the remaining F1 work — canonical
 entity matching over the pilot corpora plus coverage/depth measurement — which must be

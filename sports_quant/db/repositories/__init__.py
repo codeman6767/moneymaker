@@ -29,6 +29,10 @@ from .games import (
     SqliteGameRepository,
     status_content_hash,
 )
+from .identity import (
+    EqualTimeConflict,
+    SqliteProviderIdentityRepository,
+)
 from .ingestion_runs import (
     IngestionRunRepositoryProtocol,
     SqliteIngestionRunRepository,
@@ -102,6 +106,7 @@ from .venues import (
 __all__ = [
     "AliasOutcome",
     "CandidateInput",
+    "EqualTimeConflict",
     "LineupPlayerInput",
     "ObservationOutcome",
     "SqliteInningLineRepository",
@@ -138,6 +143,7 @@ __all__ = [
     "SqliteMatchingRepository",
     "SqlitePlayerAliasRepository",
     "SqlitePlayerRepository",
+    "SqliteProviderIdentityRepository",
     "SqliteProviderReferenceRepository",
     "SqliteRawResponseRepository",
     "SqliteSeasonRepository",

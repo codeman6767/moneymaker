@@ -95,6 +95,10 @@ NBA_PLAYER_STAT_PREFIX: Final = "nps_"
 # Phase D4 (d014): weather observations.
 WEATHER_SNAPSHOT_PREFIX: Final = "wx_"
 
+# Phase F1 (e017): append-only structured provider identity observations.
+PROVIDER_TEAM_IDENTITY_PREFIX: Final = "pti_"
+PROVIDER_PLAYER_IDENTITY_PREFIX: Final = "ppi_"
+
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
 
 
@@ -365,3 +369,12 @@ def new_nba_player_stat_id() -> str:
 # Phase D4 factory.
 def new_weather_snapshot_id() -> str:
     return prefixed_id(WEATHER_SNAPSHOT_PREFIX)
+
+
+# Phase F1 (e017) identity-observation factories.
+def new_provider_team_identity_id() -> str:
+    return prefixed_id(PROVIDER_TEAM_IDENTITY_PREFIX)
+
+
+def new_provider_player_identity_id() -> str:
+    return prefixed_id(PROVIDER_PLAYER_IDENTITY_PREFIX)

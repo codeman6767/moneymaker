@@ -54,6 +54,7 @@ from ..providers.capabilities import (
 )
 from ..providers.mlb_statsapi import MlbStatsApiClient
 from ..providers.mlb_status import map_mlb_status
+from .identity_record import IdentityRecorder
 from .runner import sanitize_error
 
 _TOOL_VERSION = "sports_quant 0.1.0"
@@ -99,6 +100,15 @@ class MlbIngestResult:
     lineups_inserted: int = 0
     lineup_players_inserted: int = 0
     provider_references_created: int = 0
+    #: e017: append-only structured provider identity observations. These are what
+    #: let F1 matching resolve a provider id to a canonical entity without parsing
+    #: raw JSON at match time. "unchanged" counts an identity a second endpoint
+    #: family observed identically -- expected and idempotent, not a problem.
+    team_identities_inserted: int = 0
+    team_identities_unchanged: int = 0
+    player_identities_inserted: int = 0
+    player_identities_unchanged: int = 0
+    identities_rejected: int = 0
     corrections_appended: int = 0
     records_rejected: int = 0
     #: A genuine provider/normalization failure on a *requested* endpoint (network
@@ -582,6 +592,7 @@ async def ingest_mlb(
     if dry_run:
         # Normalize in memory only: count what WOULD be written, persist nothing.
         _dry_run_count(games, per_game, rosters_by_pair, roster_gaps, include_set, result)
+        _dry_run_identities(schedule, per_game, rosters_by_pair, result)
         result.status = "partially_failed" if result.has_active_failure else "succeeded"
         return result
 
@@ -589,6 +600,35 @@ async def ingest_mlb(
         database, schedule, games, per_game, rosters_by_pair, roster_gaps, include_set,
         result, tool_version,
     )
+
+
+def _dry_run_identities(
+    schedule: ProviderResponse,
+    per_game: dict[str, dict[str, Optional[ProviderResponse]]],
+    rosters_by_pair: dict[tuple[str, str], Optional[ProviderResponse]],
+    result: MlbIngestResult,
+) -> None:
+    """Count would-be identity observations from the same responses a real run
+    would store, using the same extraction and content hashing so the dry-run
+    number cannot drift from what persistence writes."""
+
+    recorder = IdentityRecorder(dry_run=True)
+    responses: list[ProviderResponse] = [schedule]
+    for _pk, fetched in sorted(per_game.items()):
+        responses.extend(r for _k, r in sorted(fetched.items()) if r is not None)
+    responses.extend(r for _pair, r in sorted(rosters_by_pair.items()) if r is not None)
+    seen: set[int] = set()
+    for response in responses:
+        if id(response) in seen:
+            continue
+        seen.add(id(response))
+        exchange = response.exchange
+        recorder.observe_response(
+            provider=PROVIDER_MLB_STATSAPI, endpoint=exchange.endpoint,
+            body=exchange.body, raw_response_id="dry-run", raw_response_hash="dry-run",
+            observed_at=to_iso(exchange.received_at),
+        )
+    _apply_identity_counts(result, recorder)
 
 
 def _roster_pairs(
@@ -816,8 +856,9 @@ async def _persist(
             )
         result.run_id = run.run_id
         raw_repo = SqliteRawResponseRepository(conn)
+        identities = IdentityRecorder(conn=conn)
 
-        sched_raw = _store_raw(conn, raw_repo, run.run_id, schedule)
+        sched_raw = _store_raw(conn, raw_repo, run.run_id, schedule, identities)
         result.raw_responses_received += 1
 
         # Store each per-game raw ONCE and remember (raw_id, hash) per endpoint.
@@ -827,15 +868,21 @@ async def _persist(
             for kind, resp in fetched.items():
                 if resp is None:
                     continue
-                game_raws[pk][kind] = _store_raw(conn, raw_repo, run.run_id, resp)
+                game_raws[pk][kind] = _store_raw(
+                    conn, raw_repo, run.run_id, resp, identities)
                 result.raw_responses_received += 1
 
         # Roster raws (one per team/date pair), stored once each.
         roster_raws: dict[tuple[str, str], tuple[str, str, str]] = {}
         for pair, roster_resp in rosters_by_pair.items():
             if roster_resp is not None:
-                roster_raws[pair] = _store_raw(conn, raw_repo, run.run_id, roster_resp)
+                roster_raws[pair] = _store_raw(
+                    conn, raw_repo, run.run_id, roster_resp, identities)
                 result.raw_responses_received += 1
+
+        with transaction(conn):
+            identities.report_equal_time_conflicts(PROVIDER_MLB_STATSAPI)
+        _apply_identity_counts(result, identities)
 
         refs = SqliteProviderReferenceRepository(conn)
         dq = SqliteDataQualityRepository(conn)
@@ -1259,11 +1306,28 @@ def _persist_roster(
             ctx.result.roster_observations_unchanged += 1
 
 
+def _apply_identity_counts(result: MlbIngestResult, identities: IdentityRecorder) -> None:
+    """Copy the recorder's counters onto the reported result."""
+
+    counts = identities.counts
+    result.team_identities_inserted += counts.team_identities_inserted
+    result.team_identities_unchanged += counts.team_identities_unchanged
+    result.player_identities_inserted += counts.player_identities_inserted
+    result.player_identities_unchanged += counts.player_identities_unchanged
+    result.identities_rejected += counts.identities_rejected
+
+
 def _store_raw(
     conn: Any, raw_repo: SqliteRawResponseRepository, run_id: str,
-    response: ProviderResponse,
+    response: ProviderResponse, identities: Optional[IdentityRecorder] = None,
 ) -> tuple[str, str, str]:
-    """Store one raw response ONCE; return (raw_id, content_hash, received_at)."""
+    """Store one raw response ONCE; return (raw_id, content_hash, received_at).
+
+    Identity extraction (e017) hangs off this single seam rather than off each
+    parser, so every endpoint family that produces a provider reference also
+    contributes its structured provider-written names, in the same transaction
+    and with the exact provenance of the response that supplied them.
+    """
 
     exchange = response.exchange
     content_hash = response_content_hash(
@@ -1280,6 +1344,12 @@ def _store_raw(
             elapsed_ns=exchange.elapsed_ns, body=exchange.body, content_hash=content_hash,
             content_type=exchange.content_type,
         )
+        if identities is not None:
+            identities.observe_response(
+                provider=PROVIDER_MLB_STATSAPI, endpoint=exchange.endpoint,
+                body=exchange.body, raw_response_id=raw.raw_response_id,
+                raw_response_hash=content_hash, observed_at=raw.received_at,
+            )
     return raw.raw_response_id, content_hash, raw.received_at
 
 

@@ -220,6 +220,7 @@ version 1 and collide. Applied so far:
 | 014 | `d014_weather` *(Phase D4 — built)* | weather_snapshots (schema v14) |
 | 015 | `d015_sportsbook_matching` *(Phase D5B1 — built)* | adds `sportsbook_events.match_decision_id` + typed `orientation` (`direct`/`swapped`) with a link-integrity trigger (set-together, immutable-once-set) — schema v15; no price-history or Kalshi structures touched |
 | 016 | `d016_kalshi_matching` *(Phase D5B2 — built)* | adds `kalshi_events.match_decision_id`; `kalshi_markets.match_decision_id` + `yes_team_id` + `matched_rules_hash` + typed `market_semantic` (`game_winner`); link-integrity triggers (set-together, game/Yes-team/matched-hash immutable-once-set) — schema v16; no Kalshi price/book/trade or authenticated/account structures added |
+| 017 | `e017_provider_identity` *(Phase F1 — built)* | adds append-only `provider_team_identity_snapshots` + `provider_player_identity_snapshots`: the structured provider-WRITTEN names ingestion already received but had nowhere to put, with raw-response provenance, a shared-normalizer `normalized_name` (+ player `suffix`), and optional abbreviation/city/nickname/first/last/birth-date/position recorded ONLY when genuinely supplied. UNIQUE `(provider, entity id, observed_at, content_hash)` — one row per (observation time, content), so replay is idempotent AND the stored timestamp never depends on processing order (the a003 lesson). UPDATE/DELETE refused by trigger; league-existence trigger. This is what unblocked F1 canonical matching, which correctly returned 0% without it — schema v17 |
 
 The authoritative
 Phase D schema design is `PHASE_D_IMPLEMENTATION_PLAN.md` §2, and the earlier
@@ -1182,6 +1183,46 @@ workflow. The trigger permits an UPDATE only when every other column is
 unchanged.
 
 ---
+
+### 5.1 Provider identity observations (v17): dedupe observations, not states
+
+`provider_team_identity_snapshots` and `provider_player_identity_snapshots` are
+append-only in the same way, with UPDATE and DELETE refused by trigger. Their
+uniqueness key deserves its own note because getting it wrong is subtle:
+
+```sql
+CONSTRAINT ppi_content_unique
+    UNIQUE (provider, provider_player_id, observed_at, content_hash)
+```
+
+`content_hash` covers the semantic identity fields and **excludes**
+`observed_at`. The first draft of this table keyed uniqueness on
+`(provider, entity id, content_hash)` alone, reasoning that "the same name seen
+twice is one fact". That is wrong for exactly the reason migration `a003` gave
+for `game_status_history`: it deduplicates **states** rather than
+**observations**. The surviving row keeps whichever `observed_at` happened to be
+inserted first, so replaying the same corpus in a different order stores a
+different timestamp — and every later "latest identity as of T" answer changes
+with it. That was caught by a determinism test comparing two replay orders, where
+one order resolved the pilot's teams and the other did not.
+
+With `observed_at` in the key:
+
+* the final row set is a pure function of the input observations, in any order;
+* re-ingesting or replaying a response inserts nothing (time and content repeat);
+* a changed provider-written name appends;
+* an unchanged identity seen later by another endpoint family appends one honest
+  "still called this, at this later time" row instead of silently back- or
+  forward-dating the earlier one.
+
+Latest selection is `ORDER BY observed_at DESC, content_hash DESC`. The hash is a
+**total** tie-break, so an equal-timestamp contradiction resolves by a stable
+property of the data rather than by rowid; it is also surfaced as a
+`DQ-IDENTITY-002` issue rather than resolved silently.
+
+These tables hold no credential, authorization header or URL: provenance is a
+`raw_response_id` plus hashes, and `raw_responses` already stores only sanitized
+allow-listed response headers.
 
 ## 6. Layout
 

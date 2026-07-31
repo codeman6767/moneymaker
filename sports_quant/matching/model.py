@@ -48,6 +48,13 @@ SCORE_SCHEDULE_EXACT = 0.95
 SCORE_SCHEDULE_WINDOW = 0.88
 SCORE_SCHEDULE_SWAPPED = 0.85
 
+# F1 (e017): the designated official provider's stable player id, plus a
+# structured identity observation, bootstraps the canonical player. Scored 1.00
+# because identity is anchored by the official provider's own permanent id --
+# NOT by a fuzzy name guess, which is what the other name tiers score below 1.
+TIER_OFFICIAL_PROVIDER_BOOTSTRAP = "official_provider_bootstrap"
+SCORE_OFFICIAL_PROVIDER_BOOTSTRAP = 1.00
+
 TIER_OFFICIAL_KEY = "official_key_exact"
 TIER_SCHEDULE_EXACT = "schedule_key_exact"
 TIER_SCHEDULE_WINDOW = "schedule_key_window"

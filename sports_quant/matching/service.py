@@ -24,8 +24,13 @@ from typing import Any, Optional, Sequence
 from ..db.models import Game, Venue
 from ..db.repositories.data_quality import SqliteDataQualityRepository
 from ..db.repositories.games import SqliteGameRepository
+from ..db.repositories.identity import SqliteProviderIdentityRepository
 from ..db.repositories.leagues import SqliteLeagueRepository, SqliteSeasonRepository
-from ..db.repositories.matching import CandidateInput, SqliteMatchingRepository
+from ..db.repositories.matching import (
+    CandidateInput,
+    DecisionWrite,
+    SqliteMatchingRepository,
+)
 from ..db.repositories.official_games import SqliteScheduleRepository
 from ..db.repositories.references import LinkOutcome, SqliteProviderReferenceRepository
 from ..db.repositories.venues import SqliteVenueRepository
@@ -52,6 +57,13 @@ from .venues import VenueResolver
 #: Providers whose game key we treat as an official anchor, and their league.
 _PROVIDER_LEAGUE = {"mlb_statsapi": "MLB", "balldontlie": "NBA"}
 _OFFICIAL_PROVIDERS = frozenset(_PROVIDER_LEAGUE)
+#: The single designation of "who is official for this league?", derived from the
+#: map above so the two can never disagree. Only these providers may bootstrap a
+#: canonical player (F1, e017): a sportsbook, Kalshi, an offline import, a
+#: manually-supplied string or an unknown provider never can.
+OFFICIAL_PROVIDER_BY_LEAGUE: dict[str, str] = {
+    f"lg_{code.lower()}": provider for provider, code in _PROVIDER_LEAGUE.items()
+}
 _SPORT_PROVIDERS = {"mlb": "mlb_statsapi", "nba": "balldontlie"}
 
 _SCHEDULE_EXACT_WINDOW = timedelta(minutes=90)
@@ -85,6 +97,16 @@ class MatchCounters:
     canonical_games_created: int = 0
     canonical_entities_unchanged: int = 0
     already_linked: int = 0
+    #: F1 (e017): canonical players created by official-provider bootstrap. Kept
+    #: separate from ``accepted`` so "we linked to a player that already existed"
+    #: is never confused with "we created the canonical player".
+    canonical_players_created: int = 0
+    #: F1: how the unresolved audit log actually moved. ``decisions_evaluated``
+    #: counts evaluations; these three count WRITES, so "we re-ran and learned
+    #: nothing new" is visible instead of being hidden as log growth.
+    decisions_recorded: int = 0
+    decisions_replayed: int = 0
+    decisions_changed: int = 0
     dq_issues: int = 0
     blocking_issues: int = 0
 
@@ -155,6 +177,10 @@ class MatchGamesService:
         self._dq = SqliteDataQualityRepository(conn)
         self._team_resolver = TeamResolver(conn)
         self._venue_resolver = VenueResolver(conn)
+        # e017: the structured provider-written names ingestion recorded. This is
+        # what replaced "hand the numeric provider id to the alias matcher and
+        # watch it correctly refuse" (the F1 pilot's 0% result).
+        self._identities = SqliteProviderIdentityRepository(conn)
         self._current_provider: Optional[str] = None
         # Source provenance of the schedule observation currently being matched,
         # attached to every decision derived from it (team / venue / game).
@@ -208,8 +234,11 @@ class MatchGamesService:
             )
             return
 
-        home = self._resolve_team(provider, home_pid, league.league_id, season_year, result)
-        away = self._resolve_team(provider, away_pid, league.league_id, season_year, result)
+        observed_at = _opt(sched, "observed_at")
+        home = self._resolve_team(
+            provider, home_pid, league.league_id, season_year, result, as_of=observed_at)
+        away = self._resolve_team(
+            provider, away_pid, league.league_id, season_year, result, as_of=observed_at)
         if not (home.is_matched and away.is_matched):
             self._dq_issue(
                 result, severity="issue", rule_code="DQ-MATCH-010", entity_type="game",
@@ -298,11 +327,25 @@ class MatchGamesService:
         league_id: str,
         season_year: Any,
         result: MatchGamesResult,
+        *,
+        as_of: Optional[str] = None,
     ) -> Resolution:
+        """Resolve one provider team, supplying the structured provider name.
+
+        The name comes from the e017 identity observations, never from parsing raw
+        JSON here, and is bounded by ``as_of`` (the schedule observation's own
+        timestamp) so a name the provider only wrote later cannot retroactively
+        decide an earlier point-in-time match. With no identity recorded the
+        resolver still receives nothing and still returns the honest
+        no-candidate result -- the refusal path is unchanged, not weakened.
+        """
+
+        identity = self._identities.latest_team(provider, provider_team_id, as_of=as_of)
         res = self._team_resolver.resolve(
             provider=provider,
             provider_team_id=provider_team_id,
             league_id=league_id,
+            raw_name=identity.full_name if identity is not None else None,
             season_year=int(season_year) if season_year is not None else None,
         )
         decision_id = self._record_decision(
@@ -934,15 +977,31 @@ class MatchGamesService:
         else:
             reason = rejection_reason or "unresolved"
         if self._dry_run:
+            result.counters.decisions_recorded += 1
             return None
-        decision = self._match.record_decision(
-            entity_type=entity_type, source_provider=source_provider, source_ref=source_ref,
-            outcome=outcome, method=method, score=score, threshold=THRESHOLD,
-            matcher_version=self._version, candidates=candidates,
-            matched_entity_id=matched_entity_id, rejection_reason=reason,
-            needs_manual_review=needs_review, run_id=self._run_id,
-            raw_response_id=self._current_raw_response_id,
-        )
+        common = {
+            "entity_type": entity_type, "source_provider": source_provider,
+            "source_ref": source_ref, "outcome": outcome, "method": method,
+            "score": score, "threshold": THRESHOLD, "matcher_version": self._version,
+            "candidates": candidates, "matched_entity_id": matched_entity_id,
+            "rejection_reason": reason, "needs_manual_review": needs_review,
+            "run_id": self._run_id, "raw_response_id": self._current_raw_response_id,
+        }
+        if outcome == "accepted":
+            # Never deduplicated: an accepted decision justifies a canonical link.
+            decision = self._match.record_decision(**common)  # type: ignore[arg-type]
+            result.counters.decisions_recorded += 1
+            return decision.match_id
+        # Unresolved: skip a semantically identical replay so rerunning an
+        # unmatchable reference stops doubling the audit log with no new fact.
+        decision, write = self._match.record_unresolved_decision(
+            **common)  # type: ignore[arg-type]
+        if write is DecisionWrite.REPLAY:
+            result.counters.decisions_replayed += 1
+        elif write is DecisionWrite.CHANGED:
+            result.counters.decisions_changed += 1
+        else:
+            result.counters.decisions_recorded += 1
         return decision.match_id
 
     def _link_reference(

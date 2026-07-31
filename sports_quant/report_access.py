@@ -16,12 +16,16 @@ from typing import Callable as _Callable
 from typing import Optional
 
 from .db.engine import table_exists
+from .db.schema import CURRENT_SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS
 from .pit.asof import read_only_connection
 
 EXIT_OK = 0
 EXIT_THRESHOLD = 1
 EXIT_DATABASE_ERROR = 3
-EXPECTED_SCHEMA_VERSION = 16
+#: The version a fresh database reaches. Read commands accept any SUPPORTED
+#: version: e017 is additive, so a preserved v16 corpus stays readable rather
+#: than becoming unopenable the moment the current build moves to v17.
+EXPECTED_SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
 
 Printer = _Callable[[str], None]
 
@@ -115,9 +119,9 @@ def with_readonly_corpus(
                 out(f"[FAILED ] database at {path} is not migrated; "
                     "run 'python -m sports_quant db-init'")
                 return EXIT_DATABASE_ERROR
-            if version != EXPECTED_SCHEMA_VERSION:
-                out(f"[FAILED ] database at {path} is schema v{version}, expected "
-                    f"v{EXPECTED_SCHEMA_VERSION} (unsupported)")
+            if version not in SUPPORTED_SCHEMA_VERSIONS:
+                out(f"[FAILED ] database at {path} is schema v{version}; supported: "
+                    f"v{sorted(SUPPORTED_SCHEMA_VERSIONS)} (unsupported)")
                 return EXIT_DATABASE_ERROR
             return work(conn)
     except sqlite3.DatabaseError as exc:

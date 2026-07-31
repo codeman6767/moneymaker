@@ -9,6 +9,7 @@ D1 provides the storage, D5 the matchers that call it.
 
 from __future__ import annotations
 
+import enum
 import sqlite3
 from dataclasses import dataclass
 from typing import Optional, Protocol
@@ -29,6 +30,22 @@ class CandidateInput:
     candidate_entity_id: Optional[str] = None
     method: Optional[str] = None
     evidence: Optional[str] = None
+
+
+class DecisionWrite(str, enum.Enum):
+    """What :meth:`record_unresolved_decision` did.
+
+    Kept as three distinct outcomes because collapsing them would destroy the
+    information the F1 pilot needed: "we re-evaluated and got the same refusal"
+    is a very different fact from "we refused for a new reason".
+    """
+
+    #: No prior decision existed for this source reference; one was written.
+    NEW = "new"
+    #: Semantically identical to the latest prior decision; nothing written.
+    REPLAY = "replay"
+    #: A prior decision existed but this evaluation differs; a new one was written.
+    CHANGED = "changed"
 
 
 class MatchingRepositoryProtocol(Protocol):
@@ -125,6 +142,126 @@ class SqliteMatchingRepository(Repository):
         decision = self.get(match_id)
         assert decision is not None  # noqa: S101
         return decision
+
+    def record_unresolved_decision(
+        self,
+        *,
+        entity_type: str,
+        source_provider: str,
+        source_ref: str,
+        outcome: str,
+        method: str,
+        score: float,
+        threshold: float,
+        matcher_version: str,
+        candidates: list[CandidateInput],
+        matched_entity_id: Optional[str] = None,
+        rejection_reason: Optional[str] = None,
+        needs_manual_review: bool = False,
+        raw_response_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+    ) -> tuple[MatchDecision, DecisionWrite]:
+        """Record an UNRESOLVED decision, skipping a semantically identical replay.
+
+        The F1 matching pilot exposed the problem this solves: because an
+        unmatched reference stays unmatched, every rerun re-selected all 55 (MLB) /
+        38 (NBA) references and appended a byte-for-byte equivalent refusal,
+        doubling the audit log on each pass and telling the reader nothing new.
+
+        The rule is deliberately narrow:
+
+        * It applies only when ``outcome != 'accepted'``. An accepted decision is
+          the justification for a canonical link and is always written through
+          :meth:`record_decision`, never deduplicated.
+        * Only the LATEST prior decision for this source reference is compared, so
+          a genuine A -> B -> A sequence still records all three attempts.
+        * The comparison covers every semantic field AND the full ordered
+          candidate set AND ``raw_response_id``. A changed identity observation,
+          matcher version, alias set, candidate set, score, reason or outcome
+          therefore always appends. ``run_id`` is excluded: it is run bookkeeping,
+          and including it would defeat the rule entirely.
+        * Nothing is ever deleted or rewritten. The audit trail only ever grows,
+          just no longer with duplicates that carry no information.
+        """
+
+        if outcome == "accepted":
+            raise RepositoryError(
+                "record_unresolved_decision is for unresolved outcomes only; an accepted "
+                "decision justifies a canonical link and must never be deduplicated"
+            )
+        latest = self._latest_decision(entity_type, source_provider, source_ref)
+        if latest is not None and self._same_semantics(
+            latest,
+            outcome=outcome, method=method, score=score, threshold=threshold,
+            matcher_version=matcher_version, matched_entity_id=matched_entity_id,
+            rejection_reason=rejection_reason, needs_manual_review=needs_manual_review,
+            raw_response_id=raw_response_id, candidates=candidates,
+        ):
+            return latest, DecisionWrite.REPLAY
+        decision = self.record_decision(
+            entity_type=entity_type, source_provider=source_provider, source_ref=source_ref,
+            outcome=outcome, method=method, score=score, threshold=threshold,
+            matcher_version=matcher_version, candidates=candidates,
+            matched_entity_id=matched_entity_id, rejection_reason=rejection_reason,
+            needs_manual_review=needs_manual_review, raw_response_id=raw_response_id,
+            run_id=run_id,
+        )
+        return decision, (DecisionWrite.NEW if latest is None else DecisionWrite.CHANGED)
+
+    def _latest_decision(
+        self, entity_type: str, source_provider: str, source_ref: str
+    ) -> Optional[MatchDecision]:
+        """The newest decision for one source reference.
+
+        Ordered by ``decided_at`` then ``match_id``; ULIDs are lexicographically
+        time-sortable, so this is a total order even for same-millisecond siblings
+        rather than a rowid coin-flip.
+        """
+
+        row = self._fetch_one(
+            f"SELECT {self._DECISION_COLUMNS} FROM entity_match_decisions "
+            "WHERE entity_type = ? AND source_provider = ? AND source_ref = ? "
+            "ORDER BY decided_at DESC, match_id DESC LIMIT 1",
+            (entity_type, source_provider, source_ref),
+        )
+        return None if row is None else self._to_decision(row)
+
+    def _same_semantics(
+        self,
+        latest: MatchDecision,
+        *,
+        outcome: str,
+        method: str,
+        score: float,
+        threshold: float,
+        matcher_version: str,
+        matched_entity_id: Optional[str],
+        rejection_reason: Optional[str],
+        needs_manual_review: bool,
+        raw_response_id: Optional[str],
+        candidates: list[CandidateInput],
+    ) -> bool:
+        if (
+            latest.outcome != outcome
+            or latest.method != method
+            or latest.score != score
+            or latest.threshold != threshold
+            or latest.matcher_version != matcher_version
+            or latest.matched_entity_id != matched_entity_id
+            or latest.rejection_reason != rejection_reason
+            or bool(latest.needs_manual_review) != bool(needs_manual_review)
+            or latest.raw_response_id != raw_response_id
+        ):
+            return False
+        prior = [
+            (c.candidate_entity_id, c.score, c.tier, c.method, c.evidence, c.rank)
+            for c in self.candidates(latest.match_id)
+        ]
+        proposed = [
+            (c.candidate_entity_id, c.score, c.tier, c.method, c.evidence, rank)
+            for rank, c in enumerate(candidates)
+        ]
+        return prior == proposed
 
     def mark_reviewed(
         self, match_id: str, *, reviewed_by: str, needs_manual_review: bool = False

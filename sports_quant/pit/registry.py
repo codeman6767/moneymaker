@@ -201,6 +201,15 @@ _ENTRIES: tuple[TableEntry, ...] = (
     _forbidden("provider_team_references",
                "Current canonical team_id link is mutable current-state; use the decision "
                "timeline."),
+    _unsupported("provider_player_identity_snapshots",
+                 "Provider-written player name observations (e017): a matching/RESOLVER input, not "
+                 "a predictor. Append-only and as-of queryable, but a player's name carries no "
+                 "predictive signal and joining on it would smuggle canonical identity into "
+                 "features without going through cutoff-filtered match decisions. Matching code "
+                 "outside sports_quant.pit reads it directly, bounded by its own as_of."),
+    _unsupported("provider_team_identity_snapshots",
+                 "Provider-written team name observations (e017): a matching/RESOLVER input, not a "
+                 "predictor, for the same reason as the player table above."),
     _unsupported("raw_responses", "Immutable provider payloads; provenance, not a feature join."),
     _asof("roster_snapshots", "roster_id",
           "Roster observations, as-of; membership must additionally be constrained to the game's "

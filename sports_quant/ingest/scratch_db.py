@@ -18,7 +18,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-EXPECTED_SCHEMA_VERSION = 16
+from ..db.schema import CURRENT_SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS
+
+#: A fresh scratch database reaches this version; an existing one may be any
+#: SUPPORTED version, because e017 only adds tables.
+EXPECTED_SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
 
 #: Tables whose non-emptiness means the DB already holds ingested/derived corpus
 #: data (as opposed to the seeded teams/leagues/aliases a fresh db-init creates).
@@ -34,6 +38,9 @@ _CORPUS_TABLES: tuple[str, ...] = (
 
 class ScratchClass(str, Enum):
     NEW = "new_uninitialized"
+    #: An empty scratch corpus at any SUPPORTED schema version. The member name
+    #: and wire value are kept stable (checkpoints and reports carry the string);
+    #: the classification's ``schema_version`` field states the actual version.
     EMPTY_V16 = "empty_scratch_v16"
     AUTHORIZED_RESUMABLE = "authorized_resumable"
     UNSAFE = "unsafe_or_unrelated"
@@ -192,16 +199,16 @@ def classify_scratch_db(
         conn.close()
     nonempty = any(counts.get(t, 0) > 0 for t in _CORPUS_TABLES)
 
-    if version != EXPECTED_SCHEMA_VERSION:
+    if version not in SUPPORTED_SCHEMA_VERSIONS:
         return ScratchClassification(
             path=str(path), kind=ScratchClass.UNSAFE, schema_version=version,
             fingerprint=fp, row_counts=counts,
-            reason=f"schema version {version} != required {EXPECTED_SCHEMA_VERSION}")
+            reason=f"schema version {version} not in supported {sorted(SUPPORTED_SCHEMA_VERSIONS)}")
 
     if not nonempty:
         return ScratchClassification(
             path=str(path), kind=ScratchClass.EMPTY_V16, schema_version=version,
-            fingerprint=fp, row_counts=counts, reason="empty schema-v16 scratch database")
+            fingerprint=fp, row_counts=counts, reason=f"empty schema-v{version} scratch database")
 
     # Non-empty v16 DB: only acceptable when a resume authorizes THIS fingerprint.
     if resume and expected_fingerprint is not None and expected_fingerprint == fp:

@@ -901,16 +901,26 @@ Model column = recommended driver.
 > `match-players` (+ `MatchPlayersService`) loads unresolved
 > `provider_player_references`, resolves each through `PlayerResolver`, records one
 > decision + candidates, and links `player_id` only on acceptance (dry-run persists
-> nothing; a canonical player is never created from a name). The venue-aware
+> nothing). The venue-aware
 > local-date hierarchy now uses its **tier 3**: the canonical home team's ordinary
 > venue tz, derived from its prior non-neutral home games only when unambiguous
 > (never guessed, never replacing an actual/neutral venue; invalid tz refused, not
 > silent UTC). Exact provider-id links (team + player) are **league-scope
 > validated** — a wrong-league crosswalk is a blocking `DQ-MATCH-014`/`DQ-MATCH-015`
-> conflict, not a 1.00 match, and is never auto-repaired. **Schema limitation:**
-> provider player names are not stored structurally, so player resolution keys on
-> the provider id via provider-scoped `player_aliases` + roster-derived team;
-> league scope is provable from `players.league_id`.
+> conflict, not a 1.00 match, and is never auto-repaired. **Superseded by Phase F1 (schema v17).**
+> This note used to read: *provider player names are not stored structurally, so
+> player resolution keys on the provider id via provider-scoped `player_aliases` +
+> roster-derived team.* That limitation is exactly why the F1 matching pilot
+> correctly returned 0% -- the matcher was handed the numeric provider id as the
+> string to match. Migration `e017_provider_identity` removes it: ingestion records
+> append-only `provider_team_identity_snapshots` /
+> `provider_player_identity_snapshots`, team matching receives the structured
+> provider-written name (as-of bounded), and the league's designated official
+> provider may bootstrap a canonical player from its stable id plus a structured
+> identity (`official_provider_bootstrap`, 1.00). Unknown and nonofficial provider
+> names still never create anything. Roster-derived team evidence is unchanged and
+> league scope is still provable from `players.league_id`. See
+> `ENTITY_MATCHING.md` section 3.4.
 >
 > **D5A independent review hardening.** Player alias lookup is **provider-scoped**
 > (only the resolving provider's own aliases and provider-neutral `''` aliases are

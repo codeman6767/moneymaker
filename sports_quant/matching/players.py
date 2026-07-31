@@ -12,7 +12,14 @@ the father); an absent suffix is **permissive** only when exactly one candidate
 survives. Two same-name players stay ambiguous unless structured evidence (team
 or an actually-supplied birth date) resolves them. Birth dates are never
 invented; a season filter uses the players' career window when the season is
-known. A canonical player is never created from a provider name.
+known.
+
+A canonical player is never created from an UNKNOWN or NONOFFICIAL provider name.
+Since F1 (e017) there is one narrow exception, and it lives in
+``players_service`` rather than here: the league's DESIGNATED OFFICIAL provider's
+stable player id, plus a structured identity observation, may bootstrap the
+canonical player under the explicit ``official_provider_bootstrap`` method. This
+resolver itself still never creates anything.
 
 This mirrors -- and shares the normalizer with -- ``intel.player_matching``; the
 older module keeps its ``MATCHED / AMBIGUOUS / UNMATCHED`` contract but now

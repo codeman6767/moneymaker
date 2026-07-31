@@ -565,3 +565,59 @@ class ProviderCapabilityRecord:
     http_status: Optional[int] = None
     error_kind: Optional[str] = None
     verified_at: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ProviderTeamIdentity:
+    """One append-only observation of what a provider called a team (e017).
+
+    ``full_name`` is the provider-written string verbatim; ``normalized_name`` is
+    :func:`normalize_name` output so alias lookup uses one implementation.
+    ``abbreviation`` / ``city`` / ``nickname`` are ``None`` when the provider did
+    not supply them -- never inferred from the id or from the full name.
+    """
+
+    identity_id: str
+    provider: str
+    provider_team_id: str
+    league_id: str
+    full_name: str
+    normalized_name: str
+    observed_at: str
+    raw_response_id: str
+    raw_response_hash: str
+    content_hash: str
+    created_at: str
+    abbreviation: Optional[str] = None
+    city: Optional[str] = None
+    nickname: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ProviderPlayerIdentity:
+    """One append-only observation of what a provider called a player (e017).
+
+    ``suffix`` is the normalized generational suffix (``''`` when absent), split
+    off by the shared normalizer rather than left inside the name. Every other
+    optional field is present only because the provider genuinely supplied it:
+    MLB StatsAPI sends ``fullName`` and no parts, so ``first_name`` /
+    ``last_name`` stay ``None`` for MLB instead of being guessed by splitting.
+    """
+
+    identity_id: str
+    provider: str
+    provider_player_id: str
+    league_id: str
+    full_name: str
+    normalized_name: str
+    suffix: str
+    observed_at: str
+    raw_response_id: str
+    raw_response_hash: str
+    content_hash: str
+    created_at: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    birth_date: Optional[str] = None
+    position: Optional[str] = None
+    provider_team_id: Optional[str] = None

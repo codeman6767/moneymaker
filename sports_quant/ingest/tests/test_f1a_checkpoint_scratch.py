@@ -8,6 +8,7 @@ import pytest
 
 from sports_quant.db.engine import Database
 from sports_quant.db.init import initialize_database
+from sports_quant.db.schema import CURRENT_SCHEMA_VERSION
 from sports_quant.ingest.checkpoint import (
     Checkpoint,
     CheckpointError,
@@ -48,7 +49,7 @@ def test_missing_path_is_new(tmp_path: Path) -> None:
 def test_empty_v16_is_scratch(tmp_path: Path) -> None:
     c = classify_scratch_db(_empty_v16_db(tmp_path))
     assert c.kind is ScratchClass.EMPTY_V16
-    assert c.schema_version == 16
+    assert c.schema_version == CURRENT_SCHEMA_VERSION
     require_usable(c, resume=False)  # usable for a fresh run
 
 

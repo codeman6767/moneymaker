@@ -89,6 +89,7 @@ from ..providers.capabilities import (
     ProviderErrorKind,
     balldontlie_declaration,
 )
+from .identity_record import IdentityRecorder
 from .runner import sanitize_error
 
 _TOOL_VERSION = "sports_quant 0.1.0"
@@ -161,6 +162,15 @@ class NbaIngestResult:
     lineup_players_observed: int = 0
     injury_observations: int = 0
     provider_references_created: int = 0
+    #: e017: append-only structured provider identity observations. "unchanged"
+    #: counts an identity a later endpoint family observed identically -- expected
+    #: and idempotent (box scores, stats, advanced and lineups all name the same
+    #: players), not a fault.
+    team_identities_inserted: int = 0
+    team_identities_unchanged: int = 0
+    player_identities_inserted: int = 0
+    player_identities_unchanged: int = 0
+    identities_rejected: int = 0
     #: Total normalized observations (nonzero in dry-run and persist alike).
     observations_normalized: int = 0
     #: Rows actually written to the database (always 0 in dry-run).
@@ -1203,6 +1213,7 @@ async def ingest_nba(
 
     if dry_run:
         _count_plan(fetched, include_set, result)
+        _dry_run_identities(fetched, result)
         result.status = "partially_failed" if result.has_active_failure else "succeeded"
         return result
 
@@ -1412,14 +1423,57 @@ def _store_raw(
 def _store_all_raws(
     conn: Any, raw_repo: SqliteRawResponseRepository, run_id: str,
     responses: list[ProviderResponse], result: NbaIngestResult,
+    identities: Optional[IdentityRecorder] = None,
 ) -> dict[int, tuple[str, str, str]]:
+    """Store each raw response once and, on the same pass, land the structured
+    provider identities it carries (e017). One seam covers every endpoint family,
+    so games / box scores / stats / advanced / plays / lineups all contribute
+    identities consistently rather than each parser doing its own thing."""
+
     raws: dict[int, tuple[str, str, str]] = {}
     for response in responses:
         if id(response) in raws:
             continue
-        raws[id(response)] = _store_raw(conn, raw_repo, run_id, response)
+        raw_id, raw_hash, observed = _store_raw(conn, raw_repo, run_id, response)
+        raws[id(response)] = (raw_id, raw_hash, observed)
         result.raw_responses_received += 1
+        if identities is not None:
+            with transaction(conn):
+                identities.observe_response(
+                    provider=PROVIDER_BALLDONTLIE, endpoint=response.exchange.endpoint,
+                    body=response.exchange.body, raw_response_id=raw_id,
+                    raw_response_hash=raw_hash, observed_at=observed,
+                )
     return raws
+
+
+def _apply_identity_counts(result: NbaIngestResult, identities: IdentityRecorder) -> None:
+    """Copy the recorder's counters onto the reported result."""
+
+    counts = identities.counts
+    result.team_identities_inserted += counts.team_identities_inserted
+    result.team_identities_unchanged += counts.team_identities_unchanged
+    result.player_identities_inserted += counts.player_identities_inserted
+    result.player_identities_unchanged += counts.player_identities_unchanged
+    result.identities_rejected += counts.identities_rejected
+
+
+def _dry_run_identities(fetched: _Fetched, result: NbaIngestResult) -> None:
+    """Count would-be identity observations with the same extraction + hashing
+    the persisted path uses, so dry-run and persisted counters agree."""
+
+    recorder = IdentityRecorder(dry_run=True)
+    seen: set[int] = set()
+    for response in fetched.responses:
+        if id(response) in seen:
+            continue
+        seen.add(id(response))
+        recorder.observe_response(
+            provider=PROVIDER_BALLDONTLIE, endpoint=response.exchange.endpoint,
+            body=response.exchange.body, raw_response_id="dry-run",
+            raw_response_hash="dry-run", observed_at=to_iso(response.exchange.received_at),
+        )
+    _apply_identity_counts(result, recorder)
 
 
 def _ref(ctx: _Ctx, kind: str, provider_entity_id: str, source: ProviderResponse) -> str:
@@ -1483,7 +1537,12 @@ async def _persist(
             )
         result.run_id = run.run_id
         raw_repo = SqliteRawResponseRepository(conn)
-        raws = _store_all_raws(conn, raw_repo, run.run_id, fetched.responses, result)
+        identities = IdentityRecorder(conn=conn)
+        raws = _store_all_raws(
+            conn, raw_repo, run.run_id, fetched.responses, result, identities)
+        with transaction(conn):
+            identities.report_equal_time_conflicts(PROVIDER_BALLDONTLIE)
+        _apply_identity_counts(result, identities)
 
         ctx = _Ctx(
             conn=conn, run_id=run.run_id, refs=SqliteProviderReferenceRepository(conn),

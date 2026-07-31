@@ -231,6 +231,183 @@ retroactively reinterpret old decisions.
 
 ---
 
+## 3.4 Structured provider identity and official bootstrap (F1, schema v17)
+
+> **Status.** Implemented; migration `e017_provider_identity`. Proven by an
+> offline replay of the preserved F1B rich corpora (§3.4.4). F1 itself is
+> **not** complete — see `PHASE_F_RESEARCH_PLAN.md`.
+
+### 3.4.1 Why the F1 one-game matching pilot returned 0%
+
+The F1 canonical entity-matching pilot resolved **nothing**: 0 of 1 game, 0 of 2
+teams and 0 of 52 (MLB) / 35 (NBA) players, in both leagues. **The refusal was
+correct.** The matcher evaluated every reference, scored each 0.00 against the
+0.85 threshold with full provenance, flagged all of them for manual review,
+raised `DQ-MATCH-010`, and invented nothing. The cause was a missing bootstrap,
+not a matcher defect:
+
+* `game_schedule_snapshots` stores `home_provider_team_id` /
+  `away_provider_team_id` and **no team name**; `provider_team_references` stores
+  ids and provenance and no name either. `TeamResolver.resolve` falls back to the
+  provider id as the match string when given no `raw_name`, so it was asked to
+  find an alias equal to `'141'` — and none of the 311 seeded aliases is a
+  provider-id alias.
+* `provider_player_references` likewise stores ids only, and `players` /
+  `player_aliases` start empty, so every provider player had an empty candidate
+  pool.
+
+The provider-written names existed all along — inside `raw_responses` bodies.
+
+### 3.4.2 What v17 adds
+
+Two append-only tables, written by ingestion and read by matching:
+
+`provider_team_identity_snapshots` — provider, provider team id, league,
+provider-written `full_name`, `normalized_name`, plus `abbreviation` / `city` /
+`nickname` **only when genuinely supplied**, `observed_at`, raw-response id +
+hash, `content_hash`, `created_at`.
+
+`provider_player_identity_snapshots` — the same shape plus `suffix` (split by the
+shared normalizer), and `first_name` / `last_name` / `birth_date` / `position` /
+`provider_team_id` **only when genuinely supplied**. MLB StatsAPI sends
+`fullName` and no parts, so MLB rows carry no first/last name: splitting a full
+name is a guess, and a guess in a typed column is indistinguishable from a fact.
+
+Both refuse UPDATE and DELETE by trigger. Uniqueness is
+`(provider, entity id, observed_at, content_hash)` — one row per *(observation
+time, content)*. Keying on the content hash alone would deduplicate **states**
+rather than **observations**, and the surviving row would keep whichever
+`observed_at` was written first, making every later "latest identity as of T"
+answer depend on raw-response processing order. Migration `a003` already fixed
+exactly this mistake in `game_status_history`. Latest selection is
+`ORDER BY observed_at DESC, content_hash DESC`; the hash is a **total** tie-break,
+and an equal-time contradiction is additionally reported as `DQ-IDENTITY-002`
+rather than resolved silently.
+
+Extraction is centralized in `sports_quant/ingest/identity_extract.py`, one entry
+point for every endpoint family (MLB: schedule, box score, line score, roster;
+NBA: games, single game, box scores, stats, advanced stats, plays, lineups).
+Dispatch is fail-closed: an unrecognised family yields nothing rather than a
+best-effort scrape. A name is **never** inferred from an id; a nameless identity
+object is reported (`DQ-IDENTITY-001`, severity `note`), never filled in. Plays
+carry bare integer participants, so they contribute team identities only.
+
+Identity observations are a matching **resolver input**, not a feature: both
+tables are registered `unsupported` in the point-in-time registry.
+
+### 3.4.3 Resolution changes
+
+**Teams.** `MatchGamesService` now passes the latest structured team name to
+`TeamResolver`, bounded by the schedule observation's own `observed_at`, so a name
+the provider wrote *later* cannot retroactively decide an earlier point-in-time
+match. Teams resolve against the **existing seeded aliases** (tier 4,
+`normalized_alias_unscoped`, 0.90) and are **never invented**. With no identity
+recorded the resolver still receives nothing and still returns the same honest
+`no_candidate` — the refusal path is unchanged, not weakened. Ambiguity is still
+refused. After the first accepted link, replay resolves through
+`exact_provider_id`.
+
+**Players.** The rule was "a canonical player is never created from a provider
+name". It is now:
+
+* an **unknown or nonofficial** provider name never creates a canonical player —
+  not a sportsbook, not Kalshi, not an offline import, not a manually supplied
+  string, not an unrecognised provider; and
+* the league's **designated official** provider's stable player id, together with
+  a structured identity observation carrying a nonempty provider-written name,
+  **may** bootstrap the canonical player.
+
+| Tier | Method | Score | Notes |
+| --- | --- | --- | --- |
+| — | `official_provider_bootstrap` | 1.00 | Designated official provider's stable id + structured identity. Last resort only. |
+
+The designation is `matching.service.OFFICIAL_PROVIDER_BY_LEAGUE`
+(`lg_mlb` → `mlb_statsapi`, `lg_nba` → `balldontlie`), derived from one map so it
+cannot drift. The score is 1.00 because identity is anchored by that permanent
+official id, **not** by a fuzzy name guess.
+
+Order and guards, each a real refusal:
+
+1. an existing exact provider link wins (`exact_provider_id`);
+2. otherwise the structured name is tried through the ordinary alias/name tiers;
+3. exactly one existing candidate — link to it, no creation;
+4. two or more candidates — `AMBIGUOUS`; bootstrap is **not** reached;
+5. a name landing on a canonical player that **another id from the same
+   provider already owns** is a same-name collision, not a discovery, so it is
+   refused and two distinct official ids stay two identities;
+6. only with nothing resolved, and only for the designated official provider with
+   a stable id, a nonempty name, a known league and an unlinked reference, is one
+   canonical player created — together with one provider-scoped alias from the
+   exact provider-written string, the provider link, and one accepted decision,
+   **all four in a single transaction that rolls back as a unit**.
+
+Never fabricated: first/last name, birth date, position, city, abbreviation,
+nickname, `debut_date`, `final_game_date`. A career window is not observable from
+one identity snapshot.
+
+### 3.4.4 Offline replay result (preserved F1B corpora, one game per league)
+
+Replayed from preserved raw responses only, zero provider requests, on fresh
+temporary v16 to v17 copies. Originals untouched.
+
+| | MLB | NBA |
+| --- | --- | --- |
+| team identity observations | 34 | 42 |
+| player identity observations | 180 | 365 |
+| identities rejected | 0 | 0 |
+| provider teams linked | 2 / 2 | 2 / 2 |
+| canonical teams created | 0 (60 seeded, untouched) | 0 |
+| canonical game | **1 created** | **0 — blocked, see below** |
+| provider players linked | 52 / 52 | 35 / 35 |
+| canonical players bootstrapped | 52 | 35 |
+| provider aliases created | 52 | 35 |
+| invented career windows | 0 | 0 |
+
+Teams resolved via `normalized_alias_unscoped` (0.90) and re-affirm via
+`exact_provider_id` (1.00) on replay. All players resolved via
+`official_provider_bootstrap` (1.00), exactly once each.
+
+**Separate confirmed blocker — NBA game canonicalization.** The NBA game refuses
+with `no scheduled start to match a game on`, and this is *not* an identity gap:
+both teams resolved and all 35 players bootstrapped. The root cause is a distinct
+pre-existing ingestion defect — `nba_ingestor._normalize_game` sets
+`scheduled_start` only when the game's status is *scheduled*, so a **finished**
+game stores `NULL` even though the BALLDONTLIE payload carries
+`datetime: "2026-01-06T00:00:00.000Z"`. Fixing it means changing NBA schedule
+normalization and re-deriving the affected snapshots, which is outside the
+identity bootstrap and needs its own task. It is recorded here rather than worked
+around; no matching rule was weakened to make the game pass.
+
+### 3.4.5 Decision-history idempotency
+
+The pilot also showed that rerunning unresolved references appended a
+byte-equivalent refusal every time, doubling the audit log with no new
+information. `record_unresolved_decision` now skips a semantically identical
+replay. The rule is deliberately narrow:
+
+* it applies only when `outcome != 'accepted'` — an accepted decision justifies a
+  canonical link and is never deduplicated;
+* only the **latest** prior decision for that source reference is compared, so a
+  genuine A to B to A sequence still records all three attempts;
+* the comparison covers every semantic field, the full ordered candidate set and
+  `raw_response_id`, so a changed identity observation, matcher version, alias
+  set, candidate set, score, reason or outcome always appends;
+* `run_id` is excluded — it is run bookkeeping, and including it would defeat the
+  rule entirely;
+* nothing is ever deleted or rewritten.
+
+Three counters make the outcome visible rather than implicit:
+`decisions_recorded`, `decisions_replayed`, `decisions_changed`.
+
+**Known residual, not hidden.** Re-running `match-games` over an already-matched
+game still appends two *accepted* `exact_provider_id` team re-affirmations per
+run (measured: +2 on the second pass and +2 on the third, in both leagues). They
+create no canonical entity, no link and no duplicate alias. Deduplicating
+accepted decisions touches link provenance and is deliberately left out of this
+change; the counters above report the growth rather than concealing it.
+
+---
+
 ## 4. Game matching
 
 > **Phase D status (D5A — built, mocked/offline).** Official-game matching is
