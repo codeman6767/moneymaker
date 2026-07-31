@@ -21,12 +21,13 @@ from ..db.schema import SUPPORTED_SCHEMA_VERSIONS
 from .planning import RequestPlan
 
 MANIFEST_FORMAT_VERSION = "f1a-manifest-v1"
-#: The schema version a generated manifest DECLARES. Deliberately still 16: the
-#: four committed F1B manifests were authored at v16, their bytes are hashed into
-#: the preserved pilot checkpoints, and e017 is purely additive -- no F1B pilot
-#: reads an e017 table. Validation below accepts any SUPPORTED version, so a v16
-#: manifest runs correctly against a v17 scratch database. A future manifest that
-#: genuinely requires a v17 table must bump this and regenerate its manifests.
+#: The schema version a generated manifest declares WHEN THE CALLER DOES NOT SAY.
+#: Deliberately still 16 so the four committed F1B manifests -- authored at v16 and
+#: hashed into the preserved pilot checkpoints -- regenerate byte-identically.
+#: A pilot that genuinely depends on a newer table passes its own value: the F1
+#: season-month manifests declare 17, because their ingestion records e017 provider
+#: identity observations. The declared version is part of the manifest body, so
+#: changing it changes the manifest hash, which is the point.
 EXPECTED_SCHEMA_VERSION = 16
 _SUPPORTED_PLAN_VERSIONS = frozenset({"f1a-plan-v1"})
 _SUPPORTED_COST_POLICY_VERSIONS = frozenset({"mlb-cost-v1", "bdl-cost-v1"})
@@ -180,9 +181,19 @@ def build_manifest(
     checkpoint_path: str = "",
     request_cap: Optional[int] = None,
     credit_cap: Optional[int] = None,
+    expected_schema_version: int = EXPECTED_SCHEMA_VERSION,
 ) -> PilotManifest:
     """Build a canonical manifest from a plan. Caps default to the plan's
-    conservative required caps when not explicitly supplied."""
+    conservative required caps when not explicitly supplied.
+
+    ``expected_schema_version`` must be a SUPPORTED version; it is refused here
+    rather than at execution time so an unrunnable manifest cannot be committed.
+    """
+
+    if expected_schema_version not in SUPPORTED_SCHEMA_VERSIONS:
+        raise ManifestError(
+            f"expected_schema_version {expected_schema_version} not in supported "
+            f"{sorted(SUPPORTED_SCHEMA_VERSIONS)}")
 
     req_cap = request_cap if request_cap is not None else plan.required_request_cap()
     cr_cap = credit_cap if credit_cap is not None else plan.required_credit_cap()
@@ -221,7 +232,7 @@ def build_manifest(
         provider_rate_limit_per_min=provider_rate,
         scratch_db=scratch_db,
         checkpoint_path=checkpoint_path,
-        expected_schema_version=EXPECTED_SCHEMA_VERSION,
+        expected_schema_version=expected_schema_version,
         executable=plan.executable(),
         unresolved_bounds=plan.unresolved_bounds(),
         plan_body=plan_body(plan),

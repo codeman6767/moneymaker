@@ -55,9 +55,10 @@ verification is complete.**
 **F1B capability verification is complete. Phase F1 as a whole is NOT complete**, and
 nothing below is authorized by this milestone:
 
-- Canonical entity matching **mechanics** are now proven offline on one game per
-  league (schema v17, see the note below); broader coverage/depth measurement has
-  **not** run.
+- Canonical entity matching **mechanics** are proven offline on one game per
+  league (schema v17). The bounded season-month coverage/depth pilots are now
+  **prepared** (`pilots/f1/`) but have **not** been executed; broader
+  coverage/depth measurement has **not** run.
 - **F2 backfill is not authorized.**
 - Historical corpus acceptance gates have **not** passed.
 - Historical sportsbook-odds licensing is **unresolved**.
@@ -132,6 +133,50 @@ nothing below is authorized by this milestone:
 > and does **not** approach the 99% acceptance gate in §3.2. The bounded
 > season-month coverage/depth pilot is still required, and **F2 remains
 > unauthorized.**
+
+> **F1 season-month coverage/depth pilot manifests PREPARED, NOT EXECUTED
+> (2026-07-31).** One-game mechanics are complete for both leagues: capability
+> verification (skeleton + rich), the schema v17 official identity bootstrap, and
+> the NBA scheduled-start normalization repair. The two bounded season-month
+> pilots this plan requires are now specified offline, under
+> `pilots/f1/` with a full request-cap derivation, coverage-report contract and
+> execution protocol in `pilots/f1/README.md`.
+>
+> | | MLB | NBA |
+> | --- | --- | --- |
+> | manifest | `pilots/f1/mlb_coverage_2026_06.manifest.json` | `pilots/f1/nba_coverage_2026_03.manifest.json` |
+> | range | `2026-06-01..2026-06-30` | `2026-03-01..2026-03-31` |
+> | families | `schedule`, `results`, `box`, `inning`, `rosters` | `games`, `box`, `quarters`, `stats`, `advanced`, `plays`, `lineups` |
+> | bounds | `max_games=600`, `max_retries=1` | `max_games=400`, `max_pages=8`, `max_records=1000`, `max_retries=1`, rate 60/min (tier max 600) |
+> | semantic maximum | 3001 | 10808 |
+> | hard request cap | **6002** | **21616** |
+> | scratch / checkpoint | `data\f1_mlb_2026_06_scratch.db` / `data\f1_mlb_2026_06.ckpt` | `data\f1_nba_2026_03_scratch.db` / `data\f1_nba_2026_03.ckpt` |
+> | declared schema | v17 | v17 |
+>
+> Both months are complete past regular-season calendar months with no
+> postseason admixture: MLB June sits mid-season and avoids the July All-Star
+> break; NBA March is entirely pre-play-in. Each cap is the planner's own
+> `semantic_requests_max() x (1 + max_retries)` -- not a chosen number -- and
+> every transport attempt, retry and pagination page reserves against it.
+>
+> A month-scale differential test drives the REAL `run_pilot_cli` orchestration
+> and the REAL provider clients over `httpx.MockTransport` and asserts that the
+> executor's attempt count can never exceed the manifest cap, that shared
+> requests (MLB linescore for `results`+`inning`, NBA box for `box`+`quarters`)
+> are not duplicated, that `max_games` / `max_pages` / `max_records` truncation is
+> always reported rather than silent, that identity observations are recorded, and
+> that a completed resume makes zero further requests.
+>
+> **Live season-month execution has NOT occurred.** Committing these manifests
+> does not authorize it. Each live run requires explicit user authorization, the
+> process-scoped `MONEYMAKER_F1B_AUTHORIZED=1` boundary, and a **fresh provider
+> audit immediately beforehand**. The protocol is strictly sequential: audit ->
+> MLB month -> independent MLB review -> NBA month -> independent NBA review ->
+> combined F1 coverage/depth review -> only then decide whether F1 passes.
+>
+> **F1 remains incomplete and F2 remains unauthorized.** The 99% identity
+> acceptance gates in section 3.2 have **not** passed and have not been
+> approached: one season-month is a provider-depth pilot, not corpus acceptance.
 
 **Next planned phase boundary (not started):** the remaining F1 work — canonical
 entity matching over the pilot corpora plus coverage/depth measurement — which must be

@@ -417,6 +417,17 @@ than one calendar day apart cannot be a timezone rollover (every venue offset li
 within UTC−12..+14), so both values are preserved as supplied and
 `DQ-NBA-SCHEDULE-002` is raised rather than either being corrected.
 
+### 3.4.5a F1 status: what one game does and does not establish
+
+The one-game replays in 3.4.4 establish matching **mechanics** for both leagues:
+teams resolve to seeded canonical teams, official games canonicalize, and players
+bootstrap from the designated official provider. They establish **no** coverage
+figure. Identity coverage across an ordinary month -- and therefore any judgement
+about the 99% acceptance gate -- requires the bounded season-month pilots, whose
+manifests, request-cap derivation, coverage-report contract and execution protocol
+live in `pilots/f1/README.md`. Those pilots are **prepared and not executed**; F1
+is **incomplete** and F2 is **unauthorized**.
+
 ### 3.4.5 Decision-history idempotency
 
 The pilot also showed that rerunning unresolved references appended a

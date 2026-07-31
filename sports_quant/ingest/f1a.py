@@ -37,6 +37,9 @@ from ..request_control import (
 from .checkpoint import CheckpointError, load_checkpoint
 from .cost_policies import build_balldontlie_policy, build_mlb_policy
 from .manifest import (
+    EXPECTED_SCHEMA_VERSION as MANIFEST_SCHEMA_VERSION,
+)
+from .manifest import (
     ManifestError,
     PilotManifest,
     build_manifest,
@@ -186,12 +189,14 @@ def _build_plan_and_manifest(
     checkpoint: str = "",
     request_cap: Optional[int] = None,
     credit_cap: Optional[int] = None,
+    expected_schema_version: int = MANIFEST_SCHEMA_VERSION,
 ) -> tuple[Any, PilotManifest]:
     families, stage = _families_and_stage(league, includes)
     plan = build_plan(league=league, from_date=from_date, to_date=to_date,
                       families=families, stage=stage, bounds=bounds)
     manifest = build_manifest(plan, scratch_db=scratch_db, checkpoint_path=checkpoint,
-                              request_cap=request_cap, credit_cap=credit_cap)
+                              request_cap=request_cap, credit_cap=credit_cap,
+                              expected_schema_version=expected_schema_version)
     return plan, manifest
 
 
@@ -215,6 +220,7 @@ def emit_plan(
     checkpoint: str = "",
     as_json: bool = False,
     manifest_out: Optional[Path] = None,
+    expected_schema_version: int = MANIFEST_SCHEMA_VERSION,
     out: Callable[[str], None] = print,
 ) -> int:
     """``--plan``: build + emit a plan/manifest with ZERO network or database work."""
@@ -224,7 +230,7 @@ def emit_plan(
     plan, manifest = _build_plan_and_manifest(
         league=league, from_date=from_date, to_date=to_date, includes=includes, bounds=bounds,
         scratch_db=scratch_db, checkpoint=checkpoint, request_cap=request_cap,
-        credit_cap=credit_cap)
+        credit_cap=credit_cap, expected_schema_version=expected_schema_version)
     payload = manifest.as_dict()
     payload["network_occurred"] = False
     payload["database_touched"] = False
