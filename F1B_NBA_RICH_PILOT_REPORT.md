@@ -308,3 +308,26 @@ factory** and an **exploding authentication path**:
   `urllib`, the project's read-only client builder, BALLDONTLIE/MLB client
   construction, authentication/settings loading, and retry sleeps — each proven to fail
   closed by an adversarial probe.
+
+---
+
+## Later finding: scheduled start (schema v17, 2026-07-31)
+
+This corpus is preserved evidence and was **not** modified. Two defects were found
+downstream of it, both offline and both outside this pilot's own execution:
+
+1. the lineup payload-shape defect (repaired at `9386b54`; this corpus predates it
+   and still shows zero lineup rows, deliberately);
+2. an NBA **scheduled-start normalization** defect —
+   `_normalize_game` derived `scheduled_start` from `status` and only for a
+   *scheduled* game, so this corpus' finished game stored `NULL` even though the
+   provider supplied `datetime: "2026-01-06T00:00:00.000Z"`. That is what later
+   blocked official game matching for game `18447316` with `no scheduled start to
+   match a game on`.
+
+The normalizer has since been repaired. Replaying **these exact preserved raw
+responses** into a clean schema-v17 corpus produces scheduled start
+`2026-01-06T00:00:00.000000Z` and resolves the game (teams 2/2, one canonical game,
+players 35/35). The preserved database itself still carries the original
+`NULL`-start snapshot, correctly, as the historical record of what the pre-repair
+code persisted.

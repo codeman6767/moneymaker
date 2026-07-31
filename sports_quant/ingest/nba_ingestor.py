@@ -41,6 +41,27 @@ Design (mirrors the D2 MLB ingestor and honours the permanent CLAUDE.md rules):
   when supplied, else the deterministic ``(official date, provider home-team id,
   provider visitor-team id)`` key; a no-match or ambiguous match is rejected
   honestly (a ``DQ-NBA-BOX-001`` note), never guessed or cross-attached.
+* ``scheduled_start`` comes from the provider's ``datetime`` field and is
+  **independent of game status**. Status and scheduled start are separate facts:
+  the earlier implementation derived the start from ``status`` and only when the
+  status happened to be ``scheduled``, so a **final** game silently lost the
+  tipoff instant the provider had actually supplied -- which then blocked official
+  game matching with ``no scheduled start to match a game on``. Precedence is now
+  (1) a valid ``datetime``, (2) a valid full ISO datetime in the legacy ``status``
+  field only when ``datetime`` is absent, (3) otherwise ``None``. A value must be
+  a complete ISO-8601 instant with an explicit offset or ``Z``; a naive value is
+  refused rather than assumed UTC (a wrong guess would shift the venue-local
+  date), and a tipoff is never built from a calendar date, display text such as
+  ``"7:00 pm ET"``, receipt time, or play/box-score/result/betting data. A
+  ``datetime`` that IS supplied but unusable raises a sanitized
+  ``DQ-NBA-SCHEDULE-001`` issue (provider game id + generic reason only) and
+  leaves the field NULL; a genuinely absent one is silent. ``game_date_local``
+  stays anchored on the provider's ``date`` field and is never replaced by the
+  UTC calendar date of ``datetime`` -- an evening tipoff is the next UTC day, and
+  substituting it would move every such game. A ``date``/``datetime`` pair more
+  than one calendar day apart cannot be a timezone rollover, so both values are
+  preserved as supplied and ``DQ-NBA-SCHEDULE-002`` is raised rather than either
+  being guessed at.
 * Missing values stay missing (never coerced to zero); a missing conditional
   group is recorded as a capability state, never fabricated and never an active
   failure. Confirmed pregame starters stay unavailable; lineups are best-effort
@@ -56,6 +77,9 @@ import hashlib
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import date as _date
+from datetime import datetime
+from enum import Enum
 from typing import Any, Awaitable, Callable, Optional
 
 from streaming.event_envelope import canonical_json
@@ -77,7 +101,7 @@ from ..db.repositories.observations import ObservationOutcome
 from ..db.repositories.official_games import SqliteScheduleRepository
 from ..db.repositories.raw_responses import SqliteRawResponseRepository, response_content_hash
 from ..db.repositories.references import SqliteProviderReferenceRepository
-from ..db.schema import to_iso
+from ..db.schema import from_iso, to_iso
 from ..providers.balldontlie import BalldontlieClient, next_cursor
 from ..providers.base_provider import ProviderError, ProviderResponse
 from ..providers.capabilities import (
@@ -308,11 +332,155 @@ class _QuartersParse:
 _BOX_OT_KEY_RE = re.compile(r"^(?:home|visitor)_ot(\d+)$")
 
 
+# --------------------------------------------------------------------------- #
+# Scheduled start (provider `datetime`)
+# --------------------------------------------------------------------------- #
+#: Any real venue offset lies within UTC-12..+14, so a game's UTC calendar date is
+#: at most ONE day from its venue-local date. Two or more days apart is a provider
+#: contradiction between `date` and `datetime`, not an ordinary rollover.
+_MAX_LOCAL_UTC_DATE_DRIFT_DAYS = 1
+
+
+class ScheduledStartKind(str, Enum):
+    """Why a provider scheduled start is or is not usable.
+
+    Four outcomes, kept distinct so the caller can report honestly instead of
+    collapsing "the provider sent nothing" together with "the provider sent
+    something we could not trust".
+    """
+
+    #: The field is absent, or an empty string. Not an error.
+    ABSENT = "absent"
+    #: A complete, timezone-aware instant, normalized to canonical UTC.
+    VALID = "valid"
+    #: Present but not parseable as ISO-8601, or not a string at all.
+    MALFORMED = "malformed"
+    #: Parses, but carries no offset -- the instant is ambiguous. Never assumed UTC.
+    TIMEZONE_NAIVE = "timezone_naive"
+
+
+@dataclass(frozen=True)
+class ScheduledStart:
+    """The outcome of resolving one game's scheduled start."""
+
+    kind: ScheduledStartKind
+    #: Canonical UTC timestamp, set only when ``kind is VALID``.
+    value: Optional[str] = None
+    #: Which provider field supplied it: ``"datetime"`` or ``"legacy_status"``.
+    source: Optional[str] = None
+
+    @property
+    def is_valid(self) -> bool:
+        return self.kind is ScheduledStartKind.VALID
+
+    @property
+    def is_unusable(self) -> bool:
+        """A timestamp was genuinely supplied but cannot be trusted.
+
+        This -- not a plain absence -- is what deserves a data-quality finding.
+        """
+
+        return self.kind in (ScheduledStartKind.MALFORMED,
+                             ScheduledStartKind.TIMEZONE_NAIVE)
+
+
+_SCHEDULED_START_ABSENT = ScheduledStart(ScheduledStartKind.ABSENT)
+
+
+def _parse_provider_scheduled_start(raw: Any) -> ScheduledStart:
+    """Parse one provider timestamp into a canonical UTC instant, or say why not.
+
+    Pure, deterministic, locale-independent, network-free, and it never raises on
+    provider input. A value must be a nonempty string that parses as a complete
+    ISO-8601 datetime **with an explicit offset or a ``Z`` marker**. A naive value
+    is refused rather than assumed to be UTC: guessing a timezone is how an
+    hours-wide error enters a corpus silently, and it would shift the game's
+    venue-local date. A date-only value (``"2026-01-06"``) is naive by
+    construction and so is refused too -- a tipoff is never built from a calendar
+    date.
+    """
+
+    if raw is None:
+        return _SCHEDULED_START_ABSENT
+    if isinstance(raw, bool) or not isinstance(raw, str):
+        return ScheduledStart(ScheduledStartKind.MALFORMED)
+    text = raw.strip()
+    if not text:
+        return _SCHEDULED_START_ABSENT
+    # `fromisoformat` accepts a trailing Z only from 3.11, so normalize it
+    # explicitly rather than letting behaviour depend on the interpreter version.
+    candidate = f"{text[:-1]}+00:00" if text[-1] in ("Z", "z") else text
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except (ValueError, TypeError):
+        return ScheduledStart(ScheduledStartKind.MALFORMED)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return ScheduledStart(ScheduledStartKind.TIMEZONE_NAIVE)
+    try:
+        return ScheduledStart(ScheduledStartKind.VALID, to_iso(parsed))
+    except (ValueError, OverflowError, OSError):
+        return ScheduledStart(ScheduledStartKind.MALFORMED)
+
+
+def _resolve_scheduled_start(game: dict[str, Any]) -> ScheduledStart:
+    """Resolve a game's scheduled start under the documented precedence.
+
+    1. a valid provider ``datetime`` -- the authoritative source, used for EVERY
+       status. Status and scheduled start are separate facts: a game being final
+       does not un-schedule it, and erasing the start is exactly what blocked
+       official NBA game matching.
+    2. a valid full ISO datetime in the legacy ``status`` field, only when
+       ``datetime`` is **absent**. Historically BALLDONTLIE put the tipoff instant
+       in ``status`` for a game that had not started.
+    3. otherwise none -- with a data-quality finding when ``datetime`` was
+       supplied but unusable, and silently when it was simply absent.
+
+    A present-but-unusable ``datetime`` deliberately does NOT fall through to the
+    legacy field: a broken authoritative value must surface, not be papered over.
+    Display-only status text (``"Final"``, ``"7:00 pm ET"``) is never a timestamp.
+    """
+
+    primary = _parse_provider_scheduled_start(game.get("datetime"))
+    if primary.kind is not ScheduledStartKind.ABSENT:
+        return ScheduledStart(primary.kind, primary.value, "datetime")
+    legacy = _parse_provider_scheduled_start(game.get("status"))
+    if legacy.is_valid:
+        return ScheduledStart(legacy.kind, legacy.value, "legacy_status")
+    return _SCHEDULED_START_ABSENT
+
+
+def _local_date_conflicts_with_start(
+    date_local: Optional[str], scheduled_start: Optional[str]
+) -> bool:
+    """Whether the provider's ``date`` cannot belong to its own ``datetime``.
+
+    ``True`` only for a genuine contradiction. A one-day gap is the ordinary case
+    (a 7pm ET tipoff is 00:00 UTC the next day) and is never flagged. Neither
+    value is ever "corrected" -- both are preserved exactly as supplied.
+    """
+
+    if not date_local or not scheduled_start:
+        return False
+    try:
+        local = _date.fromisoformat(date_local)
+        utc_day = from_iso(scheduled_start).date()
+    except (ValueError, TypeError):
+        return False
+    return abs((utc_day - local).days) > _MAX_LOCAL_UTC_DATE_DRIFT_DAYS
+
+
 @dataclass(frozen=True)
 class _NormGame:
     game_id: str
     date_local: Optional[str]
     scheduled_start: Optional[str]
+    #: Which provider field supplied ``scheduled_start`` (``None`` when absent).
+    scheduled_start_source: Optional[str]
+    #: A sanitized, generic reason when a supplied timestamp was unusable. Carries
+    #: no raw value, no body and no credential -- only what a reviewer needs.
+    scheduled_start_issue: Optional[str]
+    #: The provider's own ``date`` and ``datetime`` contradict each other.
+    date_conflict: bool
     season: Optional[int]
     status_raw: Optional[str]
     mapped_status: str
@@ -350,12 +518,26 @@ def _normalize_game(game: dict[str, Any]) -> tuple[Optional[_NormGame], Optional
     date_local = None
     raw_date = _opt_str(game.get("date"))
     if raw_date is not None:
+        # `game_date_local` stays anchored on the provider's documented `date`
+        # field. It is deliberately NOT recomputed from the UTC `datetime`: the UTC
+        # calendar date of an evening game is the following day, and substituting
+        # it would silently move every such game's local date.
         date_local = raw_date.split("T", 1)[0]
+    start = _resolve_scheduled_start(game)
+    issue: Optional[str] = None
+    if start.kind is ScheduledStartKind.MALFORMED:
+        issue = "provider datetime is not a parseable ISO-8601 timestamp"
+    elif start.kind is ScheduledStartKind.TIMEZONE_NAIVE:
+        issue = "provider datetime carries no timezone offset; refusing to assume UTC"
     return (
         _NormGame(
             game_id=game_id,
             date_local=date_local,
-            scheduled_start=status_raw if (mapped == "scheduled") else None,
+            # Independent of `mapped_status`: a final game keeps its scheduled start.
+            scheduled_start=start.value,
+            scheduled_start_source=start.source,
+            scheduled_start_issue=issue,
+            date_conflict=_local_date_conflicts_with_start(date_local, start.value),
             season=_opt_int(game.get("season")),
             status_raw=status_raw,
             mapped_status=mapped,
@@ -1313,6 +1495,11 @@ def _count_plan(fetched: _Fetched, include_set: set[str], result: NbaIngestResul
         observe("schedule_observations")
         if norm.status_unknown:
             result.data_quality_issues += 1
+        # Same two findings the persisted path raises, so the counters agree.
+        if norm.scheduled_start_issue is not None:
+            result.data_quality_issues += 1
+        if norm.date_conflict:
+            result.data_quality_issues += 1
         if "results" in include_set:
             observe("result_observations")
         box_game: Optional[dict[str, Any]] = None
@@ -1599,6 +1786,30 @@ def _persist_one_game(
         ctx.dq.record(
             severity="issue", rule_code="DQ-NBA-STATUS-001", entity_type="game",
             description=f"unknown NBA status for game {norm.game_id}: {norm.status_raw!r}",
+            provider=PROVIDER_BALLDONTLIE, run_id=ctx.run_id, raw_response_id=raw_id,
+            entity_id=norm.game_id,
+        )
+        res.data_quality_issues += 1
+
+    if norm.scheduled_start_issue is not None:
+        # A timestamp WAS supplied and could not be trusted. Reported rather than
+        # guessed at, and deliberately sanitized: the provider game id plus a
+        # generic reason, never the raw value, the body or any header.
+        ctx.dq.record(
+            severity="issue", rule_code="DQ-NBA-SCHEDULE-001", entity_type="game",
+            description=(f"NBA game {norm.game_id}: {norm.scheduled_start_issue}; "
+                         "scheduled_start left NULL"),
+            provider=PROVIDER_BALLDONTLIE, run_id=ctx.run_id, raw_response_id=raw_id,
+            entity_id=norm.game_id,
+        )
+        res.data_quality_issues += 1
+
+    if norm.date_conflict:
+        # Both provider values are preserved as supplied; neither is "corrected".
+        ctx.dq.record(
+            severity="issue", rule_code="DQ-NBA-SCHEDULE-002", entity_type="game",
+            description=(f"NBA game {norm.game_id}: provider date and datetime are more "
+                         "than one calendar day apart; both preserved as supplied"),
             provider=PROVIDER_BALLDONTLIE, run_id=ctx.run_id, raw_response_id=raw_id,
             entity_id=norm.game_id,
         )

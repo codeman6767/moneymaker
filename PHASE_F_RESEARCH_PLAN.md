@@ -92,7 +92,7 @@ nothing below is authorized by this milestone:
 > | player identity observations | 180 | 365 |
 > | identities rejected | 0 | 0 |
 > | provider teams linked | 2 / 2 | 2 / 2 |
-> | canonical game | 1 created | 0 (separate blocker) |
+> | canonical game | 1 created | 1 created (after the scheduled-start repair) |
 > | provider players linked | 52 / 52 | 35 / 35 |
 > | canonical players bootstrapped | 52 | 35 |
 >
@@ -102,13 +102,30 @@ nothing below is authorized by this milestone:
 > full pass inserted zero identity rows and created zero duplicate player, alias,
 > link, game or DQ row.
 >
-> **Separate confirmed blocker — NBA game canonicalization.** The NBA game refuses
-> with `no scheduled start to match a game on`. This is not an identity gap (both
-> teams resolved; all 35 players bootstrapped). Root cause:
-> `nba_ingestor._normalize_game` sets `scheduled_start` only for a *scheduled*
-> game, so a finished game stores `NULL` despite the payload carrying `datetime`.
-> Fixing it requires changing NBA schedule normalization and re-deriving the
-> affected snapshots — a separate task. No matching rule was weakened.
+> **NBA scheduled-start blocker — REPAIRED (2026-07-31).** The identity bootstrap
+> was completed in schema v17; NBA matching then exposed a *separate* normalization
+> defect: `nba_ingestor._normalize_game` set `scheduled_start` only for a
+> *scheduled* game, so a finished game stored `NULL` despite the payload carrying
+> `datetime`. BALLDONTLIE `datetime` is now the scheduled-start source
+> **independent of game status**, with a documented precedence, strict
+> timezone-aware validation, and sanitized DQ reporting for a supplied-but-unusable
+> value. The game matcher's requirement for a scheduled start was **not** weakened.
+>
+> Replaying the exact preserved NBA responses into a clean schema-v17 corpus now
+> resolves the one-game NBA official game: scheduled start
+> `2026-01-06T00:00:00.000000Z`, teams 2/2, **1 canonical game created**
+> (`official_key_exact`, 1.00), provider game reference linked, orientation home
+> `tm_nba_det` / away `tm_nba_nyk`, season `sn_nba_2025_regular`, `game_date_local`
+> `2026-01-05`, players 35/35. MLB is unaffected: game `822788` still resolves,
+> `scheduled_start` unchanged at `2026-07-20T23:07:00Z`, all 52 player references
+> still link. All original pilot databases, checkpoints, prior matching copies and
+> reports remain byte-identical.
+>
+> **This still does not make F1 complete.** One game per league establishes
+> matching *mechanics* only. It establishes **no** month coverage, **no** season
+> coverage, and the 99% identity acceptance gate in §3.2 has **not** been
+> approached, let alone passed. The bounded season-month coverage/depth pilot
+> remains required and **F2 remains unauthorized.**
 >
 > **This does NOT make F1 complete.** One game per league establishes matching
 > *mechanics* only. It establishes **no** month coverage, **no** season coverage,

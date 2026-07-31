@@ -1224,6 +1224,44 @@ These tables hold no credential, authorization header or URL: provenance is a
 `raw_response_id` plus hashes, and `raw_responses` already stores only sanitized
 allow-listed response headers.
 
+### 5.2 Scheduled start is not derived from status (NBA)
+
+`game_schedule_snapshots.scheduled_start` records the provider's own scheduled
+tipoff instant. For BALLDONTLIE that is the `datetime` field, read **independently
+of `status`**.
+
+The earlier NBA normalizer wrote `scheduled_start = status if status == scheduled
+else None`, conflating two separate facts. The consequence was silent and
+one-directional: a completed game — the normal case for any historical corpus —
+stored `NULL` even though the payload carried the tipoff, and official game
+matching then correctly refused the game (`no scheduled start to match a game on`).
+The corpus looked well-formed; the field was simply empty.
+
+The contract is now:
+
+* a valid `datetime` wins for every status;
+* a valid full ISO datetime in legacy `status` is used only when `datetime` is
+  absent;
+* nothing else becomes a timestamp — not display text, not a bare date, not
+  receipt time, not anything inferred from results or prices;
+* a value must carry an explicit offset or `Z`. A naive value is refused, not
+  assumed UTC: guessing an offset can move the venue-local date by a day.
+
+`game_date_local` stays the provider's `date` field. The UTC calendar date of an
+evening tipoff is the following day, so substituting it would shift every such
+game; a gap of more than one day is instead reported as a provider contradiction
+(`DQ-NBA-SCHEDULE-002`) with both values preserved.
+
+Schedule observations remain append-only and transition-aware. A constant
+`datetime` across a scheduled → in-progress → final progression is one content
+value observed several times; a genuine reschedule is a new observation with its
+own provenance; and an invalid later `datetime` appends an honest NULL-start
+observation without touching the earlier valid one. Note that transition-aware
+append legitimately makes *history depth* depend on arrival order — an
+out-of-order earlier observation with no temporal predecessor is retained by
+design — while the content, the latest-as-of answer and every downstream match
+decision stay identical.
+
 ## 6. Layout
 
 Built in Phase A (✅), planned for later phases (◻):

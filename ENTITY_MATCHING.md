@@ -357,7 +357,7 @@ temporary v16 to v17 copies. Originals untouched.
 | identities rejected | 0 | 0 |
 | provider teams linked | 2 / 2 | 2 / 2 |
 | canonical teams created | 0 (60 seeded, untouched) | 0 |
-| canonical game | **1 created** | **0 — blocked, see below** |
+| canonical game | **1 created** | **1 created** (after the §3.4.6 repair; 0 at bootstrap time) |
 | provider players linked | 52 / 52 | 35 / 35 |
 | canonical players bootstrapped | 52 | 35 |
 | provider aliases created | 52 | 35 |
@@ -367,16 +367,55 @@ Teams resolved via `normalized_alias_unscoped` (0.90) and re-affirm via
 `exact_provider_id` (1.00) on replay. All players resolved via
 `official_provider_bootstrap` (1.00), exactly once each.
 
-**Separate confirmed blocker — NBA game canonicalization.** The NBA game refuses
-with `no scheduled start to match a game on`, and this is *not* an identity gap:
-both teams resolved and all 35 players bootstrapped. The root cause is a distinct
-pre-existing ingestion defect — `nba_ingestor._normalize_game` sets
-`scheduled_start` only when the game's status is *scheduled*, so a **finished**
-game stores `NULL` even though the BALLDONTLIE payload carries
-`datetime: "2026-01-06T00:00:00.000Z"`. Fixing it means changing NBA schedule
-normalization and re-deriving the affected snapshots, which is outside the
-identity bootstrap and needs its own task. It is recorded here rather than worked
-around; no matching rule was weakened to make the game pass.
+**Separate blocker — NBA game canonicalization — now REPAIRED.** At the time of
+the identity bootstrap the NBA game refused with `no scheduled start to match a
+game on`. That was never an identity gap (both teams resolved and all 35 players
+bootstrapped); the cause was a distinct pre-existing ingestion defect —
+`nba_ingestor._normalize_game` set `scheduled_start` only when the game's status
+was *scheduled*, so a **finished** game stored `NULL` even though the
+BALLDONTLIE payload carried `datetime: "2026-01-06T00:00:00.000Z"`.
+
+That normalization boundary has since been repaired (§3.4.6). The game matcher's
+requirement for a scheduled start was **not** weakened. Replaying the preserved
+NBA responses into a clean schema-v17 corpus now yields, for the pilot game:
+
+| | NBA |
+| --- | --- |
+| schedule scheduled_start | `2026-01-06T00:00:00.000000Z` |
+| provider teams linked | 2 / 2 |
+| canonical game | **1 created**, `official_key_exact` 1.00 accepted |
+| provider game link | linked |
+| orientation | home `tm_nba_det` (provider 9), away `tm_nba_nyk` (provider 20) |
+| season | `sn_nba_2025_regular` |
+| `game_date_local` | `2026-01-05` (provider date, unchanged) |
+| provider players linked | 35 / 35 |
+
+### 3.4.6 The scheduled-start contract (NBA)
+
+`scheduled_start` is derived from the provider's `datetime` field and is
+**independent of `mapped_status`**. Status and scheduled start are separate
+facts; a final status does not un-schedule a game. Precedence:
+
+1. a valid provider `datetime` — authoritative for every status (scheduled,
+   in-progress, final, delayed, postponed, suspended);
+2. a valid full ISO datetime in the legacy `status` field, **only** when
+   `datetime` is absent;
+3. otherwise `None`.
+
+A value must be a nonempty string parsing as a complete ISO-8601 instant with an
+explicit offset or `Z`, normalized to the repository's canonical UTC form. Refused
+outright: a timezone-naive value (never assumed UTC — a wrong guess shifts the
+venue-local date), a bare calendar date, display text such as `"7:00 pm ET"`,
+receipt time, and anything inferred from play, box-score, result or betting data.
+A present-but-unusable `datetime` does **not** fall through to the legacy field —
+a broken authoritative value must surface, not be papered over — and raises a
+sanitized `DQ-NBA-SCHEDULE-001` carrying only the provider game id and a generic
+reason. A genuinely absent value is silent, not a finding.
+
+`game_date_local` remains the provider's `date`. A `date`/`datetime` pair more
+than one calendar day apart cannot be a timezone rollover (every venue offset lies
+within UTC−12..+14), so both values are preserved as supplied and
+`DQ-NBA-SCHEDULE-002` is raised rather than either being corrected.
 
 ### 3.4.5 Decision-history idempotency
 
