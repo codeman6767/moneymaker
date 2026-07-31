@@ -78,7 +78,7 @@ jobs:
           names = zipfile.ZipFile(whl).namelist()
           migs = sorted(n.split("/")[-1] for n in names if "/db/migrations/" in n and n.endswith(".sql"))
           assert "sports_quant/matching/sportsbook.py" in names, "matching package missing"
-          assert len(migs) == 16 and migs[0] == "a001_core_entities.sql" and migs[-1] == "d016_kalshi_matching.sql", migs
+          assert len(migs) == 17 and migs[0] == "a001_core_entities.sql" and migs[-1] == "e017_provider_identity.sql", migs
           assert not any("/tests/" in n for n in names), "tests packaged"
           assert not any(n.lower().endswith((".env", ".db")) for n in names), "secret/db packaged"
           print("wheel OK:", len(migs), "migrations, matching package present")
@@ -106,11 +106,11 @@ jobs:
               assert "site-packages" in f and not f.startswith(repo), f"{m.__name__} not from wheel: {f}"
           from sports_quant.db.engine import discover_migrations
           migs = discover_migrations()
-          assert len(migs) == 16 and migs[-1].name == "d016_kalshi_matching", (len(migs), migs[-1].name)
+          assert len(migs) == 17 and migs[-1].name == "e017_provider_identity", (len(migs), migs[-1].name)
           print("imports + migrations resolve from the installed wheel")
           PY
           "$RUNNER_TEMP/smokeenv/bin/sports-quant" --help >/dev/null
           "$PY" -m sports_quant db-init --db "$RUNNER_TEMP/smoke.db" | tee /tmp/init1.txt
           "$PY" -m sports_quant db-init --db "$RUNNER_TEMP/smoke.db" | tee /tmp/init2.txt
-          grep -q "Schema version: 16" /tmp/init1.txt
+          grep -q "Schema version: 17" /tmp/init1.txt
           grep -q "nothing was changed" /tmp/init2.txt
