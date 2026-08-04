@@ -1,4 +1,4 @@
-"""F1A pilot runner: execute a plan unit-by-unit under the budget gate.
+﻿"""F1A pilot runner: execute a plan unit-by-unit under the budget gate.
 
 The runner is provider-agnostic. It consumes a :class:`PilotExecutor` that
 performs the per-unit fetch + persist and *yields one :class:`UnitDone` only
@@ -28,9 +28,11 @@ from typing import Any, Callable, Iterator, Optional, Protocol
 
 from ..request_control import BudgetExhausted, RequestGate
 from ..usage_provenance import (
+    PROCESS_ID_KEY,
     assert_no_new_transport,
     combine_usage,
     current_process_entry,
+    new_process_id,
     validate_usage_accounting,
 )
 from .checkpoint import (
@@ -69,6 +71,13 @@ class PilotExecutor(Protocol):
     prove nothing remains, the runner turns a completed resume into a true no-op
     (see :func:`run_pilot`). An executor that cannot answer offline must simply
     not define it.
+
+    An implementation MAY also provide ``in_flight_identity()`` returning the
+    identity of the unit it is working on right now (``None`` between units). The
+    runner records it in ``incomplete_identities`` when a unit raises, so the
+    checkpoint keeps identity-level evidence of which unit was left unfinished and
+    a later completion of it is recognisable as a recovery. It is read, never
+    inferred: an executor that does not track it simply omits the method.
     """
 
     def iter_units(self, *, gate: RequestGate, completed: set[str]) -> Iterator[UnitDone]:
@@ -102,6 +111,12 @@ class PilotResult:
     #: True when the history was adopted from a v1 checkpoint, so the per-process
     #: split of the prior evidence is unknowable (the evidence itself is intact).
     legacy_provenance: bool = False
+    #: Units an earlier process left unresolved and a later one completed.
+    recovered_identities: tuple[str, ...] = ()
+    #: Units still failed / blocked / incomplete after this command.
+    unresolved_identities: tuple[str, ...] = ()
+    #: Units completed without ever having been unresolved.
+    initially_completed: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -121,6 +136,13 @@ class PilotResult:
             "checkpoint_mutated": self.checkpoint_mutated,
             "process_count": self.process_count,
             "legacy_provenance": self.legacy_provenance,
+            # Unit-level provenance: a consumer must be able to tell a unit that
+            # completed first time from one recovered after an earlier failure.
+            "recovered_identities": list(self.recovered_identities),
+            "unresolved_identities": list(self.unresolved_identities),
+            "initially_completed": self.initially_completed,
+            "recovered_count": len(self.recovered_identities),
+            "unresolved_count": len(self.unresolved_identities),
             "checkpoint_state": self.checkpoint_state,
             # Current-process facts, NOT logical-run facts.
             "network_occurred": self.network_occurred,
@@ -170,6 +192,7 @@ def run_pilot(
     checkpoint_path = Path(checkpoint_path)
     completed: set[str] = set()
     prior_history: list[dict[str, Any]] = []
+    my_process_id = new_process_id()
     if resume:
         ck = load_checkpoint(checkpoint_path)
         verify_resume(
@@ -200,13 +223,28 @@ def run_pilot(
     def _record_usage() -> None:
         """Refresh this process's history entry and the logical-run totals.
 
-        The current process owns exactly one entry -- the last -- which is
-        REPLACED on every checkpoint write rather than appended, so the many
-        writes of one process contribute their evidence once.
+        The current process owns exactly one entry, identified by its own
+        per-invocation ``process_id``, which is REPLACED on every checkpoint write
+        rather than appended, so the many writes of one process contribute their
+        evidence once. The identifier is a fresh random token, never the PID: PIDs
+        are reused by the OS, so a PID could not distinguish two invocations.
         """
 
-        ck.process_usage = [*prior_history, current_process_entry(gate.usage.as_dict())]
+        entry = {PROCESS_ID_KEY: my_process_id,
+                 **current_process_entry(gate.usage.as_dict())}
+        ck.process_usage = [*prior_history, entry]
         ck.usage = combine_usage(ck.process_usage)
+
+    def _write(path: Path) -> None:
+        """Write the checkpoint after proving no other process has appended to it.
+
+        The prior history was read once, at resume. If another process has written
+        since, blindly writing ``prior + mine`` would drop that process's entry, so
+        the divergence fails closed instead.
+        """
+
+        _assert_sole_writer(path, prior_history, my_process_id)
+        write_checkpoint(path, ck)
 
     gate.usage.league = manifest.league
     gate.usage.manifest_hash = manifest.manifest_hash()
@@ -256,7 +294,7 @@ def run_pilot(
             _record_usage()
             ck.state = "in_progress"
             ck.scratch_fingerprint = fp()  # current DB fingerprint at this boundary
-            write_checkpoint(checkpoint_path, ck)  # atomic, after the boundary
+            _write(checkpoint_path)  # atomic, after the boundary
         ck.state = "completed"
         gate.usage.checkpoint_state = "resumed_completed" if resume else "completed"
     except BudgetExhausted as exc:
@@ -275,6 +313,15 @@ def run_pilot(
         failure = f"{type(exc).__name__}: {exc}"
         ck.state = "failed"
         gate.usage.checkpoint_state = "failed"
+        # Record WHICH unit was in flight, when the executor can say so. Without
+        # this the checkpoint kept no identity-level record of the failure at all:
+        # `incomplete_identities` stayed empty, so nothing could report a unit as
+        # still unresolved and no later completion could ever be recognised as a
+        # recovery. The identity is read from the executor, never inferred.
+        in_flight = _in_flight_identity(executor)
+        if in_flight is not None and in_flight not in completed:
+            ck.incomplete_identities = sorted(
+                set(ck.incomplete_identities) | {in_flight})
         gate.usage.families_completed = tuple(sorted(families_done))
         gate.usage.database_mutated = db_mutated
         # A failed process's own evidence is recorded and merged with every
@@ -282,7 +329,7 @@ def run_pilot(
         # that this process failed after doing real work.
         _record_usage()
         ck.scratch_fingerprint = fp()
-        write_checkpoint(checkpoint_path, ck)
+        _write(checkpoint_path)
         result = PilotResult(
             success=False, truncated=False, completed=newly_completed,
             skipped=gate.usage.skipped_on_resume, exhaustion=None,
@@ -294,7 +341,13 @@ def run_pilot(
             performed_new_work=newly_completed > 0 or gate.usage.transport_starts > 0,
             checkpoint_mutated=True,
             process_count=len(ck.process_usage),
-            legacy_provenance=ck.legacy_migrated)
+            legacy_provenance=ck.legacy_migrated,
+            recovered_identities=tuple(sorted(set(ck.recovered_identities))),
+            unresolved_identities=tuple(sorted(
+                set(ck.failed_identities) | set(ck.blocked_identities)
+                | set(ck.incomplete_identities))),
+            initially_completed=len(set(ck.completed_identities)
+                                    - set(ck.recovered_identities)))
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise  # never swallow an interrupt after recording the resumable state
         return result
@@ -322,7 +375,54 @@ def run_pilot(
         checkpoint_mutated=True,
         process_count=len(ck.process_usage),
         legacy_provenance=ck.legacy_migrated,
-    )
+        recovered_identities=tuple(sorted(set(ck.recovered_identities))),
+        unresolved_identities=tuple(sorted(
+            set(ck.failed_identities) | set(ck.blocked_identities)
+            | set(ck.incomplete_identities))),
+        initially_completed=len(set(ck.completed_identities)
+                                - set(ck.recovered_identities)),    )
+
+
+def _in_flight_identity(executor: PilotExecutor) -> Optional[str]:
+    """The unit the executor was working on, if it tracks that; never inferred."""
+
+    probe = getattr(executor, "in_flight_identity", None)
+    if probe is None:
+        return None
+    try:
+        value = probe()
+    except Exception:  # noqa: BLE001 - reporting must never mask the real failure
+        return None
+    return str(value) if value else None
+
+
+def _assert_sole_writer(
+    path: Path, prior_history: list[dict[str, Any]], my_process_id: str
+) -> None:
+    """Refuse to write when another process has appended to this checkpoint.
+
+    The on-disk history must be exactly the prior history this process read, plus
+    at most this process's own entry. Anything else means a second writer ran
+    concurrently, and overwriting would silently discard its evidence.
+    """
+
+    if not path.is_file():
+        return
+    try:
+        disk = load_checkpoint(path)
+    except CheckpointError:
+        return  # an unreadable/foreign file is handled by the caller's own checks
+    disk_ids = [e.get(PROCESS_ID_KEY) for e in disk.process_usage]
+    prior_ids = [e.get(PROCESS_ID_KEY) for e in prior_history]
+    if disk_ids[:len(prior_ids)] != prior_ids:
+        raise CheckpointError(
+            "refusing to write: this checkpoint's earlier process history changed "
+            "after it was read (another process wrote concurrently)")
+    extra = disk_ids[len(prior_ids):]
+    if extra and extra != [my_process_id]:
+        raise CheckpointError(
+            f"refusing to write: {len(extra)} process entr(y/ies) were appended by "
+            "another process after this one started")
 
 
 def _remaining_identities(
@@ -383,4 +483,9 @@ def _no_work_result(
         checkpoint_mutated=False,
         process_count=len(ck.process_usage),
         legacy_provenance=ck.legacy_migrated,
-    )
+        recovered_identities=tuple(sorted(set(ck.recovered_identities))),
+        unresolved_identities=tuple(sorted(
+            set(ck.failed_identities) | set(ck.blocked_identities)
+            | set(ck.incomplete_identities))),
+        initially_completed=len(set(ck.completed_identities)
+                                - set(ck.recovered_identities)),    )

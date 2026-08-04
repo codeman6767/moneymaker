@@ -145,8 +145,22 @@ nothing below is authorized by this milestone:
 > incorrect historical completion decision was deliberately **not** retroactively
 > repaired, and the two missing June roster responses remain explicitly missing.
 >
-> **This repair has not itself been independently reviewed, so NBA remains
-> unauthorized** until it is reviewed or its validation boundary is accepted.
+> **Checkpoint provenance repair — INDEPENDENTLY REVIEWED AND ACCEPTED
+> (2026-08-04).** The review reproduced the original evidence loss against the
+> parent implementation extracted verbatim from `a281085`, proved a completed
+> zero-work resume is a repeatable byte-identical no-op against copies of the real
+> June artifacts (all twelve logical totals preserved), and validated the accounting
+> model field by field. It found and repaired **seven** defects in the repair itself:
+> no type/range validation of untrusted checkpoint values, legacy v1 accounting never
+> validated, only additive totals checked against history, unchecked unit-set
+> contradictions, no per-invocation process identifier, unreported recovered
+> identities, and — most consequentially — `incomplete_identities` never being written
+> on a unit failure, which had left the whole recovery mechanism inert in production.
+> See `CHECKPOINT_RESUME_PROVENANCE_REVIEW.md`.
+>
+> **NBA remains unauthorized.** The next boundary is a fresh bounded BALLDONTLIE
+> provider audit immediately before any NBA month execution, with the NBA manifest
+> re-verified against its recorded hash. Nothing in this review authorizes it.
 >
 > **This still does not make F1 complete.** One game per league establishes
 > matching *mechanics* only. It establishes **no** month coverage, **no** season

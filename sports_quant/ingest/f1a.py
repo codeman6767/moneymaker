@@ -315,6 +315,10 @@ class _IngestorExecutor:
         self._max_records = max_records
         self._max_games = max_games
         self._resume_game_ids = resume_game_ids
+        #: Identity of the unit currently being fetched/persisted, or None between
+        #: units. The runner reads it when a unit raises, so the checkpoint can
+        #: record WHICH unit was left incomplete instead of losing that fact.
+        self._in_flight: Optional[str] = None
 
     @property
     def _provider(self) -> str:
@@ -441,8 +445,10 @@ class _IngestorExecutor:
         if skel_id in completed:
             game_ids = tuple(self._resume_game_ids)  # resume: reuse the frozen set
         else:
+            self._in_flight = skel_id
             result = self._run_ingest(gate, game_id=None, includes=())  # skeleton only
             game_ids = tuple(getattr(result, "ordered_game_ids", ()) or ())
+            self._in_flight = None
             yield UnitDone(identity=skel_id, family="skeleton",
                            database_mutated=bool(getattr(result, "raw_responses_received", 0)),
                            stage_game_ids=game_ids)
@@ -453,9 +459,16 @@ class _IngestorExecutor:
             unit_id = self._game_identity(gid)
             if unit_id in completed:
                 continue  # already durable -> zero transport
+            self._in_flight = unit_id
             result = self._run_ingest(gate, game_id=gid, includes=rich)
+            self._in_flight = None
             yield UnitDone(identity=unit_id, family="game",
                            database_mutated=bool(getattr(result, "raw_responses_received", 0)))
+
+    def in_flight_identity(self) -> Optional[str]:
+        """The unit being fetched/persisted right now, if any (never guessed)."""
+
+        return self._in_flight
 
 
 def _make_gate(*, league: str, request_cap: int, credit_cap: Optional[int],
@@ -727,6 +740,11 @@ def run_pilot_cli(
             f"checkpoint_mutated={result.checkpoint_mutated} "
             f"processes={result.process_count}"
             f"{' (legacy: per-process split unknown)' if result.legacy_provenance else ''}")
+        # Unit-level provenance: a unit that completed first time is not the same
+        # as one that an earlier process failed and a later one recovered.
+        out(f"  units:     initially_completed={result.initially_completed} "
+            f"recovered_on_resume={len(result.recovered_identities)} "
+            f"still_unresolved={len(result.unresolved_identities)}")
         for label, field in (("requests  ", "attempted_requests"),
                              ("successes ", "successful_responses"),
                              ("failures  ", "failed_responses"),

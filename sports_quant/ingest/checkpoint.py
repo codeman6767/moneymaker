@@ -33,11 +33,14 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ..usage_provenance import (
+    LEGACY_PROCESS_ID,
+    PROCESS_ID_KEY,
     USAGE_ACCOUNTING_VERSION,
     UsageProvenanceError,
     combine_usage,
     prior_totals,
     sanitized_process_entries,
+    sanitized_usage,
     validate_usage_accounting,
 )
 
@@ -182,7 +185,18 @@ def _json_default(value: Any) -> Any:
 _MAX_CHECKPOINT_BYTES = 4 * 1024 * 1024
 
 
-def write_checkpoint(path: Path, checkpoint: Checkpoint) -> None:
+#: Bounded retries for a TRANSIENT replace failure. On Windows an unrelated
+#: handle on the destination (a virus scanner or the search indexer opening the
+#: file we just wrote) makes ``os.replace`` fail with ERROR_ACCESS_DENIED even
+#: though no writer of ours is racing -- observed under load during the
+#: independent provenance review. Retrying is safe precisely because the replace
+#: is atomic: it either happened (no error) or it did not.
+_REPLACE_ATTEMPTS = 5
+_REPLACE_BACKOFF_SECONDS = 0.02
+
+
+def write_checkpoint(path: Path, checkpoint: Checkpoint,
+                     *, sleep: Optional[Any] = None) -> None:
     """Atomically and durably write the checkpoint: unique temp, fsync, replace.
 
     The temp file name is unique per process AND per call (pid + random suffix)
@@ -191,6 +205,10 @@ def write_checkpoint(path: Path, checkpoint: Checkpoint) -> None:
     across a crash -- a reader always sees either the prior or the new valid
     checkpoint, never a torn file, and a completed write cannot silently roll back.
     A symlinked target is refused (isolation).
+
+    A transient ``PermissionError`` from the replace is retried a bounded number of
+    times; anything else, and a persistent failure, is raised so the caller records
+    a genuine write failure. ``sleep`` is injectable so a test never really waits.
     """
 
     path = Path(path)
@@ -198,6 +216,7 @@ def write_checkpoint(path: Path, checkpoint: Checkpoint) -> None:
         raise CheckpointError(f"refusing to write a checkpoint through a symlink: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     text = checkpoint.canonical()
+    pause = sleep if sleep is not None else _default_sleep
     with _lock_for(path):  # serialize writers to this path (no racing replaces)
         tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}-{os.urandom(6).hex()}")
         try:
@@ -205,7 +224,14 @@ def write_checkpoint(path: Path, checkpoint: Checkpoint) -> None:
                 fh.write(text)
                 fh.flush()
                 os.fsync(fh.fileno())
-            os.replace(tmp, path)  # atomic on POSIX and Windows
+            for attempt in range(1, _REPLACE_ATTEMPTS + 1):
+                try:
+                    os.replace(tmp, path)  # atomic on POSIX and Windows
+                    break
+                except PermissionError:
+                    if attempt == _REPLACE_ATTEMPTS:
+                        raise
+                    pause(_REPLACE_BACKOFF_SECONDS * attempt)
             _fsync_dir(path.parent)
         finally:
             if tmp.exists():  # a failure before replace must leave no stray temp
@@ -213,6 +239,12 @@ def write_checkpoint(path: Path, checkpoint: Checkpoint) -> None:
                     tmp.unlink()
                 except OSError:
                     pass
+
+
+def _default_sleep(seconds: float) -> None:
+    import time
+
+    time.sleep(seconds)
 
 
 def _fsync_dir(directory: Path) -> None:
@@ -261,29 +293,31 @@ def load_checkpoint(path: Path) -> Checkpoint:
                 "families", "scratch_db", "scratch_fingerprint", "schema_version"):
         if req not in data:
             raise CheckpointError(f"checkpoint missing required field: {req}")
-    flat_usage = dict(data.get("usage", {}))
     try:
+        # Untrusted input: drop unknown keys and refuse a wrong type, a non-finite
+        # float or a negative count before any value reaches arithmetic.
+        flat_usage = sanitized_usage(data.get("usage", {}) or {})
         history, legacy = _load_process_usage(data, fmt, flat_usage)
     except UsageProvenanceError as exc:
         raise CheckpointError(f"checkpoint usage provenance is unusable: {exc}") from None
     # The stored logical totals must be exactly what the recorded history implies.
     # A checkpoint whose totals contradict its own history is not trustworthy
     # evidence, so it fails closed rather than being silently recomputed.
-    if history and not legacy:
-        problems = validate_usage_accounting(
-            flat_usage, request_cap=data.get("request_cap"),
-            credit_cap=data.get("credit_cap"), entries=history)
-        if problems:
-            raise CheckpointError(
-                "checkpoint usage accounting is inconsistent: " + "; ".join(problems[:4]))
-    state = data.get("state", "in_progress")
-    unresolved = (list(data.get("incomplete_identities", []))
-                  + list(data.get("failed_identities", []))
-                  + list(data.get("blocked_identities", [])))
-    if state == "completed" and unresolved:
+    #
+    # A legacy v1 file cannot satisfy the history-closure or retry identities (its
+    # per-process split is unknowable), but it must still not assert something
+    # IMPOSSIBLE -- more terminal outcomes than transports, pages beyond successful
+    # responses, or usage above the manifest cap. Those are checked for both.
+    problems = validate_usage_accounting(
+        flat_usage, request_cap=data.get("request_cap"),
+        credit_cap=data.get("credit_cap"),
+        entries=None if legacy else (history or None),
+        require_retry_identity=False if legacy else None)
+    if problems:
         raise CheckpointError(
-            f"checkpoint claims state 'completed' while holding {len(unresolved)} "
-            "unresolved unit(s); refusing to treat it as complete")
+            "checkpoint usage accounting is inconsistent: " + "; ".join(problems[:4]))
+    state = data.get("state", "in_progress")
+    _validate_identity_sets(data, state)
     return Checkpoint(
         manifest_hash=data["manifest_hash"],
         plan_version=data["plan_version"],
@@ -312,6 +346,56 @@ def load_checkpoint(path: Path) -> Checkpoint:
         # is not silently relabelled as v2 in memory.
         checkpoint_format_version=str(fmt),
     )
+
+
+def _identity_list(data: dict[str, Any], key: str) -> list[str]:
+    raw = data.get(key, [])
+    if not isinstance(raw, list) or any(not isinstance(i, str) for i in raw):
+        raise CheckpointError(f"checkpoint field {key!r} must be a list of identities")
+    return raw
+
+
+def _validate_identity_sets(data: dict[str, Any], state: str) -> None:
+    """Refuse a checkpoint whose unit sets contradict each other.
+
+    Identity strings are canonical JSON and can be long, so messages report counts
+    and a truncated example rather than dumping the sets.
+    """
+
+    completed = set(_identity_list(data, "completed_identities"))
+    failed = set(_identity_list(data, "failed_identities"))
+    blocked = set(_identity_list(data, "blocked_identities"))
+    incomplete = set(_identity_list(data, "incomplete_identities"))
+    recovered = set(_identity_list(data, "recovered_identities"))
+    unresolved = failed | blocked | incomplete
+
+    def _example(items: set[str]) -> str:
+        one = sorted(items)[0]
+        return one if len(one) <= 48 else one[:45] + "..."
+
+    for label, other in (("failed", failed), ("blocked", blocked),
+                         ("incomplete", incomplete)):
+        overlap = completed & other
+        if overlap:
+            raise CheckpointError(
+                f"checkpoint holds {len(overlap)} unit(s) that are both completed and "
+                f"{label} (e.g. {_example(overlap)}); a unit cannot be in two states")
+    if state == "completed" and unresolved:
+        raise CheckpointError(
+            f"checkpoint claims state 'completed' while holding {len(unresolved)} "
+            "unresolved unit(s); refusing to treat it as complete")
+    # `recovered` means "was unresolved earlier, and is complete now", so it must be
+    # a subset of completed and disjoint from every unresolved set.
+    ghosts = recovered - completed
+    if ghosts:
+        raise CheckpointError(
+            f"checkpoint marks {len(ghosts)} unit(s) recovered that are not completed "
+            f"(e.g. {_example(ghosts)})")
+    still_unresolved = recovered & unresolved
+    if still_unresolved:
+        raise CheckpointError(
+            f"checkpoint marks {len(still_unresolved)} unit(s) both recovered and "
+            f"still unresolved (e.g. {_example(still_unresolved)})")
 
 
 def _load_process_usage(
@@ -353,7 +437,11 @@ def _load_process_usage(
             "contradictory mixture of formats")
     if not flat_usage:
         return [], True
-    return sanitized_process_entries([flat_usage]), True
+    # The aggregate is tagged with a NON-random identifier saying exactly what it
+    # is: one entry standing for an unknown number of earlier processes. A random
+    # per-invocation token here would imply a single identified run.
+    return sanitized_process_entries(
+        [{**flat_usage, PROCESS_ID_KEY: LEGACY_PROCESS_ID}]), True
 
 
 def verify_resume(

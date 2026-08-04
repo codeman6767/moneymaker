@@ -259,5 +259,86 @@ jobs:
           else:
               raise AssertionError("a completed checkpoint with an unresolved unit loaded")
 
+          # 8. Hostile value types and ranges are refused, not propagated.
+          from sports_quant.usage_provenance import (
+              LEGACY_PROCESS_ID, PROCESS_ID_KEY, UsageProvenanceError,
+              sanitized_usage)
+          for field, value in (("successful_responses", "1999"),
+                               ("successful_responses", True),
+                               ("failed_responses", -1),
+                               ("throttle_wait_seconds", float("nan")),
+                               ("throttle_wait_seconds", float("inf")),
+                               ("pages_fetched", {"a": 1}),
+                               ("network_occurred", 1),
+                               ("families_completed", "schedule")):
+              try:
+                  sanitized_usage({field: value})
+              except UsageProvenanceError:
+                  pass
+              else:
+                  raise AssertionError(f"hostile {field}={value!r} was accepted")
+          assert sanitized_usage({"successful_responses": 1, "api_key": "sk-x"}) == {
+              "successful_responses": 1}, "an unknown key survived sanitization"
+
+          # 9. An absent counter stays unknown; it never becomes a misleading zero.
+          assert validate_usage_accounting({"successful_responses": 5}) == []
+          assert validate_usage_accounting(
+              {"successful_responses": 5, "transport_starts": 1})
+
+          # 10. A legacy aggregate keeps its honest marker, and contradictory unit
+          #     sets fail closed.
+          assert load_checkpoint(p1).process_usage[0][PROCESS_ID_KEY] == LEGACY_PROCESS_ID
+          for over, needle in (
+                  ({"state": "failed", "failed_identities": ["u1"]}, "both completed"),
+                  ({"recovered_identities": ["ghost"]}, "not completed")):
+              body = dict(v1)
+              body.update(over)
+              pv = tmp / "sets.ckpt"
+              pv.write_text(json.dumps(body), encoding="utf-8")
+              try:
+                  load_checkpoint(pv)
+              except Exception as exc:
+                  assert needle in str(exc), exc
+              else:
+                  raise AssertionError(f"contradictory unit sets accepted: {over}")
+
+          # 11. FIVE-process logical accounting closes exactly, once per process.
+          five = []
+          for i in range(5):
+              succ, fails, retries = i + 1, i % 2, i % 3
+              five.append({
+                  PROCESS_ID_KEY: f"proc{i}",
+                  "successful_responses": succ, "failed_responses": fails,
+                  "retry_attempts": retries,
+                  "transport_starts": succ + fails + retries,
+                  "reserved_attempts": succ + fails + retries,
+                  "attempted_requests": succ + fails + retries,
+                  "responses_received": succ + fails, "parse_successes": succ,
+                  "pages_fetched": 1, "network_occurred": True})
+          tot5 = combine_usage(five)
+          assert tot5["successful_responses"] == 15, tot5["successful_responses"]
+          assert tot5["failed_responses"] == 2, tot5["failed_responses"]
+          assert tot5["retry_attempts"] == 4, tot5["retry_attempts"]
+          assert tot5["prior_transport_starts"] == sum(
+              e["transport_starts"] for e in five[:-1])
+          assert validate_usage_accounting(tot5, entries=five,
+                                           require_retry_identity=True) == []
+          assert combine_usage(five) == tot5, "combining is not deterministic"
+
+          # 12. Partial-unit recovery bookkeeping: recovered is a subset of
+          #     completed and disjoint from every unresolved set.
+          rec = Checkpoint(
+              manifest_hash="h", plan_version="p", provider="mlb_statsapi",
+              league="mlb", date_range="r", families=("schedule",),
+              scratch_db="s.db", scratch_fingerprint="FP", schema_version=17,
+              request_cap=50, credit_cap=None, state="completed",
+              completed_identities=["u1", "u2"], recovered_identities=["u2"],
+              process_usage=list(five), usage=tot5)
+          p4 = tmp / "recovered.ckpt"
+          write_checkpoint(p4, rec)
+          loaded = load_checkpoint(p4)
+          assert loaded.recovered_identities == ["u2"]
+          assert loaded.usage["failed_responses"] == 2, "recovery erased a failure"
+
           print("checkpoint provenance verified from the installed wheel")
           PY

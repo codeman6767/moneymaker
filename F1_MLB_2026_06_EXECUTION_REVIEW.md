@@ -25,6 +25,16 @@ separate work.
 > [§14 Checkpoint provenance repair](#14-checkpoint-provenance-repair-follow-up-1).
 > A completed resume can no longer erase an earlier process's evidence, and the
 > original June checkpoint remains byte-identical and historically unchanged.
+>
+> That repair has since been **independently reviewed and accepted** — see
+> `CHECKPOINT_RESUME_PROVENANCE_REVIEW.md`. The review reproduced the original loss
+> against the extracted parent implementation, confirmed every June total survives a
+> repeated byte-identical no-op resume, and found and repaired seven further defects
+> in the repair itself (no value validation on untrusted checkpoints, unvalidated
+> legacy accounting, non-additive totals unchecked against history, unchecked
+> unit-set contradictions, no per-invocation process identifier, unreported recovered
+> identities, and `incomplete_identities` never being written — which had left the
+> recovery mechanism inert in production).
 
 ---
 

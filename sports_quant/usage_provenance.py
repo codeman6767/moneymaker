@@ -33,8 +33,10 @@ field cannot be added without deciding how it composes.
 
 from __future__ import annotations
 
+import math
+import re
 from enum import Enum
-from typing import Any, Iterable, Mapping, Optional, Sequence
+from typing import Any, Iterable, Mapping, Optional, Sequence, Union, get_args, get_origin
 
 #: Version of the accounting rules below. Stored in the checkpoint so a future
 #: rule change is detectable rather than silently reinterpreting old evidence.
@@ -203,17 +205,30 @@ def current_process_entry(usage: Mapping[str, Any]) -> dict[str, Any]:
     return entry
 
 
+def _number(field: str, value: Any) -> Any:
+    """A numeric operand, or a sanitized error -- never a bare ``TypeError``."""
+
+    if value is None:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise UsageProvenanceError(
+            f"usage field {field!r} is not a number ({type(value).__name__})")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise UsageProvenanceError(f"usage field {field!r} is not finite")
+    return value
+
+
 def _combine_pair(field: str, rule: Combine, acc: Any, nxt: Any) -> Any:
     if rule is Combine.ADDITIVE:
-        return (acc or 0) + (nxt or 0)
+        return _number(field, acc) + _number(field, nxt)
     if rule is Combine.ADDITIVE_OPTIONAL:
         if acc is None:
             return nxt
         if nxt is None:
             return acc
-        return acc + nxt
+        return _number(field, acc) + _number(field, nxt)
     if rule is Combine.MAX:
-        return max(acc or 0, nxt or 0)
+        return max(_number(field, acc), _number(field, nxt))
     if rule is Combine.ANY:
         return bool(acc) or bool(nxt)
     if rule is Combine.ANY_EVIDENCE:
@@ -319,61 +334,100 @@ def validate_usage_accounting(
     problems: list[str] = []
 
     def _i(field: str) -> int:
-        return int(usage.get(field) or 0)
+        """Read an integer counter defensively: junk becomes a problem, not a crash."""
+
+        value = usage.get(field)
+        if value is None:
+            return 0
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            problems.append(f"{field} is not a number ({type(value).__name__})")
+            return 0
+        if isinstance(value, float) and not math.isfinite(value):
+            problems.append(f"{field} is not finite")
+            return 0
+        return int(value)
 
     for field, rule in USAGE_FIELD_COMBINE.items():
-        if rule in (Combine.ADDITIVE, Combine.MAX) and field in usage:
-            value = usage.get(field)
-            if value is not None and value < 0:
-                problems.append(f"{field} is negative ({_short(value)})")
-    if usage.get("throttle_wait_seconds") is not None and _f(usage, "throttle_wait_seconds") < 0:
-        problems.append("throttle_wait_seconds is negative")
+        if rule not in (Combine.ADDITIVE, Combine.MAX, Combine.ADDITIVE_OPTIONAL):
+            continue
+        value = usage.get(field)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            problems.append(f"{field} is not a number ({type(value).__name__})")
+        elif isinstance(value, float) and not math.isfinite(value):
+            problems.append(f"{field} is not finite ({value!r})")
+        elif value < 0:
+            problems.append(f"{field} is negative ({_short(value)})")
+
+    # An ABSENT counter is unknown, not zero. A legacy checkpoint may simply not
+    # carry a field, and inventing 0 for it would manufacture a contradiction that
+    # the evidence never claimed -- so every relation below is only checked when
+    # each field it compares is actually present.
+    def _have(*fields: str) -> bool:
+        return all(f in usage and usage[f] is not None for f in fields)
 
     reserved, transports = _i("reserved_attempts"), _i("transport_starts")
     successes, failures = _i("successful_responses"), _i("failed_responses")
     terminal = successes + failures
-    if reserved < transports:
+    if _have("reserved_attempts", "transport_starts") and reserved < transports:
         problems.append(
             f"reserved_attempts {reserved} < transport_starts {transports}")
-    if transports < terminal:
+    # An absent outcome counter is unknown, and unknown can only ever ADD terminal
+    # outcomes -- so the outcomes that ARE recorded already exceeding the recorded
+    # transports is a contradiction even when the other outcome field is missing.
+    known_terminal = sum(_i(f) for f in ("successful_responses", "failed_responses")
+                         if _have(f))
+    if (_have("transport_starts")
+            and any(_have(f) for f in ("successful_responses", "failed_responses"))
+            and transports < known_terminal):
         problems.append(
-            f"transport_starts {transports} < terminal outcomes {terminal} "
+            f"transport_starts {transports} < terminal outcomes {known_terminal} "
             f"({successes} successful + {failures} failed)")
-    if _i("attempted_requests") != reserved:
+    if (_have("attempted_requests", "reserved_attempts")
+            and _i("attempted_requests") != reserved):
         problems.append(
             f"attempted_requests {_i('attempted_requests')} != "
             f"reserved_attempts {reserved} (they are aliases)")
     state = str(usage.get("checkpoint_state") or "")
     settled = state in _SETTLED_STATES if require_retry_identity is None \
         else bool(require_retry_identity)
-    if settled and transports - terminal != _i("retry_attempts"):
+    if (settled and _have("transport_starts", "successful_responses",
+                          "failed_responses", "retry_attempts")
+            and transports - terminal != _i("retry_attempts")):
         problems.append(
             f"retry identity broken: transport_starts {transports} - terminal "
             f"{terminal} != retry_attempts {_i('retry_attempts')}")
-    if _i("pages_fetched") > successes:
+    if (_have("pages_fetched", "successful_responses")
+            and _i("pages_fetched") > successes):
         problems.append(
             f"pages_fetched {_i('pages_fetched')} exceeds successful_responses "
             f"{successes}")
-    if _i("http_429s") > transports:
+    if _have("http_429s", "transport_starts") and _i("http_429s") > transports:
         problems.append(
             f"http_429s {_i('http_429s')} exceeds transport_starts {transports}")
-    if _i("responses_received") > transports:
+    if (_have("responses_received", "transport_starts")
+            and _i("responses_received") > transports):
         problems.append(
             f"responses_received {_i('responses_received')} exceeds "
             f"transport_starts {transports}")
-    if _i("parse_successes") > _i("responses_received"):
+    if (_have("parse_successes", "responses_received")
+            and _i("parse_successes") > _i("responses_received")):
         problems.append(
             f"parse_successes {_i('parse_successes')} exceeds responses_received "
             f"{_i('responses_received')}")
-    if request_cap is not None and reserved > request_cap:
+    if (request_cap is not None and _have("reserved_attempts")
+            and reserved > request_cap):
         problems.append(
             f"logical reserved_attempts {reserved} exceeds the manifest request "
             f"cap {request_cap}")
-    if credit_cap is not None and _i("reserved_credits") > credit_cap:
+    if (credit_cap is not None and _have("reserved_credits")
+            and _i("reserved_credits") > credit_cap):
         problems.append(
             f"logical reserved_credits {_i('reserved_credits')} exceeds the "
             f"manifest credit cap {credit_cap}")
-    if not usage.get("network_occurred") and transports > 0:
+    if (_have("network_occurred", "transport_starts")
+            and not usage.get("network_occurred") and transports > 0):
         problems.append(
             f"network_occurred is false while transport_starts is {transports}")
 
@@ -383,14 +437,21 @@ def validate_usage_accounting(
         except UsageProvenanceError as exc:
             problems.append(str(exc))
         else:
+            # The stored totals must be EXACTLY what the recorded history implies --
+            # for every rule, not only the additive ones. Checking additive fields
+            # alone left a hole: a tampered `families_completed`, `network_occurred`
+            # or selection count in the derived totals went undetected.
             for field, rule in USAGE_FIELD_COMBINE.items():
-                if rule is not Combine.ADDITIVE or field not in usage:
+                if rule is Combine.DERIVED or field not in usage:
                     continue
-                if int(recombined.get(field) or 0) != _i(field):
+                want, got = recombined.get(field), usage.get(field)
+                if rule is Combine.UNION:
+                    want = tuple(want or ())
+                    got = tuple(got or ())
+                if want != got:
                     problems.append(
-                        f"{field} {_i(field)} does not equal the sum over the "
-                        f"{len(entries)} recorded processes "
-                        f"({int(recombined.get(field) or 0)})")
+                        f"{field} {_short(got)} does not equal the value the "
+                        f"{len(entries)} recorded processes imply ({_short(want)})")
             for prior_field, source in DERIVED_PRIOR_SOURCE.items():
                 expected = sum(int(e.get(source) or 0) for e in list(entries)[:-1])
                 if int(usage.get(prior_field) or 0) != expected:
@@ -429,31 +490,203 @@ def assert_no_new_transport(current: Mapping[str, Any]) -> list[str]:
     return problems
 
 
-def sanitized_process_entries(entries: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Per-process entries reduced to declared usage fields only.
+# --------------------------------------------------------------------------- #
+# Type / range validation of untrusted checkpoint values
+# --------------------------------------------------------------------------- #
+#: Metadata key identifying the process that produced an entry. Not a usage field,
+#: so it is never combined into totals; carried through so an entry can be
+#: correlated with one invocation and so a clobbered history is detectable.
+PROCESS_ID_KEY = "process_id"
 
-    ``UsageReport`` holds no secret, but an entry loaded from an on-disk
+#: The identifier a migrated v1 aggregate is given. It is deliberately NOT a
+#: random token: a legacy entry represents an unknown number of earlier processes,
+#: and this value says so instead of implying one identified run.
+LEGACY_PROCESS_ID = "legacy-v1-unsplit"
+
+_PROCESS_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+#: Deepest nesting accepted inside a mapping-valued usage field (budget
+#: exhaustion). Defends against a hostile deeply-nested checkpoint.
+_MAX_MAPPING_DEPTH = 6
+_MAX_MAPPING_KEYS = 64
+
+
+def _usage_type_hints() -> dict[str, Any]:
+    """Declared type of every ``UsageReport`` field, resolved lazily.
+
+    The dataclass annotations are the single source of truth for value types, so
+    the validator below cannot drift from the report it validates.
+    """
+
+    from typing import get_type_hints
+
+    from .request_control import UsageReport
+
+    return get_type_hints(UsageReport)
+
+
+_HINTS: Optional[dict[str, Any]] = None
+
+
+def usage_type_hints() -> dict[str, Any]:
+    global _HINTS
+    if _HINTS is None:
+        _HINTS = _usage_type_hints()
+    return _HINTS
+
+
+def _unwrap_optional(hint: Any) -> tuple[Any, bool]:
+    if get_origin(hint) is Union:
+        args = [a for a in get_args(hint) if a is not type(None)]
+        return (args[0] if len(args) == 1 else Any), len(args) != len(get_args(hint))
+    return hint, False
+
+
+def _coerce_usage_value(field: str, value: Any, hint: Any) -> Any:
+    """Validate one untrusted usage value against its declared type.
+
+    Rejects rather than coerces: a checkpoint is evidence, so a value of the wrong
+    type is a corrupt record, not something to guess at. ``bool`` is refused where
+    a number is declared (in Python ``True`` would silently count as 1), every
+    number must be finite and non-negative (no usage field is meaningfully
+    negative), and a name collection is deduplicated into a deterministic tuple.
+    """
+
+    base, optional = _unwrap_optional(hint)
+    if value is None:
+        if optional or base is Any:
+            return None
+        raise UsageProvenanceError(f"usage field {field!r} may not be null")
+    origin = get_origin(base)
+    if base is bool:
+        if not isinstance(value, bool):
+            raise UsageProvenanceError(
+                f"usage field {field!r} must be a boolean, got {type(value).__name__}")
+        return value
+    if base is int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise UsageProvenanceError(
+                f"usage field {field!r} must be an integer, got {type(value).__name__}")
+        if value < 0:
+            raise UsageProvenanceError(
+                f"usage field {field!r} may not be negative ({value})")
+        return value
+    if base is float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise UsageProvenanceError(
+                f"usage field {field!r} must be a number, got {type(value).__name__}")
+        number = float(value)
+        if not math.isfinite(number):
+            raise UsageProvenanceError(
+                f"usage field {field!r} must be finite, got {number!r}")
+        if number < 0:
+            raise UsageProvenanceError(
+                f"usage field {field!r} may not be negative ({number})")
+        return number
+    if base is str:
+        if not isinstance(value, str):
+            raise UsageProvenanceError(
+                f"usage field {field!r} must be a string, got {type(value).__name__}")
+        return value
+    if origin is tuple:
+        if not isinstance(value, (list, tuple)):
+            raise UsageProvenanceError(
+                f"usage field {field!r} must be a list of names, got "
+                f"{type(value).__name__}")
+        names = []
+        for item in value:
+            if not isinstance(item, str):
+                raise UsageProvenanceError(
+                    f"usage field {field!r} must contain only names")
+            names.append(item)
+        return tuple(sorted(set(names)))
+    if origin is dict or base is dict:
+        return _validated_mapping(field, value, depth=0)
+    return value
+
+
+def _validated_mapping(field: str, value: Any, *, depth: int) -> dict[str, Any]:
+    if depth > _MAX_MAPPING_DEPTH:
+        raise UsageProvenanceError(
+            f"usage field {field!r} nests deeper than {_MAX_MAPPING_DEPTH} levels")
+    if not isinstance(value, Mapping):
+        raise UsageProvenanceError(
+            f"usage field {field!r} must be an object, got {type(value).__name__}")
+    if len(value) > _MAX_MAPPING_KEYS:
+        raise UsageProvenanceError(f"usage field {field!r} has too many keys")
+    out: dict[str, Any] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise UsageProvenanceError(f"usage field {field!r} has a non-string key")
+        if isinstance(item, Mapping):
+            out[key] = _validated_mapping(field, item, depth=depth + 1)
+        elif isinstance(item, (list, tuple)):
+            out[key] = [i for i in item]
+        elif isinstance(item, float) and not math.isfinite(item):
+            raise UsageProvenanceError(f"usage field {field!r} holds a non-finite value")
+        else:
+            out[key] = item
+    return out
+
+
+def sanitized_usage(usage: Mapping[str, Any], *, what: str = "usage") -> dict[str, Any]:
+    """A usage mapping reduced to declared fields with every value type-checked.
+
+    ``UsageReport`` holds no secret, but a mapping loaded from an on-disk
     checkpoint is untrusted input: unknown keys are dropped rather than carried
-    into a combined report.
+    into a combined report, and a value of the wrong type, a non-finite float or a
+    negative count is refused instead of being propagated into arithmetic (which
+    previously surfaced as a bare ``TypeError`` from deep inside the combiner).
+    """
+
+    if not isinstance(usage, Mapping):
+        raise UsageProvenanceError(f"{what} is not an object")
+    hints = usage_type_hints()
+    clean: dict[str, Any] = {}
+    for field, value in usage.items():
+        name = str(field)
+        rule = USAGE_FIELD_COMBINE.get(name)
+        if rule is None:
+            continue  # unknown key: dropped, never reported, never combined
+        hint = hints.get(name, Any)
+        clean[name] = _coerce_usage_value(name, value, hint)
+    return clean
+
+
+def sanitized_process_entries(
+    entries: Iterable[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """Per-process entries reduced to declared usage fields, fully type-checked.
+
+    Preserves the :data:`PROCESS_ID_KEY` metadata key (validated as a short opaque
+    token) and drops every other unknown key. Derived fields are dropped because
+    they are recomputed from the history rather than trusted.
     """
 
     out: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
     for entry in entries:
         if not isinstance(entry, Mapping):
             raise UsageProvenanceError("usage provenance process entry is not an object")
-        clean: dict[str, Any] = {}
-        for field, value in entry.items():
-            rule = USAGE_FIELD_COMBINE.get(str(field))
-            if rule is None or rule is Combine.DERIVED:
-                continue
-            if rule is Combine.UNION:
-                if value is None:
-                    continue
-                if not isinstance(value, (list, tuple)):
-                    raise UsageProvenanceError(
-                        f"usage provenance field {field!r} must be a list of names")
-                clean[str(field)] = tuple(sorted({str(v) for v in value}))
-            else:
-                clean[str(field)] = value
+        clean = {k: v for k, v in sanitized_usage(entry, what="process entry").items()
+                 if USAGE_FIELD_COMBINE.get(k) is not Combine.DERIVED}
+        raw_id = entry.get(PROCESS_ID_KEY)
+        if raw_id is not None:
+            if not isinstance(raw_id, str) or not _PROCESS_ID_RE.match(raw_id):
+                raise UsageProvenanceError(
+                    f"usage provenance {PROCESS_ID_KEY} must be a short opaque token")
+            if raw_id in seen_ids and raw_id != LEGACY_PROCESS_ID:
+                raise UsageProvenanceError(
+                    f"two process entries share the same {PROCESS_ID_KEY}")
+            seen_ids.add(raw_id)
+            clean[PROCESS_ID_KEY] = raw_id
         out.append(clean)
     return out
+
+
+def new_process_id() -> str:
+    """A fresh per-invocation process identifier (not a PID: PIDs get reused)."""
+
+    import secrets
+
+    return secrets.token_hex(12)

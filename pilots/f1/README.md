@@ -257,6 +257,41 @@ terminal failures, retries, pages, throttling and 429s, plus
 mistaken for a run that fetched nothing. In JSON, `usage` is the logical total and
 `current_process_usage` / `prior_process_usage` are separate keys.
 
+### Untrusted-input and unit-set validation
+
+A checkpoint on disk is untrusted evidence. Every usage value is validated against
+the `UsageReport` dataclass's own type annotations — the single source of truth, so
+the validator cannot drift from the report — and a wrong type, a non-finite float, a
+negative count or a boolean where a number is declared is **refused** rather than
+coerced. Unknown keys are dropped and never reach a report or a rewritten file. An
+**absent** counter stays unknown; it is never read as `0`, because a legacy file may
+simply not carry a field and inventing zero would manufacture a contradiction the
+evidence never claimed.
+
+The stored logical totals must equal what the recorded history implies for **every**
+rule, not only the additive ones, and the unit sets must not contradict each other:
+no identity may be both completed and failed/blocked/incomplete, and
+`recovered_identities` must be a subset of completed and disjoint from every
+unresolved set. All of these fail closed with a sanitized error before any client is
+constructed, any authentication is loaded, the database is opened writable, or the
+checkpoint is written.
+
+### Unit-level provenance
+
+Each process entry carries a random per-invocation `process_id` — never the PID,
+which the OS reuses. A migrated v1 aggregate instead carries the literal marker
+`legacy-v1-unsplit`, which says exactly what it is: one entry standing for an unknown
+number of earlier processes.
+
+When a unit raises, the runner records the identity the executor reports as in
+flight into `incomplete_identities` (read from the executor, never inferred). A later
+process that completes that unit moves it into `recovered_identities`, so a unit
+recovered after a failure stays distinguishable from one that completed first time.
+Reports show `initially_completed`, `recovered_on_resume` and `still_unresolved`.
+
+Independently reviewed and accepted in
+`CHECKPOINT_RESUME_PROVENANCE_REVIEW.md`.
+
 ### Fail-closed conditions
 
 Refused before any client is constructed: a nonpositive configured rate, a
