@@ -17,9 +17,14 @@ this review.** No original database, checkpoint or execution log was modified: a
 
 **Verdict: the run's data is trustworthy and the coverage claim is accurate, but
 the `completed` checkpoint state is _not_ semantically trustworthy.** One unit was
-recorded complete while two of its requests had failed terminally. Four confirmed
+recorded complete while two of its requests had failed terminally. Five confirmed
 defects are repaired in this change; four more are confirmed and reported for
 separate work.
+
+> **Follow-up #1 has since been repaired** — see
+> [§14 Checkpoint provenance repair](#14-checkpoint-provenance-repair-follow-up-1).
+> A completed resume can no longer erase an earlier process's evidence, and the
+> original June checkpoint remains byte-identical and historically unchanged.
 
 ---
 
@@ -411,16 +416,16 @@ them into a review commit would widen the blast radius well past the review's
 scope; each deserves its own reviewed change.
 
 1. **A completed resume overwrites the run's failure and retry evidence.**
-   Resuming the completed checkpoint rewrote `usage`, zeroing
-   `successful_responses` 1999→0, `failed_responses` 2→0, `retry_attempts` 7→0,
-   `throttle_wait_seconds` 3407.9→0.0, `pages_fetched` 401→0 and
-   `families_completed` →`[]`. Requests are carried forward as `prior_requests` /
-   `prior_transport_starts` / `prior_pages_fetched`, but there is **no**
-   `prior_failed_responses` or `prior_retry_attempts`, so one harmless-looking
-   `--resume` destroys the only durable record that two requests failed and seven
-   were retried. Completion facts (`state`, `completed_identities`,
-   `stage_game_ids`) survive. **Highest-priority follow-up**, and the reason this
-   review ran resume against a copy.
+   ~~Highest-priority follow-up~~ — **REPAIRED, see §14.** Resuming the completed
+   checkpoint rewrote `usage`, zeroing `successful_responses` 1999→0,
+   `failed_responses` 2→0, `retry_attempts` 7→0, `throttle_wait_seconds`
+   3407.9→0.0, `pages_fetched` 401→0 and `families_completed` →`[]`. Requests were
+   carried forward as `prior_requests` / `prior_transport_starts` /
+   `prior_pages_fetched`, but there was **no** `prior_failed_responses` or
+   `prior_retry_attempts`, so one harmless-looking `--resume` destroyed the only
+   durable record that two requests failed and seven were retried. Completion facts
+   (`state`, `completed_identities`, `stage_game_ids`) survived. This is the reason
+   this review ran resume against a copy.
 2. **Same-name player resolution is order-dependent.** Which member of a
    collision pair is accepted and which is left ambiguous depends purely on
    traversal order. The refusal to merge is correct; the arbitrariness is not. An
@@ -472,7 +477,83 @@ Note that the two roster failures produce **no** data-quality row at all. Covera
 missingness is currently visible only by comparing expected against observed
 team-days, as this review did. Worth considering alongside follow-up #1.
 
-## 13. Status
+## 14. Checkpoint provenance repair (follow-up #1)
+
+Reported above as the highest-priority follow-up, and now repaired. The defect was
+first reproduced offline against copies with 20 zero-network guards installed and
+all ten adversarial probes failing closed: the completed resume constructed **zero**
+provider clients, made zero transport starts and left the database byte-identical —
+and destroyed **12** usage fields, with no `prior_*` counterpart existing for seven
+of them (`failed_responses`, `retry_attempts`, `successful_responses`,
+`throttle_events`, `throttle_wait_seconds`, `http_429s`, `blocked_requests`).
+
+**Accounting model.** A *logical run* is one manifest executed by one or more
+processes. The checkpoint format is now `f1a-checkpoint-v2`, where `usage` holds the
+**logical-run totals** and `usage_provenance.processes` is the append-only
+per-process history those totals derive from. For additive counters,
+`logical_total = prior_total + current_process_value` exactly. Nothing is blindly
+summed: `network_occurred` is a logical OR, family collections are deterministic
+unions, selection counts take a high-water mark, a recorded budget exhaustion is
+never overwritten by a later clean process, authentication and tier evidence follow
+a precedence order that can never be upgraded without an observation, and plan
+identity must agree across processes or the load fails closed. Every `UsageReport`
+field carries exactly one declared rule in `sports_quant/usage_provenance.py`, and
+a test asserts the table covers the dataclass exhaustively.
+
+A process owns exactly **one** history entry and replaces it on each write, and the
+gate's prior pre-charge is subtracted out of that entry, so repeated resumes can
+never multiply prior usage and a third process cannot re-count the first one's
+attempts.
+
+**Completed no-work resume is now a true no-op.** It validates the manifest,
+checkpoint and scratch database, proves offline that no unit remains, synthesizes
+its result from the evidence already on disk, constructs no provider client, writes
+no row, and does **not** rewrite the checkpoint. Verified against copies of the real
+June artifacts:
+
+| Logical total | Before resume | After resume |
+|---|---|---|
+| Reserved attempts | 2008 | 2008 |
+| Transport starts | 2008 | 2008 |
+| Successful responses | 1999 | 1999 |
+| Terminal failed responses | 2 | 2 |
+| Retry attempts | 7 | 7 |
+| Pages fetched | 401 | 401 |
+| HTTP 429s | 0 | 0 |
+| Blocked requests | 0 | 0 |
+| Courtesy throttle events | 1999 | 1999 |
+| Courtesy throttle wait | 3407.889 s | 3407.889 s |
+| Games received / selected | 402 / 400 | 402 / 400 |
+| `families_completed` | `[game, skeleton]` | `[game, skeleton]` |
+
+The checkpoint copy stayed byte-identical (`70bbc7c9…` → `70bbc7c9…`) across two
+successive no-op resumes, and every accounting invariant closes on those totals.
+
+**Backward compatibility.** The original June checkpoint is v1 and still loads
+unmodified: its flat `usage` is adopted as a single legacy history entry so every
+fact it holds survives, it is flagged `legacy_migrated` with
+`process_count_known = false` because the per-process split is genuinely unknowable,
+and a missing counter stays missing rather than becoming a misleading `0`. A v1 file
+is upgraded to v2 only when a resume actually does work. **The original June
+checkpoint remains byte-identical, still v1 on disk, with no `usage_provenance`
+block written into it** — its historical completion decision was *not* retroactively
+repaired, and it remains semantically untrustworthy for the reason in §4.
+
+**Reporting.** A no-work resume now prints `new_work=False`,
+`checkpoint_mutated=False` and, for every counter, `this_process=0` beside `prior=`
+and `logical_total=`, so a clean row of zeros can never be read as a run that
+fetched nothing. In JSON, `usage` is the logical total, with
+`current_process_usage` and `prior_process_usage` as separate keys.
+
+**Also repaired here:** a unit that an earlier process left blocked/failed/
+incomplete and a later process completed now leaves the unresolved sets and is
+recorded in `recovered_identities`, because a `completed` state holding an
+unresolved unit is a contradiction — which a load now refuses.
+
+Still true: the two missing June roster responses were **not** retrieved and remain
+explicitly missing; no live request was made; the June data itself remains valid.
+
+## 15. Status
 
 - Live execution: **valid**. One process, one provider, correct pacing, no 429s,
   no blocked requests, within every declared bound, `integrity_check = ok`, full
@@ -485,8 +566,10 @@ team-days, as this review did. Worth considering alongside follow-up #1.
 - The two terminal failures were **not** retrieved and the two missing responses
   were **not** fabricated. Their families remain explicitly incomplete.
 - **NBA is not authorized by this review.** The live process exiting 0 does not
-  authorize it, and follow-up #1 in particular should be resolved before another
-  month-scale execution, since it can destroy exactly the evidence a review needs.
+  authorize it. Follow-up #1 is now repaired (§14), but that repair itself remains
+  unreviewed independently, so NBA stays unauthorized until it is reviewed or its
+  validation boundary is explicitly accepted.
+- **F1 remains incomplete, and F2 remains unauthorized.**
 
 Validation: `ruff` clean; `mypy` clean (289 files); **1,865 passed, 1 skipped**;
 `db-init` applies all 17 migrations to schema v17 and is idempotent on a second

@@ -33,7 +33,10 @@ verification is complete.**
 >   GOAT reachability evidence remains the separate 2026-07-28 capability audit.
 > - **Completed resume made zero requests**, zero pages, zero mutation, and constructed
 >   **no provider client** and performed **no authentication**, while preserving
->   provenance (`prior_transport_starts=7`, `prior_pages_fetched=1`).
+>   provenance. Since the checkpoint-provenance repair a completed resume with nothing
+>   outstanding is a **true no-op**: the checkpoint file is left byte-identical and the
+>   logical-run totals (successes, terminal failures, retries, pacing, families) are
+>   preserved rather than overwritten with the resuming process's zeros.
 >
 > **Lineup defect and repair.** The live `/v1/lineups` response returned HTTP 200 with
 > 25 real flat rows (2 teams, 25 players, 10 starters) but the then-current parser
@@ -121,6 +124,29 @@ nothing below is authorized by this milestone:
 > `scheduled_start` unchanged at `2026-07-20T23:07:00Z`, all 52 player references
 > still link. All original pilot databases, checkpoints, prior matching copies and
 > reports remain byte-identical.
+>
+> **Checkpoint provenance loss — REPAIRED (2026-08-03).** The independent review of
+> the live MLB June-2026 month execution found that a *completed* `--resume` rewrote
+> the checkpoint with the resuming process's empty report, zeroing
+> `successful_responses` (1999 → 0), `failed_responses` (2 → 0), `retry_attempts`
+> (7 → 0), `throttle_wait_seconds` (~3407.9 → 0), `pages_fetched` (401 → 0) and
+> `families_completed`. One harmless-looking resume destroyed the only durable record
+> that the logical run had contained terminal failures and retries.
+>
+> The checkpoint is now `f1a-checkpoint-v2`: `usage` holds the **logical-run totals**
+> and `usage_provenance.processes` is the append-only per-process history they derive
+> from, with `logical_total = prior_total + current_process_value` for additive
+> counters and declared non-additive rules (union / OR / high-water mark / precedence
+> / identity-must-agree) for everything else. A completed resume with nothing
+> outstanding is a **true no-op** — no provider client, no write, and the checkpoint
+> file left byte-identical. Verified against copies of the real June artifacts: all
+> twelve logical totals preserved exactly, every accounting invariant closing, and the
+> **original June checkpoint still byte-identical and still v1 on disk**. Its
+> incorrect historical completion decision was deliberately **not** retroactively
+> repaired, and the two missing June roster responses remain explicitly missing.
+>
+> **This repair has not itself been independently reviewed, so NBA remains
+> unauthorized** until it is reviewed or its validation boundary is accepted.
 >
 > **This still does not make F1 complete.** One game per league establishes
 > matching *mechanics* only. It establishes **no** month coverage, **no** season

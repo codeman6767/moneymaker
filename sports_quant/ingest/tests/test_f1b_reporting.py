@@ -514,27 +514,37 @@ def test_completed_resume_adds_zero_requests_pages_selections_or_mutations(
     assert len(seen) == 1
     first = load_checkpoint(ckpt).usage
 
+    before_bytes = ckpt.read_bytes()
     rc2, lines2, _db, _ck = _run(tmp_path, "nba", m, factory, resume=True)
     assert rc2 == 0
     assert len(seen) == 1                      # ZERO additional transport
+    # A completed NBA resume with nothing left is a true no-op on disk.
+    assert ckpt.read_bytes() == before_bytes
     second = load_checkpoint(ckpt).usage
-    assert second["transport_starts"] == 0     # resume-local
-    assert second["pages_fetched"] == 0        # zero additional pages
+    # `usage` is the LOGICAL-RUN total, so the first process's evidence survives
+    # instead of being overwritten with the resume's zeros.
+    assert second == first
+    assert second["transport_starts"] == 1
+    assert second["pages_fetched"] == 1
     assert second["attempted_requests"] == first["attempted_requests"]  # budget carried
-    assert second["prior_requests"] == 1
-    assert second["database_mutated"] is False
+    assert second["database_mutated"] is True
     assert second["http_429s"] == 0
-    assert float(second["throttle_wait_seconds"]) == 0.0
     # Selection accounting survives the resume rather than resetting to zero.
     assert second["games_received"] == 8
     assert second["games_selected"] == 2
     assert second["games_excluded_by_max_games"] == 6
     assert second["selection_truncated"] is True
-    # Defect E: the first run's transport provenance is preserved, so a completed
-    # resume can never make network-fetched data look as if it was never fetched.
-    assert second["prior_transport_starts"] == 1
-    assert second["prior_pages_fetched"] == 1
     assert second["authentication_status"] == "succeeded"
+    # The resuming process itself reports zero new work, and the human report
+    # shows the preserved logical totals beside its own zeros rather than a
+    # misleading clean-zero summary.
+    text = "\n".join(lines2)
+    assert "no work remaining" in text
+    assert "new_work=False" in text and "checkpoint_mutated=False" in text
+    # Nothing is attributed to this process; every count is prior evidence.
+    assert "requests   this_process=0 prior=1 logical_total=1" in text
+    assert "successes  this_process=0 prior=1 logical_total=1" in text
+    assert "pages      this_process=0 prior=1 logical_total=1" in text
 
 
 # ===================================================================== #

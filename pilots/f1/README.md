@@ -200,13 +200,62 @@ bounded exponential backoff. No header value is ever exposed in output.
 
 ### Resume
 
-A **completed** resume short-circuits: zero transport calls, zero pacing delay,
-zero throttle events, and the prior request and pacing provenance is preserved in
-the checkpoint (`prior_transport_starts`, `prior_pages_fetched`). An
-**interrupted** resume starts a fresh *process-local* pacing window — the limiter
-holds no cross-process state — but it does **not** get a fresh aggregate request
-budget: cumulative request usage and prior throttle provenance carry forward, and
-the pacing policy applies before every new transport.
+A **completed** resume with nothing outstanding is a **true no-op**: zero
+transport calls, zero pacing delay, zero throttle events, no provider client is
+constructed, the database is not written, and the checkpoint file is left
+**byte-identical**. An **interrupted** resume starts a fresh *process-local*
+pacing window — the limiter holds no cross-process state — but it does **not** get
+a fresh aggregate request budget: cumulative request usage carries forward and the
+pacing policy applies before every new transport.
+
+### Checkpoint usage provenance (`f1a-checkpoint-v2`)
+
+A *logical run* is one manifest executed by one or more processes. Each process
+produces its own usage report, and the checkpoint keeps them apart:
+
+| Checkpoint field | Meaning |
+|---|---|
+| `usage` | **Logical-run totals** across every process of the run |
+| `usage_provenance.processes` | Append-only per-process history, oldest first |
+| `usage_provenance.legacy_migrated` | The history was adopted from a v1 file |
+| `usage_provenance.process_count_known` | False for a migrated v1 history |
+
+For additive counters the invariant is exactly
+`logical_total = prior_total + current_process_value`. Set-like and evidence-like
+fields are never summed: family collections take a deterministic union,
+`network_occurred` is a logical OR, selection counts take a high-water mark,
+authentication/tier evidence follows a precedence order that can never be upgraded
+without an observation, a recorded budget exhaustion is never overwritten by a
+later clean process, and plan/manifest identity must agree across processes or the
+load fails closed. Every field of `UsageReport` carries exactly one declared rule
+in `sports_quant/usage_provenance.py`, and a test asserts the table covers the
+dataclass exhaustively.
+
+A process owns exactly one history entry and *replaces* it on every checkpoint
+write, so the many writes of one process — and any number of repeated resumes —
+contribute their evidence once. The gate's prior pre-charge is subtracted out of a
+process's own entry, so a third process can never re-count the first one's
+attempts.
+
+Why this exists: the June 2026 review proved that a completed `--resume` rewrote
+the checkpoint with the resuming process's empty report, zeroing
+`successful_responses` (1999 → 0), `failed_responses` (2 → 0), `retry_attempts`
+(7 → 0), `throttle_wait_seconds` (~3407.9 → 0), `pages_fetched` (401 → 0) and
+`families_completed`. One harmless-looking resume destroyed the only durable
+record that the run had contained terminal failures and retries.
+
+A v1 checkpoint (including the original June one) still loads: its flat `usage` is
+adopted as a single legacy history entry so every fact it holds survives, it is
+flagged `legacy_migrated`, and a missing counter stays **missing** rather than
+becoming a misleading `0`. A v1 file is only upgraded to v2 when a resume actually
+does work; reading it, or a no-op resume against it, leaves it untouched.
+
+Reporting keeps the two views side by side. A no-work resume prints
+`this_process=0` next to `prior=` and `logical_total=` for requests, successes,
+terminal failures, retries, pages, throttling and 429s, plus
+`new_work=False checkpoint_mutated=False`, so a clean row of zeros can never be
+mistaken for a run that fetched nothing. In JSON, `usage` is the logical total and
+`current_process_usage` / `prior_process_usage` are separate keys.
 
 ### Fail-closed conditions
 

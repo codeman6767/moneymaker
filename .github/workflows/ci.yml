@@ -114,3 +114,150 @@ jobs:
           "$PY" -m sports_quant db-init --db "$RUNNER_TEMP/smoke.db" | tee /tmp/init2.txt
           grep -q "Schema version: 17" /tmp/init1.txt
           grep -q "nothing was changed" /tmp/init2.txt
+
+      - name: Checkpoint provenance from the installed wheel (offline, zero network)
+        env:
+          PYTHONPATH: ""
+        working-directory: ${{ runner.temp }}
+        run: |
+          PY="$RUNNER_TEMP/smokeenv/bin/python"
+          "$PY" - <<'PY'
+          """Legacy load, no-op resume, three-process accounting, partial resume.
+
+          Runs against the WHEEL, outside the source tree, with a zero-network
+          sentinel armed: any DNS/socket/httpx use fails the smoke test.
+          """
+          import json, os, socket, tempfile
+          from pathlib import Path
+
+          def _boom(*a, **k):
+              raise AssertionError("wheel smoke attempted network access")
+          socket.getaddrinfo = _boom
+          socket.create_connection = _boom
+          import httpx
+          httpx.HTTPTransport.handle_request = _boom
+          httpx.AsyncHTTPTransport.handle_async_request = _boom
+
+          from sports_quant.db.schema import CURRENT_SCHEMA_VERSION
+          assert CURRENT_SCHEMA_VERSION == 17, CURRENT_SCHEMA_VERSION
+
+          from sports_quant.ingest.checkpoint import (
+              CHECKPOINT_FORMAT_VERSION, LEGACY_CHECKPOINT_FORMAT_VERSION,
+              Checkpoint, load_checkpoint, write_checkpoint)
+          from sports_quant.usage_provenance import (
+              USAGE_ACCOUNTING_VERSION, combine_usage, current_process_entry,
+              validate_usage_accounting)
+
+          tmp = Path(tempfile.mkdtemp())
+
+          # 1. A legacy v1 checkpoint loads and keeps every fact it holds.
+          v1 = {
+              "checkpoint_format_version": LEGACY_CHECKPOINT_FORMAT_VERSION,
+              "plan_version": "p", "manifest_hash": "h", "provider": "mlb_statsapi",
+              "league": "mlb", "date_range": "2026-06-01..2026-06-30",
+              "families": ["schedule"], "scratch_db": "s.db",
+              "scratch_fingerprint": "FP", "schema_version": 17,
+              "request_cap": 6002, "credit_cap": None,
+              "completed_identities": ["u1"], "state": "completed",
+              "usage": {"successful_responses": 1999, "failed_responses": 2,
+                        "retry_attempts": 7, "transport_starts": 2008,
+                        "reserved_attempts": 2008, "attempted_requests": 2008,
+                        "responses_received": 2001, "parse_successes": 1999,
+                        "pages_fetched": 401, "throttle_events": 1999,
+                        "throttle_wait_seconds": 3407.8885556863097,
+                        "families_completed": ["game", "skeleton"],
+                        "network_occurred": True, "checkpoint_state": "completed"}}
+          p1 = tmp / "legacy.ckpt"
+          p1.write_text(json.dumps(v1), encoding="utf-8")
+          before = p1.read_bytes()
+          ck = load_checkpoint(p1)
+          assert ck.checkpoint_format_version == LEGACY_CHECKPOINT_FORMAT_VERSION
+          assert ck.legacy_migrated and not ck.process_count_known
+          lg = ck.logical_usage()
+          assert (lg["successful_responses"], lg["failed_responses"],
+                  lg["retry_attempts"], lg["pages_fetched"]) == (1999, 2, 7, 401)
+          assert p1.read_bytes() == before, "loading a v1 checkpoint mutated it"
+          assert validate_usage_accounting(lg, request_cap=6002) == []
+
+          # 2. A missing legacy counter stays missing (never a misleading zero).
+          v1b = dict(v1); v1b["usage"] = {"successful_responses": 5}
+          p1b = tmp / "sparse.ckpt"; p1b.write_text(json.dumps(v1b), encoding="utf-8")
+          e = load_checkpoint(p1b).process_usage[0]
+          assert e["successful_responses"] == 5 and "retry_attempts" not in e
+
+          # 3. Three-process logical accounting: prior + current == total, once.
+          procs = [
+              {"reserved_attempts": 5, "attempted_requests": 5, "transport_starts": 5,
+               "successful_responses": 2, "failed_responses": 2, "retry_attempts": 1,
+               "responses_received": 2, "parse_successes": 2, "pages_fetched": 1,
+               "network_occurred": True, "families_completed": ["schedule"]},
+              {"reserved_attempts": 5, "attempted_requests": 5, "transport_starts": 5,
+               "successful_responses": 2, "failed_responses": 1, "retry_attempts": 2,
+               "responses_received": 2, "parse_successes": 2, "pages_fetched": 1,
+               "network_occurred": True, "families_failed": ["schedule"]},
+              {"reserved_attempts": 2, "attempted_requests": 2, "transport_starts": 2,
+               "successful_responses": 2, "responses_received": 2,
+               "parse_successes": 2, "pages_fetched": 1, "network_occurred": True,
+               "checkpoint_state": "completed", "families_completed": ["schedule"]}]
+          total = combine_usage(procs)
+          assert total["successful_responses"] == 6
+          assert total["failed_responses"] == 3, "a later process erased a failure"
+          assert total["retry_attempts"] == 3
+          assert total["reserved_attempts"] == 12
+          assert total["prior_transport_starts"] == 10
+          assert tuple(total["families_failed"]) == ("schedule",)
+          assert validate_usage_accounting(total, request_cap=50, entries=procs) == []
+
+          # 4. Repeated combination never multiplies prior usage.
+          assert combine_usage(procs) == total
+
+          # 5. The gate's prior pre-charge is not attributed to the new process.
+          entry = current_process_entry(
+              {"reserved_attempts": 30, "attempted_requests": 30,
+               "prior_requests": 20, "reserved_credits": 8, "prior_credits": 5})
+          assert entry["reserved_attempts"] == 10 and entry["reserved_credits"] == 3
+
+          # 6. A v2 round trip carries the provenance block and refuses a lie.
+          ck2 = Checkpoint(
+              manifest_hash="h", plan_version="p", provider="mlb_statsapi",
+              league="mlb", date_range="r", families=("schedule",),
+              scratch_db="s.db", scratch_fingerprint="FP", schema_version=17,
+              request_cap=50, credit_cap=None, process_usage=list(procs),
+              usage=total, state="completed", completed_identities=["u1"])
+          p2 = tmp / "v2.ckpt"
+          write_checkpoint(p2, ck2)
+          body = json.loads(p2.read_text(encoding="utf-8"))
+          assert body["checkpoint_format_version"] == CHECKPOINT_FORMAT_VERSION
+          assert body["usage_provenance"]["accounting_version"] == USAGE_ACCOUNTING_VERSION
+          assert body["usage_provenance"]["process_count"] == 3
+          reloaded = load_checkpoint(p2)
+          assert reloaded.usage["failed_responses"] == 3
+          assert reloaded.prior_usage()["successful_responses"] == 4
+          assert reloaded.current_process_usage()["successful_responses"] == 2
+          body["usage"]["successful_responses"] = 999
+          p2.write_text(json.dumps(body), encoding="utf-8")
+          try:
+              load_checkpoint(p2)
+          except Exception as exc:
+              assert "inconsistent" in str(exc), exc
+          else:
+              raise AssertionError("a checkpoint contradicting its history was accepted")
+
+          # 7. A completed state cannot coexist with an unresolved unit.
+          bad = Checkpoint(
+              manifest_hash="h", plan_version="p", provider="mlb_statsapi",
+              league="mlb", date_range="r", families=("schedule",),
+              scratch_db="s.db", scratch_fingerprint="FP", schema_version=17,
+              request_cap=50, credit_cap=None, state="completed",
+              completed_identities=["u1"], incomplete_identities=["u2"])
+          p3 = tmp / "bad.ckpt"
+          write_checkpoint(p3, bad)
+          try:
+              load_checkpoint(p3)
+          except Exception as exc:
+              assert "unresolved" in str(exc), exc
+          else:
+              raise AssertionError("a completed checkpoint with an unresolved unit loaded")
+
+          print("checkpoint provenance verified from the installed wheel")
+          PY

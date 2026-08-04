@@ -12,6 +12,15 @@ commit is treated as *incomplete* and is retried on resume (idempotent, because
 observation writes are content-hash append-only). The checkpoint is written
 atomically (temp file + ``os.replace``) after each unit reaches the boundary, so
 the checkpoint never claims completion the database cannot back.
+
+**Usage provenance (v2).** ``usage`` holds the LOGICAL-RUN totals across every
+process that has executed this manifest, and ``usage_provenance.processes`` is
+the append-only per-process history those totals are derived from. A process
+replaces its own (last) entry on every write and never appends twice, so
+repeated resumes cannot multiply prior usage. A v1 checkpoint is still readable:
+its flat ``usage`` is adopted as a single legacy history entry, marked
+``legacy_migrated``, and never fabricated into per-process detail it does not
+contain. See :mod:`sports_quant.usage_provenance` for the combine rules.
 """
 
 from __future__ import annotations
@@ -23,7 +32,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-CHECKPOINT_FORMAT_VERSION = "f1a-checkpoint-v1"
+from ..usage_provenance import (
+    USAGE_ACCOUNTING_VERSION,
+    UsageProvenanceError,
+    combine_usage,
+    prior_totals,
+    sanitized_process_entries,
+    validate_usage_accounting,
+)
+
+CHECKPOINT_FORMAT_VERSION = "f1a-checkpoint-v2"
+#: Formats this build can read. v1 lacks per-process usage provenance.
+LEGACY_CHECKPOINT_FORMAT_VERSION = "f1a-checkpoint-v1"
+SUPPORTED_CHECKPOINT_FORMATS = (CHECKPOINT_FORMAT_VERSION,
+                                LEGACY_CHECKPOINT_FORMAT_VERSION)
 
 # Serialize checkpoint writes to the same path across threads/tasks: a temp+replace
 # is atomic, but concurrent replaces onto one target race (notably on Windows). A
@@ -67,12 +89,44 @@ class Checkpoint:
     failed_identities: list[str] = field(default_factory=list)
     blocked_identities: list[str] = field(default_factory=list)
     incomplete_identities: list[str] = field(default_factory=list)
+    #: Units that an earlier process left unresolved (blocked/failed/incomplete)
+    #: and a later process completed. Keeps identity-level failure history after
+    #: the unit legitimately leaves the unresolved sets.
+    recovered_identities: list[str] = field(default_factory=list)
     #: The frozen canonical selected game set (from the skeleton unit); resume uses
     #: this exact set rather than re-deriving from a possibly-changed schedule.
     stage_game_ids: list[str] = field(default_factory=list)
+    #: LOGICAL-RUN totals (all processes), derived from :attr:`process_usage`.
     usage: dict[str, Any] = field(default_factory=dict)
+    #: Append-only per-process usage history, oldest first. Exactly one entry per
+    #: process that has executed this manifest.
+    process_usage: list[dict[str, Any]] = field(default_factory=list)
+    #: True when this history was adopted from a v1 checkpoint, whose per-process
+    #: split is unknowable. The evidence present is preserved; none is invented.
+    legacy_migrated: bool = False
     last_boundary: str = ""
-    state: str = "in_progress"  # in_progress|completed|truncated
+    state: str = "in_progress"  # in_progress|completed|truncated|failed
+
+    @property
+    def process_count_known(self) -> bool:
+        """False for a migrated v1 history: it cannot say how many processes ran."""
+
+        return not self.legacy_migrated
+
+    def prior_usage(self) -> dict[str, Any]:
+        """Combined evidence of every process except the newest."""
+
+        return prior_totals(self.process_usage)
+
+    def current_process_usage(self) -> dict[str, Any]:
+        """The newest process's own evidence (empty when there is no history)."""
+
+        return dict(self.process_usage[-1]) if self.process_usage else {}
+
+    def logical_usage(self) -> dict[str, Any]:
+        """Logical-run totals recomputed from the history (source of truth)."""
+
+        return combine_usage(self.process_usage) if self.process_usage else dict(self.usage)
 
     def body(self) -> dict[str, Any]:
         return {
@@ -93,17 +147,34 @@ class Checkpoint:
             "failed_identities": sorted(set(self.failed_identities)),
             "blocked_identities": sorted(set(self.blocked_identities)),
             "incomplete_identities": sorted(set(self.incomplete_identities)),
+            "recovered_identities": sorted(set(self.recovered_identities)),
             "stage_game_ids": list(self.stage_game_ids),
             "usage": self.usage,
+            "usage_provenance": {
+                "accounting_version": USAGE_ACCOUNTING_VERSION,
+                "legacy_migrated": self.legacy_migrated,
+                "process_count_known": self.process_count_known,
+                "process_count": len(self.process_usage),
+                "processes": [dict(sorted(p.items())) for p in self.process_usage],
+            },
             "last_boundary": self.last_boundary,
             "state": self.state,
         }
 
     def canonical(self) -> str:
-        return json.dumps(self.body(), sort_keys=True, separators=(",", ":"))
+        return json.dumps(self.body(), sort_keys=True, separators=(",", ":"),
+                          default=_json_default)
 
     def is_complete_for(self, identity: str) -> bool:
         return identity in set(self.completed_identities)
+
+
+def _json_default(value: Any) -> Any:
+    """Serialize the tuple-valued usage fields (families_*) deterministically."""
+
+    if isinstance(value, (tuple, set, frozenset)):
+        return sorted(value) if isinstance(value, (set, frozenset)) else list(value)
+    raise TypeError(f"checkpoint value of type {type(value).__name__} is not serializable")
 
 
 #: Hard cap on a checkpoint file we will parse (defends against a hostile,
@@ -183,13 +254,36 @@ def load_checkpoint(path: Path) -> Checkpoint:
         raise CheckpointError(f"checkpoint is not valid JSON: {exc}") from None
     if not isinstance(data, dict):
         raise CheckpointError("checkpoint root must be a JSON object")
-    if data.get("checkpoint_format_version") != CHECKPOINT_FORMAT_VERSION:
-        raise CheckpointError(
-            f"unsupported checkpoint format {data.get('checkpoint_format_version')!r}")
+    fmt = data.get("checkpoint_format_version")
+    if fmt not in SUPPORTED_CHECKPOINT_FORMATS:
+        raise CheckpointError(f"unsupported checkpoint format {fmt!r}")
     for req in ("manifest_hash", "plan_version", "provider", "league", "date_range",
                 "families", "scratch_db", "scratch_fingerprint", "schema_version"):
         if req not in data:
             raise CheckpointError(f"checkpoint missing required field: {req}")
+    flat_usage = dict(data.get("usage", {}))
+    try:
+        history, legacy = _load_process_usage(data, fmt, flat_usage)
+    except UsageProvenanceError as exc:
+        raise CheckpointError(f"checkpoint usage provenance is unusable: {exc}") from None
+    # The stored logical totals must be exactly what the recorded history implies.
+    # A checkpoint whose totals contradict its own history is not trustworthy
+    # evidence, so it fails closed rather than being silently recomputed.
+    if history and not legacy:
+        problems = validate_usage_accounting(
+            flat_usage, request_cap=data.get("request_cap"),
+            credit_cap=data.get("credit_cap"), entries=history)
+        if problems:
+            raise CheckpointError(
+                "checkpoint usage accounting is inconsistent: " + "; ".join(problems[:4]))
+    state = data.get("state", "in_progress")
+    unresolved = (list(data.get("incomplete_identities", []))
+                  + list(data.get("failed_identities", []))
+                  + list(data.get("blocked_identities", [])))
+    if state == "completed" and unresolved:
+        raise CheckpointError(
+            f"checkpoint claims state 'completed' while holding {len(unresolved)} "
+            "unresolved unit(s); refusing to treat it as complete")
     return Checkpoint(
         manifest_hash=data["manifest_hash"],
         plan_version=data["plan_version"],
@@ -207,11 +301,59 @@ def load_checkpoint(path: Path) -> Checkpoint:
         failed_identities=list(data.get("failed_identities", [])),
         blocked_identities=list(data.get("blocked_identities", [])),
         incomplete_identities=list(data.get("incomplete_identities", [])),
+        recovered_identities=list(data.get("recovered_identities", [])),
         stage_game_ids=list(data.get("stage_game_ids", [])),
-        usage=dict(data.get("usage", {})),
+        usage=flat_usage,
+        process_usage=history,
+        legacy_migrated=legacy,
         last_boundary=data.get("last_boundary", ""),
-        state=data.get("state", "in_progress"),
+        state=state,
+        # Keep the on-disk format so a v1 file that is only READ (never resumed)
+        # is not silently relabelled as v2 in memory.
+        checkpoint_format_version=str(fmt),
     )
+
+
+def _load_process_usage(
+    data: dict[str, Any], fmt: Any, flat_usage: dict[str, Any]
+) -> tuple[list[dict[str, Any]], bool]:
+    """Return ``(per_process_history, legacy_migrated)``.
+
+    A v2 checkpoint carries its own history. A v1 checkpoint carries only the
+    newest process's flat report; it is adopted verbatim as ONE history entry so
+    every fact it does contain survives a resume, and it is flagged legacy so
+    nothing later claims to know how many processes produced it. Missing counters
+    are never invented -- an absent field stays absent rather than becoming 0.
+    """
+
+    prov = data.get("usage_provenance")
+    if fmt == CHECKPOINT_FORMAT_VERSION:
+        if prov is None:
+            raise UsageProvenanceError("v2 checkpoint has no usage_provenance block")
+        if not isinstance(prov, dict):
+            raise UsageProvenanceError("usage_provenance must be a JSON object")
+        version = prov.get("accounting_version")
+        if version != USAGE_ACCOUNTING_VERSION:
+            raise UsageProvenanceError(
+                f"unsupported usage accounting version {version!r}")
+        raw = prov.get("processes")
+        if not isinstance(raw, list):
+            raise UsageProvenanceError("usage_provenance.processes must be a list")
+        history = sanitized_process_entries(raw)
+        declared = prov.get("process_count")
+        if isinstance(declared, int) and declared != len(history):
+            raise UsageProvenanceError(
+                f"usage_provenance.process_count {declared} does not match the "
+                f"{len(history)} recorded process entries")
+        return history, bool(prov.get("legacy_migrated", False))
+    # -- v1 ---------------------------------------------------------------- #
+    if prov is not None:
+        raise UsageProvenanceError(
+            "v1 checkpoint carries a usage_provenance block; refusing a "
+            "contradictory mixture of formats")
+    if not flat_usage:
+        return [], True
+    return sanitized_process_entries([flat_usage]), True
 
 
 def verify_resume(

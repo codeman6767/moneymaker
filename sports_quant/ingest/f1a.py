@@ -407,6 +407,26 @@ class _IngestorExecutor:
                                       excluded=excluded, deduplicated=deduplicated)
         return result
 
+    def remaining_identities(self, *, completed: set[str]) -> Optional[tuple[str, ...]]:
+        """Outstanding units, determined with ZERO transport, or ``None`` if unknown.
+
+        The selected game set is frozen into the checkpoint by the skeleton unit,
+        so on resume the whole unit set is derivable offline. If the skeleton
+        itself is not complete the set cannot be known without fetching, and the
+        skeleton is reported as outstanding (work remains) rather than guessed.
+        """
+
+        skel_id = self._skeleton_identity()
+        if skel_id not in completed:
+            return (skel_id,)
+        if not self._includes:
+            return ()  # skeleton-only stage, and the skeleton is done
+        if not self._resume_game_ids:
+            # A rich stage with no frozen game set: cannot prove completeness.
+            return None
+        return tuple(self._game_identity(gid) for gid in self._resume_game_ids
+                     if self._game_identity(gid) not in completed)
+
     def iter_units(self, *, gate: RequestGate, completed: set[str]) -> Iterator[UnitDone]:
         """Yield the skeleton unit, then one atomic unit per selected game.
 
@@ -670,26 +690,18 @@ def run_pilot_cli(
             "/min; refusing to execute a manifest whose pacing bound would be ignored")
         return EXIT_USAGE
     if resume_ck is not None:
+        # `resume_ck.usage` is the LOGICAL-RUN total across every earlier process,
+        # so it is exactly the prior figure the caps must be charged with. Pacing,
+        # selection, family, failure and retry evidence is NOT re-seeded into the
+        # current process any more: the checkpoint's per-process history carries it
+        # forward, which is what keeps this process's own report honest while the
+        # logical totals stay complete (see sports_quant.usage_provenance).
         _u = resume_ck.usage
         gate.seed_prior(
             prior_requests=int(_u.get("reserved_attempts", 0) or 0),
             prior_credits=int(_u.get("reserved_credits", 0) or 0),
-            # Carry the earlier process's transport evidence forward so a completed
-            # resume cannot make network-fetched data look as if it never was fetched.
-            prior_transport_starts=int(_u.get("transport_starts", 0) or 0)
-            + int(_u.get("prior_transport_starts", 0) or 0),
-            prior_pages_fetched=int(_u.get("pages_fetched", 0) or 0)
-            + int(_u.get("prior_pages_fetched", 0) or 0))
-        # Selection accounting is a property of the frozen selected set, so it must
-        # survive a resume that re-fetches nothing.
-        gate.record_selection(
-            games_received=int(_u.get("games_received", 0) or 0),
-            games_selected=int(_u.get("games_selected", 0) or 0),
-            excluded=int(_u.get("games_excluded_by_max_games", 0) or 0),
-            deduplicated=int(_u.get("games_deduplicated", 0) or 0))
-        if _u.get("authentication_status") == "succeeded":
-            gate.usage.authentication_status = "succeeded"
-            gate.usage.authentication_succeeded = True
+            prior_transport_starts=int(_u.get("transport_starts", 0) or 0),
+            prior_pages_fetched=int(_u.get("pages_fetched", 0) or 0))
 
     result = run_pilot(
         manifest=manifest, gate=gate, executor=executor,
@@ -701,14 +713,34 @@ def run_pilot_cli(
         out(json.dumps(result.as_dict(), sort_keys=True))
     else:
         state = "TRUNCATED" if result.truncated else "COMPLETE"
+        if not result.performed_new_work:
+            state = "COMPLETE (no work remaining)"
         # `.get` throughout: a partial usage mapping must never break reporting.
-        u = result.usage
-        out(f"pilot {league.upper()} {state}  requests={u.get('attempted_requests', 0)} "
+        # `u` is the LOGICAL-RUN total across every process; `c` is what THIS
+        # process did. A no-work resume must never print a clean row of zeros
+        # without the preserved totals beside it.
+        u, c = result.usage, result.current_process_usage
+        out(f"pilot {league.upper()} {state}  "
+            f"requests(this process)={_cur(c, 'attempted_requests')} "
             f"completed_units={result.completed} skipped={result.skipped}")
-        # Pages: unique SUCCESSFUL listing pages (a retry never double-counts).
-        out(f"  pages:     fetched={u.get('pages_fetched', 0)} "
-            f"(logical run total="
-            f"{u.get('prior_pages_fetched', 0) + u.get('pages_fetched', 0)})")
+        out(f"  provenance: new_work={result.performed_new_work} "
+            f"checkpoint_mutated={result.checkpoint_mutated} "
+            f"processes={result.process_count}"
+            f"{' (legacy: per-process split unknown)' if result.legacy_provenance else ''}")
+        for label, field in (("requests  ", "attempted_requests"),
+                             ("successes ", "successful_responses"),
+                             ("failures  ", "failed_responses"),
+                             ("retries   ", "retry_attempts"),
+                             ("pages     ", "pages_fetched"),
+                             ("throttled ", "throttle_events"),
+                             ("http_429s ", "http_429s"),
+                             ("blocked   ", "blocked_requests")):
+            out(f"  {label} this_process={_cur(c, field)} "
+                f"prior={_cur(result.prior_process_usage, field)} "
+                f"logical_total={_cur(u, field)}")
+        out(f"  throttle_wait this_process={_curf(c, 'throttle_wait_seconds'):.1f}s "
+            f"prior={_curf(result.prior_process_usage, 'throttle_wait_seconds'):.1f}s "
+            f"logical_total={_curf(u, 'throttle_wait_seconds'):.1f}s")
         # Selection truncation is a planned bound -- NEVER budget truncation.
         # Every received entry is attributed: selected + bound + deduplicated.
         out(f"  selection: received={u.get('games_received', 0)} "
@@ -716,6 +748,10 @@ def run_pilot_cli(
             f"excluded_by_max_games={u.get('games_excluded_by_max_games', 0)} "
             f"deduplicated={u.get('games_deduplicated', 0)} "
             f"selection_truncated={u.get('selection_truncated', False)}")
+        out(f"  families:  this_process={list(c.get('families_completed') or [])} "
+            f"logical_total={list(u.get('families_completed') or [])} "
+            f"failed={list(u.get('families_failed') or [])} "
+            f"truncated={list(u.get('families_truncated') or [])}")
         out(f"  budget:    truncated={result.truncated} "
             f"blocked_requests={u.get('blocked_requests', 0)} "
             f"budget_exhausted={u.get('budget_exhausted') is not None}")
@@ -736,6 +772,26 @@ def run_pilot_cli(
     if result.failure is not None:
         return EXIT_RUN_FAILED
     return EXIT_OK
+
+
+def _cur(usage: Mapping[str, Any], field: str) -> int:
+    """One integer counter from a possibly-absent usage mapping.
+
+    A missing key reads 0 for display only; the checkpoint itself never invents a
+    counter it does not have.
+    """
+
+    try:
+        return int(usage.get(field) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _curf(usage: Mapping[str, Any], field: str) -> float:
+    try:
+        return float(usage.get(field) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _default_client_factory(league: str) -> Callable[[RequestGate], Any]:

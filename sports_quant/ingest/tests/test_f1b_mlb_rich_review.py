@@ -339,7 +339,15 @@ def test_results_and_innings_share_one_linescore_and_sum_consistently(
 def test_rich_completed_resume_preserves_transport_provenance(
     tmp_path: Path, f1b_authorized: None, no_external_network: None  # noqa: F811
 ) -> None:
-    """A completed rich resume adds nothing and keeps the first run's provenance."""
+    """A completed rich resume adds nothing and keeps the first run's provenance.
+
+    ``checkpoint.usage`` holds the LOGICAL-RUN totals across every process, so the
+    first run's transports/pages/families are still there afterwards. The resuming
+    process's own (zero) usage lives in the per-process history. Before the
+    provenance repair this asserted the opposite -- that the checkpoint's usage was
+    the resume's local report -- which is exactly how a completed resume erased the
+    earlier process's failure and retry evidence.
+    """
 
     seen: list[str] = []
     factory = _mlb_factory(seen)
@@ -347,20 +355,25 @@ def test_rich_completed_resume_preserves_transport_provenance(
     assert rc == 0, "\n".join(lines)
     assert len(seen) == 6
     before = _counts(db)
+    before_bytes = Path(ck).read_bytes()
 
     rc2, lines2, _db, _ck = _run(tmp_path, "mlb", MLB_RICH, factory, resume=True)
     assert rc2 == 0, "\n".join(lines2)
     assert len(seen) == 6, "a completed resume must issue ZERO further requests"
 
-    u = load_checkpoint(ck).usage
-    assert u["transport_starts"] == 0 and u["pages_fetched"] == 0
-    assert u["database_mutated"] is False and u["network_occurred"] is False
-    assert u["skipped_on_resume"] == 2                       # both durable units
-    assert u["attempted_requests"] == 6 and u["prior_requests"] == 6
-    # Defect-E provenance: the first run's transports and pages survive the resume.
-    assert u["prior_transport_starts"] == 6
-    assert u["prior_pages_fetched"] == 2
-    assert load_checkpoint(ck).state == "completed"
+    # A completed resume with no work left is a true no-op: not one byte changes.
+    assert Path(ck).read_bytes() == before_bytes
+
+    loaded = load_checkpoint(ck)
+    u = loaded.usage
+    # Logical-run totals: the first process's evidence is intact.
+    assert u["transport_starts"] == 6 and u["pages_fetched"] == 2
+    assert u["database_mutated"] is True and u["network_occurred"] is True
+    assert u["attempted_requests"] == 6
+    assert loaded.state == "completed"
+    # The resuming process contributed nothing of its own.
+    assert loaded.current_process_usage()["transport_starts"] == 6  # only 1 process ran
+    assert loaded.process_count_known and len(loaded.process_usage) == 1
     # Selection accounting survives, and nothing was persisted twice.
     assert (u["games_received"], u["games_selected"],
             u["games_excluded_by_max_games"]) == (30, 1, 29)
