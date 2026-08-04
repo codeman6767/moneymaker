@@ -468,6 +468,11 @@ class UsageReport:
     games_received: int = 0
     games_selected: int = 0
     games_excluded_by_max_games: int = 0
+    #: Schedule entries dropped before selection because another entry carried the
+    #: same provider game id (or the entry had none). Without this counter a
+    #: received/selected gap had no attribution at all, so a coverage report could
+    #: not distinguish a deduplicated payload from silently lost games.
+    games_deduplicated: int = 0
     selection_truncated: bool = False
     # AUTHENTICATION / TIER honesty. ``tier_verified`` is only ever true when a
     # bounded capability audit observed tier-gated endpoints; a successful call to an
@@ -806,14 +811,21 @@ class RequestGate:
                 self.usage.tier_status = f"configured_not_verified:{tier}"
 
     def record_selection(
-        self, *, games_received: int, games_selected: int, excluded: int
+        self, *, games_received: int, games_selected: int, excluded: int,
+        deduplicated: int = 0
     ) -> None:
-        """Record ``max_games`` selection accounting (never budget truncation)."""
+        """Record game-SELECTION accounting (never budget truncation).
+
+        ``excluded`` is the ``max_games`` bound; ``deduplicated`` is repeated or
+        unidentifiable schedule entries. Both are reported so the identity
+        ``received = selected + excluded + deduplicated`` closes.
+        """
 
         with self._lock:
             self.usage.games_received += max(0, int(games_received))
             self.usage.games_selected += max(0, int(games_selected))
             self.usage.games_excluded_by_max_games += max(0, int(excluded))
+            self.usage.games_deduplicated += max(0, int(deduplicated))
             self.usage.selection_truncated = self.usage.games_excluded_by_max_games > 0
 
     def record_provider_credits(

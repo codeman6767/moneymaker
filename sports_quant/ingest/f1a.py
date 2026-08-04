@@ -378,9 +378,17 @@ class _IngestorExecutor:
         # A genuine ingest failure (fetch/parse/persist error the ingestor caught)
         # leaves the unit INCOMPLETE -- do not checkpoint it as done; surface it so
         # the runner records a failed, resumable state.
-        if getattr(result, "status", "") == "failed":
+        #
+        # ``partially_failed`` counts as incomplete too. It means some declared
+        # family did not persist while others did, so the unit's coverage is short
+        # of what the manifest planned. Treating it as done was a real defect: the
+        # June 2026 month run lost both roster requests for game 824011 when the
+        # host resumed from suspension, yet checkpointed that unit as complete, so
+        # a `completed` checkpoint permanently concealed the gap and no resume
+        # would ever retry it. A short unit must stay resumable.
+        if getattr(result, "status", "") in ("failed", "partially_failed"):
             raise _UnitFailed(
-                f"{self._league} ingest unit failed: "
+                f"{self._league} ingest unit {getattr(result, 'status', '')}: "
                 f"{getattr(result, 'error_type', None)}: {getattr(result, 'error_message', '')}")
         # Surface max_games SELECTION accounting (both ingestors already compute it)
         # so the report distinguishes a bounded selection from budget truncation.
@@ -392,10 +400,11 @@ class _IngestorExecutor:
         if game_id is None:
             received = int(getattr(result, "games_received", 0) or 0)
             excluded = int(getattr(result, "games_truncated", 0) or 0)
-            if received or excluded:
+            deduplicated = int(getattr(result, "games_deduplicated", 0) or 0)
+            if received or excluded or deduplicated:
                 selected = len(getattr(result, "ordered_game_ids", ()) or ())
                 gate.record_selection(games_received=received, games_selected=selected,
-                                      excluded=excluded)
+                                      excluded=excluded, deduplicated=deduplicated)
         return result
 
     def iter_units(self, *, gate: RequestGate, completed: set[str]) -> Iterator[UnitDone]:
@@ -676,7 +685,8 @@ def run_pilot_cli(
         gate.record_selection(
             games_received=int(_u.get("games_received", 0) or 0),
             games_selected=int(_u.get("games_selected", 0) or 0),
-            excluded=int(_u.get("games_excluded_by_max_games", 0) or 0))
+            excluded=int(_u.get("games_excluded_by_max_games", 0) or 0),
+            deduplicated=int(_u.get("games_deduplicated", 0) or 0))
         if _u.get("authentication_status") == "succeeded":
             gate.usage.authentication_status = "succeeded"
             gate.usage.authentication_succeeded = True
@@ -700,9 +710,11 @@ def run_pilot_cli(
             f"(logical run total="
             f"{u.get('prior_pages_fetched', 0) + u.get('pages_fetched', 0)})")
         # Selection truncation is a planned bound -- NEVER budget truncation.
+        # Every received entry is attributed: selected + bound + deduplicated.
         out(f"  selection: received={u.get('games_received', 0)} "
             f"selected={u.get('games_selected', 0)} "
             f"excluded_by_max_games={u.get('games_excluded_by_max_games', 0)} "
+            f"deduplicated={u.get('games_deduplicated', 0)} "
             f"selection_truncated={u.get('selection_truncated', False)}")
         out(f"  budget:    truncated={result.truncated} "
             f"blocked_requests={u.get('blocked_requests', 0)} "

@@ -19,6 +19,7 @@ from .report_access import (
     EXIT_OK,
     Printer,
     pending_review_counts,
+    schema_version_or_none,
     validate_since,
     with_readonly_corpus,
 )
@@ -149,7 +150,10 @@ def build_status_report(
 
     return {
         "command": "data-status",
-        "schema_version": 16,
+        # Read the corpus's OWN version. This was hard-coded to 16 and so reported
+        # "schema v16" for a v17 database -- a status report that misstates the
+        # schema it just read is worse than one that omits it.
+        "schema_version": schema_version_or_none(conn),
         "league": league_code,
         "since": since,
         "canonical_games": _count(conn, games_sql, games_params),

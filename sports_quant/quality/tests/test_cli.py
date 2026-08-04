@@ -48,7 +48,12 @@ def test_data_status_json_deterministic(db_path: Path) -> None:
     out1: list[str] = []
     assert run_data_status(database_path=db_path, as_json=True, out=out1.append) == 0
     payload = json.loads(out1[-1])
-    assert payload["schema_version"] == 16 and payload["canonical_games"] == 1
+    # Assert against the schema the corpus actually carries, never a literal: the
+    # reported version used to be hard-coded and silently misstated a v17 corpus.
+    from sports_quant.db.schema import CURRENT_SCHEMA_VERSION
+
+    assert payload["schema_version"] == CURRENT_SCHEMA_VERSION
+    assert payload["canonical_games"] == 1
     assert payload["command"] == "data-status"
     assert set(payload) >= {"table_row_counts", "observation_coverage", "provider_runs",
                             "unresolved_references", "unmatched_sportsbook_events",

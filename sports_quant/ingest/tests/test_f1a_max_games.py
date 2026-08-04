@@ -42,17 +42,26 @@ def _mlb_games(*pks_dates: tuple[int, str]) -> list[dict]:
     return [game(game_pk=pk, official_date=d) for pk, d in pks_dates]
 
 
-def test_mlb_select_unbounded_preserves_order() -> None:
-    games = _mlb_games((3, "2024-04-09"), (1, "2024-04-09"))
-    selected, trunc = _select_games(games, None)
-    assert [g["gamePk"] for g in selected] == [3, 1] and trunc == 0  # provider order
+def test_mlb_select_unbounded_is_canonical_and_deduplicated() -> None:
+    """An unbounded run is ordered and deduplicated too (F1 month review).
+
+    Selection used to return the provider's list untouched when ``max_games`` was
+    ``None``, so a repeated ``gamePk`` was ingested twice and the order depended on
+    the provider's response.
+    """
+
+    games = _mlb_games((3, "2024-04-09"), (1, "2024-04-09"), (1, "2024-04-09"))
+    selected, trunc, deduped = _select_games(games, None)
+    assert [g["gamePk"] for g in selected] == [1, 3]  # canonical (date, pk)
+    assert (trunc, deduped) == (0, 1)
 
 
 def test_mlb_select_canonical_and_bounded() -> None:
     games = _mlb_games((3, "2024-04-10"), (1, "2024-04-09"), (2, "2024-04-09"))
-    selected, trunc = _select_games(games, 2)
+    selected, trunc, deduped = _select_games(games, 2)
     # canonical order = (date, pk): (04-09,1),(04-09,2),(04-10,3) -> first 2
     assert [g["gamePk"] for g in selected] == [1, 2] and trunc == 1
+    assert deduped == 0
 
 
 @pytest.mark.parametrize("limit,expected,trunc", [
@@ -60,14 +69,16 @@ def test_mlb_select_canonical_and_bounded() -> None:
 ])
 def test_mlb_select_boundaries(limit: int, expected: list[int], trunc: int) -> None:
     games = _mlb_games((2, "2024-04-09"), (1, "2024-04-09"), (3, "2024-04-09"))
-    selected, t = _select_games(games, limit)
+    selected, t, deduped = _select_games(games, limit)
     assert [g["gamePk"] for g in selected] == expected and t == trunc
+    assert deduped == 0
 
 
 def test_mlb_select_dedupes_repeated_game() -> None:
     games = _mlb_games((1, "2024-04-09"), (1, "2024-04-09"), (2, "2024-04-09"))
-    selected, trunc = _select_games(games, 5)
+    selected, trunc, deduped = _select_games(games, 5)
     assert [g["gamePk"] for g in selected] == [1, 2] and trunc == 0
+    assert deduped == 1  # the removal is now counted, not silent
 
 
 def test_mlb_select_reordered_responses_same_selection() -> None:

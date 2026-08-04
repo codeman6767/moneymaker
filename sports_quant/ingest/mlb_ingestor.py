@@ -82,6 +82,11 @@ class MlbIngestResult:
     #: the deterministic canonical-ordered provider game ids actually selected
     #: (post-slice) -- consumed by the F1A per-game pilot executor for resumability.
     games_truncated: int = 0
+    #: Schedule entries removed before selection because another entry carried the
+    #: same ``gamePk`` (or because the entry had none). Reported separately from
+    #: ``games_truncated`` so ``games_received`` always accounts fully:
+    #: received = selected + truncated + deduplicated.
+    games_deduplicated: int = 0
     ordered_game_ids: tuple[str, ...] = ()
     games_inserted: int = 0
     games_unchanged: int = 0
@@ -273,22 +278,44 @@ def validate_max_games(max_games: Optional[int]) -> None:
         raise ValueError(f"max_games {max_games} exceeds the safe maximum (100000)")
 
 
+#: Schedule status codes ranked by how settled the record is. A duplicated gamePk
+#: must collapse to its most settled record, not to whichever copy arrived first:
+#: StatsAPI can return both the superseded entry for a postponed original AND the
+#: entry for the game that was actually played, and the played record is the truth.
+_STATUS_SETTLEDNESS = {"F": 3, "O": 3, "FR": 3, "FT": 3, "I": 2, "P": 1, "S": 1,
+                       "D": 0, "DR": 0, "DI": 0, "C": 0, "CR": 0, "U": 0, "T": 0}
+
+
+def _settledness(g: dict[str, Any]) -> int:
+    code = _opt_str(_as_dict(g.get("status")).get("statusCode")) or ""
+    return _STATUS_SETTLEDNESS.get(code.upper(), 1)
+
+
 def _select_games(
     games: list[dict[str, Any]], max_games: Optional[int]
-) -> tuple[list[dict[str, Any]], int]:
-    """Deterministic canonical game selection for ``max_games`` (B2).
+) -> tuple[list[dict[str, Any]], int, int]:
+    """Deterministic canonical game selection.
 
     Orders by ``(officialDate, gamePk)`` -- never provider response order --
-    deduplicates by ``gamePk`` (a corrected/repeated schedule record collapses to
-    one), then keeps the first ``max_games``. Returns ``(selected, truncated_n)``.
-    The same ordering is applied to every dependent rich-data family because the
-    whole pipeline consumes this selected list.
+    deduplicates by ``gamePk``, then keeps the first ``max_games``. Returns
+    ``(selected, truncated_n, deduplicated_n)`` so the caller can close the
+    accounting identity ``received = selected + truncated + deduplicated``; a
+    silent removal would make a coverage report overstate what was fetched.
+
+    Deduplication is CONTENT-AWARE and total: among records sharing a ``gamePk``
+    the most settled status wins, then the latest ``gameDate``, then the record's
+    canonical serialization. Payload order never decides, so the survivor cannot
+    change just because the provider reorders its response.
+
+    An entry with no usable ``gamePk`` is deliberately KEPT here so the normalizer
+    still rejects it and records the data-quality finding; dropping it silently
+    would trade one unreported removal for another.
+
+    Deduplication is unconditional. It used to be skipped when ``max_games`` was
+    ``None``, which let one ``gamePk`` be ingested twice on an unbounded run.
     """
 
-    if max_games is None:
-        return games, 0  # unbounded: preserve provider order exactly (no behavior change)
-
-    def _key(g: dict[str, Any]) -> tuple[str, int]:
+    def _order_key(g: dict[str, Any]) -> tuple[str, int]:
         pk = _provider_id(g, "gamePk")
         date = _opt_str(_as_dict(g).get("officialDate")) or _opt_str(g.get("gameDate")) or ""
         try:
@@ -297,17 +324,30 @@ def _select_games(
             pk_int = 0
         return (date, pk_int)
 
-    seen: set[str] = set()
-    deduped: list[dict[str, Any]] = []
-    for g in sorted(games, key=_key):
+    def _preference(g: dict[str, Any]) -> tuple[int, str, str]:
+        return (_settledness(g),
+                _opt_str(g.get("gameDate")) or "",
+                canonical_json(g))
+
+    best: dict[str, dict[str, Any]] = {}
+    unidentified: list[dict[str, Any]] = []
+    removed = 0
+    for g in games:
         pk = _provider_id(g, "gamePk")
-        if pk is None or pk in seen:
+        if pk is None:
+            unidentified.append(g)  # kept: the normalizer must reject and report it
             continue
-        seen.add(pk)
-        deduped.append(g)
+        incumbent = best.get(pk)
+        if incumbent is None:
+            best[pk] = g
+        else:
+            removed += 1
+            if _preference(g) > _preference(incumbent):
+                best[pk] = g
+    deduped = sorted([*best.values(), *unidentified], key=_order_key)
     if max_games is None or len(deduped) <= max_games:
-        return deduped, 0
-    return deduped[:max_games], len(deduped) - max_games
+        return deduped, 0, removed
+    return deduped[:max_games], len(deduped) - max_games, removed
 
 
 # --------------------------------------------------------------------------- #
@@ -436,6 +476,18 @@ def _result_issues(
     if norm.mapped_status == "final" and result.home_runs is None and result.away_runs is None:
         issues.append(_DqIssue("issue", "DQ-MLB-RESULT-002",
                                f"final gamePk {norm.game_pk} has no usable result data"))
+    # The inverse of RESULT-002, and previously silent: a settled score under a
+    # status that is not final. StatsAPI keeps the original entry of a postponed
+    # game labelled `Postponed` while its boxscore/linescore report the makeup
+    # game that was actually played, so the corpus ends up holding a complete
+    # 9-inning result stamped `postponed`. Label builders that filter on `final`
+    # would drop a real, completed game; say so instead of staying quiet.
+    if (norm.mapped_status != "final"
+            and result.home_runs is not None and result.away_runs is not None):
+        issues.append(_DqIssue("issue", "DQ-MLB-RESULT-003",
+            f"gamePk {norm.game_pk} carries a complete result "
+            f"({result.away_runs}-{result.home_runs}) under non-final status "
+            f"'{norm.mapped_status}'; treat it as played, not as unplayed"))
     if innings is not None:
         # Contradiction: a trustworthy inning sum disagrees with the team total.
         for label, total, isum in (("home", result.home_runs, innings.home_sum),
@@ -549,9 +601,10 @@ async def ingest_mlb(
     result.requests_made += 1
 
     all_games = _schedule_games(schedule.data)
-    games, truncated = _select_games(all_games, max_games)
+    games, truncated, deduplicated = _select_games(all_games, max_games)
     result.games_received = len(all_games)
     result.games_truncated = truncated
+    result.games_deduplicated = deduplicated
     result.ordered_game_ids = tuple(
         pk for pk in (_provider_id(g, "gamePk") for g in games) if pk is not None
     )
