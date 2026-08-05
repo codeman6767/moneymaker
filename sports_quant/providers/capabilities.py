@@ -169,7 +169,14 @@ BALLDONTLIE_GOAT_DECLARATION = CapabilityDeclaration(
         _C.SCHEDULES: _S.SUPPORTED,
         _C.GAME_RESULTS: _S.SUPPORTED,
         _C.PLAYER_STATISTICS: _S.SUPPORTED,
-        _C.TEAM_STATISTICS: _S.SUPPORTED,  # derivable from box scores
+        # ACCESS to /v1/box_scores, NOT normalized team aggregate statistics. The
+        # box-score team block carries identity only (id, abbreviation, city,
+        # conference, division, full_name, name) plus a `players` array; the
+        # provider publishes no team aggregate line. What is persisted to
+        # `nba_team_statistics` is therefore team identity + the team's final
+        # score. Never read this state as "team aggregate stats are available",
+        # and never synthesize aggregates by summing the player rows.
+        _C.TEAM_STATISTICS: _S.SUPPORTED,
         _C.ADVANCED_STATISTICS: _S.SUPPORTED,  # /nba/v1/stats/advanced (GOAT)
         _C.INJURIES: _S.SUPPORTED,
         _C.PLAYS: _S.SUPPORTED,

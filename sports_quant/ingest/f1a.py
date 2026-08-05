@@ -68,7 +68,10 @@ class _UnitFailed(RuntimeError):
     """A per-unit ingest failed (fetch/parse/persist); the unit stays incomplete."""
 
 _MLB_RICH = {"results", "box", "inning", "rosters"}
-_NBA_RICH = {"box", "stats", "advanced", "plays", "lineups", "quarters"}
+#: Mirrors :data:`~sports_quant.ingest.planning.NBA_RICH_FAMILIES`; ``results`` is
+#: request-free for NBA (derived from the ``/v1/games`` payload) but must still be
+#: nameable, or no manifest can ask for the label table to be populated.
+_NBA_RICH = {"results", "box", "stats", "advanced", "plays", "lineups", "quarters"}
 
 #: The planner/manifest family vocabulary and the CLI/ingestor include vocabulary
 #: disagree on one name: a plan and manifest record the NBA player-statistics family
@@ -111,6 +114,15 @@ def _f1b_authorized() -> bool:
 #: Strict manifest date shape; `date.fromisoformat` alone also accepts forms such as
 #: "20260105", which are not the canonical manifest representation.
 _ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+#: ``pages_fetched`` counts LISTING/DISCOVERY pages only (see
+#: :data:`~sports_quant.request_control.LISTING_FAMILIES`): MLB ``schedule`` and
+#: BALLDONTLIE ``games``. A per-entity rich fetch is not a listing page, so the
+#: figure is deliberately far below the number of provider responses -- the NBA
+#: March 2026 month run made 1,437 requests across three listing pages. Printing a
+#: bare ``pages`` beside ``requests`` read as a total page count, so the label
+#: names what the counter actually covers.
+_PAGES_LABEL = "listing_pages"
 
 
 def _provider_for(league: str) -> str:
@@ -745,14 +757,16 @@ def run_pilot_cli(
         out(f"  units:     initially_completed={result.initially_completed} "
             f"recovered_on_resume={len(result.recovered_identities)} "
             f"still_unresolved={len(result.unresolved_identities)}")
-        for label, field in (("requests  ", "attempted_requests"),
-                             ("successes ", "successful_responses"),
-                             ("failures  ", "failed_responses"),
-                             ("retries   ", "retry_attempts"),
-                             ("pages     ", "pages_fetched"),
-                             ("throttled ", "throttle_events"),
-                             ("http_429s ", "http_429s"),
-                             ("blocked   ", "blocked_requests")):
+        # Labels are padded to a common width so the counters stay a readable
+        # column; `_PAGES_LABEL` is the widest and sets that width.
+        for label, field in (("requests     ", "attempted_requests"),
+                             ("successes    ", "successful_responses"),
+                             ("failures     ", "failed_responses"),
+                             ("retries      ", "retry_attempts"),
+                             (_PAGES_LABEL, "pages_fetched"),
+                             ("throttled    ", "throttle_events"),
+                             ("http_429s    ", "http_429s"),
+                             ("blocked      ", "blocked_requests")):
             out(f"  {label} this_process={_cur(c, field)} "
                 f"prior={_cur(result.prior_process_usage, field)} "
                 f"logical_total={_cur(u, field)}")

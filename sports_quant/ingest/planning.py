@@ -34,8 +34,14 @@ PLAN_VERSION = "f1a-plan-v1"
 MLB_SKELETON_FAMILIES: frozenset[str] = frozenset({"schedule"})
 MLB_RICH_FAMILIES: frozenset[str] = frozenset({"results", "box", "inning", "rosters"})
 NBA_SKELETON_FAMILIES: frozenset[str] = frozenset({"games"})
+#: ``results`` belongs here even though it adds NO contingent and NO request: an
+#: NBA game result is normalized from the ``/v1/games`` payload the per-game
+#: ``game`` contingent already fetches (unlike MLB, whose results need their own
+#: linescore call). Omitting the NAME made the family unreachable from any
+#: manifest, so every NBA month run necessarily produced zero ``nba_game_results``
+#: rows -- the one table the point-in-time dataset reads labels from.
 NBA_RICH_FAMILIES: frozenset[str] = frozenset(
-    {"box", "stats", "advanced", "plays", "lineups", "quarters"}
+    {"results", "box", "stats", "advanced", "plays", "lineups", "quarters"}
 )
 
 

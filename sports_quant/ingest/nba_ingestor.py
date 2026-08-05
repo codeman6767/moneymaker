@@ -21,7 +21,9 @@ Design (mirrors the D2 MLB ingestor and honours the permanent CLAUDE.md rules):
       score decreasing, is a correction; a normal scheduled->in_progress->final
       progression, a rising score, and a period advancing are not);
     - team box lines -> ``nba_team_statistics`` (team **points** + a sport-neutral
-      JSON ``stats`` line);
+      JSON ``stats`` line). BALLDONTLIE publishes no team aggregate statistics, so
+      that JSON line is the team's IDENTITY block and the only statistic is the
+      final score -- see :func:`_normalize_box_team_lines`;
     - player box + advanced lines -> ``nba_player_statistics`` with an
       NBA-appropriate ``stat_group`` discriminator (``'traditional'`` = the box
       line, ``'advanced'`` = the advanced-stats line -- kept as distinct
@@ -665,10 +667,19 @@ def _normalize_stat_row(row: dict[str, Any], *, stat_group: str) -> Optional[_Pl
 def _normalize_box_team_lines(box_game: dict[str, Any]) -> list[_TeamStatRow]:
     """Normalize a single box-score game into per-team lines (team-level only).
 
-    Player statistics come from ``/v1/stats`` (a distinct include), so the box
-    path deliberately produces only team lines here: the team ``points`` (from the
-    game's home/visitor score) plus the team block (without its ``players`` array)
-    as the sport-neutral JSON stat line. Missing values stay missing.
+    **What BALLDONTLIE actually supplies.** The ``/v1/box_scores`` team block holds
+    identity only -- ``id``, ``abbreviation``, ``city``, ``conference``,
+    ``division``, ``full_name``, ``name`` -- plus a ``players`` array. Measured
+    across every preserved March 2026 box response (31 responses, 239 games, 478
+    team blocks) there was **no** team aggregate statistic of any kind. So the row
+    written to ``nba_team_statistics`` is the team's identity plus its final
+    ``points``; it is NOT a normalized team aggregate stat line, and nothing here
+    may be back-filled by summing the player rows (that would be a derived feature,
+    not an observation).
+
+    Player statistics come from ``/v1/stats`` (a distinct include), so the
+    ``players`` array is deliberately excluded from the JSON line rather than
+    inlined. Missing values stay missing.
     """
 
     team_points = {
@@ -1341,6 +1352,17 @@ async def _fetch_all(
             if resp is not None:
                 lineup_by_game[gid] = resp
                 responses.append(resp)
+                # `/v1/lineups` is fetched with ONE request per game (the plan
+                # reserves exactly one), so a `next_cursor` is the only evidence
+                # that the page did not hold the whole lineup. Discarding it
+                # silently is what let the March 2026 month run store a truncated
+                # 25-row lineup for 40 of 239 games while reporting no truncation
+                # at all. The cursor is not followed here -- that would exceed the
+                # reviewed per-game bound -- but the partial coverage is recorded.
+                if next_cursor(resp.data) is not None:
+                    result.truncation(
+                        f"lineups for game {gid} truncated -- the provider advertised "
+                        "a next cursor; coverage is partial")
 
     return _Fetched(games, responses, box_by_date, stats_by_game, adv_by_game,
                     plays_by_game, lineup_by_game)
@@ -2032,6 +2054,22 @@ def _persist_lineups(
     parsed = _parse_lineups(lineup_resp.data, norm.game_id)
     if parsed.rejected_rows:
         ctx.result.records_rejected += parsed.rejected_rows
+    if next_cursor(lineup_resp.data) is not None:
+        # A per-process truncation counter dies with the process; the corpus needs a
+        # durable record that THIS game's lineup is known-partial, so a later reader
+        # never mistakes 25 rows for a complete lineup. Sanitized: the provider game
+        # id and a generic reason only -- no cursor value, no body, no player names.
+        ctx.dq.record(
+            severity="issue", rule_code="DQ-NBA-LINEUP-002", entity_type="game",
+            description=(
+                f"lineups for game {norm.game_id} are PARTIAL: the provider "
+                "advertised a further page that this bounded per-game request did "
+                "not fetch; stored lineup rows are incomplete"
+            ),
+            provider=PROVIDER_BALLDONTLIE, run_id=ctx.run_id, raw_response_id=raw_id,
+            entity_id=norm.game_id,
+        )
+        ctx.result.data_quality_issues += 1
     if parsed.silent_loss:
         # A nonempty matching payload that normalizes to nothing is NEVER reported as a
         # legitimately empty family. Sanitized: counts only, no player names, no body.

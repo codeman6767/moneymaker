@@ -542,9 +542,12 @@ def test_completed_resume_adds_zero_requests_pages_selections_or_mutations(
     assert "no work remaining" in text
     assert "new_work=False" in text and "checkpoint_mutated=False" in text
     # Nothing is attributed to this process; every count is prior evidence.
-    assert "requests   this_process=0 prior=1 logical_total=1" in text
-    assert "successes  this_process=0 prior=1 logical_total=1" in text
-    assert "pages      this_process=0 prior=1 logical_total=1" in text
+    assert "requests      this_process=0 prior=1 logical_total=1" in text
+    assert "successes     this_process=0 prior=1 logical_total=1" in text
+    # `pages_fetched` counts LISTING/discovery pages only, so the label says so --
+    # a bare `pages` beside `requests` read as a total provider page count.
+    assert "listing_pages this_process=0 prior=1 logical_total=1" in text
+    assert "pages      this_process" not in text
 
 
 # ===================================================================== #

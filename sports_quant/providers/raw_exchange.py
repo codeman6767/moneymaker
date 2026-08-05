@@ -39,7 +39,13 @@ class RawExchange(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     endpoint: str
-    request_params: dict[str, str]
+    #: The query exactly as it was SENT. A repeated parameter (``game_ids[]=1``)
+    #: is a list, not the stringified Python container: recording ``str([1])``
+    #: produced ``"[1]"``, which does not round-trip to a URL, so preserved
+    #: evidence for every list-parameter endpoint could not be replayed from its
+    #: own provenance. The NBA March 2026 review hit exactly this on `/v1/stats`,
+    #: `/nba/v1/stats/advanced` and `/v1/lineups`.
+    request_params: dict[str, str | list[str]]
     http_status: int
     response_headers: dict[str, str]
     content_type: Optional[str] = None
@@ -52,6 +58,22 @@ class RawExchange(BaseModel):
     #: which can step.
     elapsed_ns: int
     body: str
+
+
+def _param_value(value: Any) -> str | list[str]:
+    """Record one query value the way ``httpx`` actually serializes it.
+
+    A list/tuple becomes a repeated query parameter, so it is preserved as a list
+    of element strings. Stringifying the container instead (``str([1])`` ->
+    ``"[1]"``) silently destroys the request's own provenance: the stored params
+    no longer reconstruct the URL that was sent, and a later offline replay from
+    preserved evidence cannot find the response it is holding. ``str``/``bytes``
+    are sequences too and must NOT be exploded into characters.
+    """
+
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    return str(value)
 
 
 def build_exchange(
@@ -67,7 +89,7 @@ def build_exchange(
 
     return RawExchange(
         endpoint=path,
-        request_params={k: str(v) for k, v in sanitize_params(params).items()},
+        request_params={k: _param_value(v) for k, v in sanitize_params(params).items()},
         http_status=response.status_code,
         response_headers=sanitize_headers(response.headers),
         content_type=response.headers.get("content-type"),
@@ -97,7 +119,7 @@ def build_exchange_from_parts(
 
     return RawExchange(
         endpoint=path,
-        request_params={k: str(v) for k, v in sanitize_params(params).items()},
+        request_params={k: _param_value(v) for k, v in sanitize_params(params).items()},
         http_status=status_code,
         response_headers=sanitize_headers(headers),
         content_type=headers.get("content-type"),

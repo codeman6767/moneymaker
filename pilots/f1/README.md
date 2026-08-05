@@ -1,11 +1,17 @@
 # F1 season-month coverage/depth pilots
 
-Two bounded, reviewed manifests and the protocol for executing them **later**.
+Two bounded, reviewed manifests, the protocol for executing them, and the state of
+each execution.
 
 > **Nothing here authorizes execution.** Committing a manifest is not
 > authorization. Each live run needs explicit user authorization plus the
 > process-scoped `MONEYMAKER_F1B_AUTHORIZED=1` boundary, and a fresh provider
-> audit immediately beforehand. Neither pilot has run.
+> audit immediately beforehand.
+>
+> **Both month pilots have now EXECUTED and both have been independently
+> reviewed** — MLB June 2026 (`F1_MLB_2026_06_EXECUTION_REVIEW.md`) and NBA March
+> 2026 (`F1_NBA_2026_03_EXECUTION_REVIEW.md`). Execution and review of a slice does
+> not authorize any further live step.
 
 ## Status
 
@@ -15,10 +21,29 @@ Two bounded, reviewed manifests and the protocol for executing them **later**.
 | Schema v17 official identity bootstrap | complete |
 | NBA scheduled-start normalization repair | complete |
 | Official team / game / player matching mechanics | proven offline, one game per league |
-| **Season-month coverage/depth pilots** | **manifests prepared, NOT executed** |
+| **MLB June-2026 month execution** | **executed, independently reviewed** |
+| **NBA March-2026 month execution** | **executed, independently reviewed** |
+| NBA `lineups` family | **not accepted** — 40/239 games partial (ignored provider cursor) |
+| NBA `results` family | **not fetched** — planner vocabulary defect, repaired; offline replay proven |
+| Combined F1 coverage/depth review | **not begun** |
 | F1 | **incomplete** |
 | F2 | **unauthorized** |
 | 99% identity acceptance gate | **not approached, not passed** |
+
+### NBA March-2026 execution at a glance
+
+One process (PID 27284), exit 0, 23.8 min, **1,437 requests / 1,437 successes / 0
+failures / 0 retries / 0 429s**, 239 games received and selected with a complete
+accounting identity, 240/240 units completed, checkpoint `completed` with one
+process in v2 provenance. Normalized: 239 schedule observations, 478 team-stat rows
+(identity + final score — BALLDONTLIE publishes no team aggregate line), 1,930
+quarter lines that sum exactly to the provider final score for all 239 games,
+14,815 player-stat rows, 114,738 plays, 478 lineup snapshots, **0
+`nba_game_results`**.
+
+**Labels are 0/239** under the real point-in-time contract, for two independent
+reasons: `nba_game_results` is empty, and no canonical `games` exist because
+matching has not run. 239/239 final statuses is not 239 accepted labels.
 
 ## The two slices
 
@@ -374,16 +399,35 @@ task; none of them is authorized by this document.
 
 1. **Fresh provider audit** immediately before each league's live execution —
    bounded, GET-only, on the day of the run. A stale audit does not carry over.
-2. **MLB month execution only.**
-3. **Independent MLB execution review.**
-4. **NBA month execution only.**
-5. **Independent NBA execution review.**
-6. **Combined F1 coverage/depth review.**
+   *(done for each executed month)*
+2. **MLB month execution only.** — **done**
+3. **Independent MLB execution review.** — **done**, `F1_MLB_2026_06_EXECUTION_REVIEW.md`
+4. **NBA month execution only.** — **done**
+5. **Independent NBA execution review.** — **done**, `F1_NBA_2026_03_EXECUTION_REVIEW.md`
+6. **Combined F1 coverage/depth review.** — **not begun**
 7. **Only then** decide whether F1 passes and whether F2 may be *planned*.
 
 Preconditions for any live step: clean tree, the committed manifest hash matches,
 the scratch database is new or an authorized resumable checkpoint match, the
 request cap is the manifest's, and the user has authorized that specific step.
+
+### Outstanding repairs before step 6
+
+Neither is authorized by this document, and neither has been executed.
+
+* **NBA results — offline.** `results` was missing from the planner's NBA family
+  vocabulary, so no NBA manifest could declare it and the March run produced zero
+  `nba_game_results` — the only table the point-in-time dataset reads labels from.
+  The vocabulary defect is repaired; populating the March corpus is a replay of the
+  239 preserved `/v1/games/{id}` bodies through the production normalizer, carrying
+  each response's stored receipt time and raw-response id. **No provider request.**
+* **NBA lineups — targeted live.** 40 of 239 `/v1/lineups` responses advertised a
+  `next_cursor` that the single bounded per-game request discarded, so those games
+  hold partial lineups. Recovery needs the continuation pages (≤ 8 per game, ≤ 320
+  requests), a `cursor` parameter on `fetch_lineups`, a **new** manifest (the
+  `lineups` contingent is `per_parent_max=1`, so pagination changes the plan hash)
+  and a **new** checkpoint. The executed March manifest, checkpoint and database
+  must not be edited.
 
 ## Regenerating the manifests
 

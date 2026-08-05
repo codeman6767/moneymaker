@@ -4,9 +4,11 @@
 (request/credit safety controls) is complete and independently reviewed.** **The
 F1B *skeleton* pilots for MLB and NBA have now EXECUTED successfully and have been
 independently reviewed — the skeleton stage is complete** (see
-`F1B_SKELETON_PILOT_REPORT.md` and the box below). No feature engineering, model
-training, calibration, simulation, EV evaluation, backtesting, or recommendation
-output has started. Schema remains **v16**.
+`F1B_SKELETON_PILOT_REPORT.md` and the box below). **Both F1 season-month pilots
+have since executed and been independently reviewed** (see the F1 box below). No
+feature engineering, model training, calibration, simulation, EV evaluation,
+backtesting, or recommendation output has started. The F1B pilots ran at schema
+**v16**; the schema is now **v17** and both F1 month manifests declare v17.
 
 **The F1B *rich-data* pilots are COMPLETE for both leagues: MLB and NBA each executed
 successfully and each passed its own independent review — so F1B capability
@@ -174,13 +176,30 @@ nothing below is authorized by this milestone:
 > season-month coverage/depth pilot is still required, and **F2 remains
 > unauthorized.**
 
-> **F1 season-month coverage/depth pilot manifests PREPARED, NOT EXECUTED
-> (2026-07-31).** One-game mechanics are complete for both leagues: capability
-> verification (skeleton + rich), the schema v17 official identity bootstrap, and
-> the NBA scheduled-start normalization repair. The two bounded season-month
-> pilots this plan requires are now specified offline, under
-> `pilots/f1/` with a full request-cap derivation, coverage-report contract and
-> execution protocol in `pilots/f1/README.md`.
+> **F1 season-month coverage/depth pilots BOTH EXECUTED AND INDEPENDENTLY
+> REVIEWED (2026-08-05).** One-game mechanics were completed for both leagues
+> first: capability verification (skeleton + rich), the schema v17 official
+> identity bootstrap, and the NBA scheduled-start normalization repair. The two
+> bounded season-month pilots this plan requires were then specified under
+> `pilots/f1/` — with a full request-cap derivation, coverage-report contract and
+> execution protocol in `pilots/f1/README.md` — and have since run:
+>
+> * **MLB June 2026** — executed, reviewed in `F1_MLB_2026_06_EXECUTION_REVIEW.md`.
+> * **NBA March 2026** — executed, reviewed in `F1_NBA_2026_03_EXECUTION_REVIEW.md`.
+>   One process, exit 0, 1,437 requests with zero failures/retries/429s, 239/239
+>   games selected with a closed accounting identity, 240/240 units complete.
+>   Six of seven families accepted; **`lineups` is not accepted** (40/239 games
+>   partial after a provider pagination cursor was discarded), and **`results` was
+>   never fetchable** because the planner's NBA family vocabulary omitted it — now
+>   repaired, with offline replay proven. **Labels are 0/239** under the real
+>   point-in-time contract: `nba_game_results` is empty and no canonical `games`
+>   exist because matching has not run.
+>
+> **The combined F1 coverage/depth review has NOT begun. F1 remains incomplete and
+> F2 remains unauthorized.** Canonical matching remains blocked by three separately
+> documented defects (same-name official-player order dependence, non-idempotent
+> team match decisions, and missing canonical-ID propagation into the observation
+> tables); none was repaired by either month review.
 >
 > | | MLB | NBA |
 > | --- | --- | --- |
