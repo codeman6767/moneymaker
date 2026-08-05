@@ -24,7 +24,7 @@ each execution.
 | **MLB June-2026 month execution** | **executed, independently reviewed** |
 | **NBA March-2026 month execution** | **executed, independently reviewed** |
 | NBA `lineups` family | **not accepted** — 40/239 games partial (ignored provider cursor) |
-| NBA `results` family | **repaired offline** — 239/239 typed results replayed from preserved responses (`F1_NBA_2026_03_RESULTS_REPAIR.md`); not yet independently reviewed |
+| NBA `results` family | **repaired offline, independently reviewed and accepted** — 239/239 typed results (`F1_NBA_2026_03_RESULTS_REPAIR.md`, `NBA_RESULTS_REPAIR_INDEPENDENT_REVIEW.md`) |
 | NBA usable PIT labels | **0/239** — blocked by canonical matching, not by results |
 | Combined F1 coverage/depth review | **not begun** |
 | F1 | **incomplete** |
@@ -60,8 +60,16 @@ itself was then populated by
 executed manifest and checkpoint unchanged, a frozen pre-repair database kept
 locally, and the replay is idempotent. Scores agree with the preserved bodies
 239/239, with quarter-line sums 239/239 and with team-statistics points 478/478.
-Full detail in `F1_NBA_2026_03_RESULTS_REPAIR.md`. **That repair has not been
-independently reviewed.**
+Full detail in `F1_NBA_2026_03_RESULTS_REPAIR.md`.
+
+**Independently reviewed and ACCEPTED** (2026-08-06,
+`NBA_RESULTS_REPAIR_INDEPENDENT_REVIEW.md`): copies rebuilt from the frozen
+pre-repair evidence reproduce the committed 239 rows and the provenance record
+field-for-field; atomic rollback was proven at four injection points; four
+concurrent repairs converge safely. The review hardened five latent input
+gaps — non-integer score coercion, negative scores, non-positive periods, an
+unsanitized `RecursionError`, and a silent pass when selected games have no
+usable preserved response — none of which affected the applied data.
 
 ## The two slices
 
@@ -433,11 +441,11 @@ request cap is the manifest's, and the user has authorized that specific step.
 
 Nothing here is authorized by this document.
 
-* **NBA results — offline. DONE (2026-08-05).** Applied under separate
-  authorization: 239/239 typed results replayed from preserved responses with no
-  provider request, the executed manifest and checkpoint unchanged. Still to do:
-  an **independent review** of that repair. See
-  `F1_NBA_2026_03_RESULTS_REPAIR.md`.
+* **NBA results — offline. DONE and REVIEWED.** Applied 2026-08-05 under separate
+  authorization (239/239 typed results, no provider request, executed manifest and
+  checkpoint unchanged) and independently reviewed and **accepted** 2026-08-06.
+  See `F1_NBA_2026_03_RESULTS_REPAIR.md` and
+  `NBA_RESULTS_REPAIR_INDEPENDENT_REVIEW.md`. Nothing outstanding.
 * **NBA lineups — targeted live. NOT executed.** 40 of 239 `/v1/lineups` responses advertised a
   `next_cursor` that the single bounded per-game request discarded, so those games
   hold partial lineups. Recovery needs the continuation pages (≤ 8 per game, ≤ 320

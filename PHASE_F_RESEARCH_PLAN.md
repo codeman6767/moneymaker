@@ -191,13 +191,18 @@ nothing below is authorized by this milestone:
 >   Six of seven families accepted; **`lineups` is not accepted** (40/239 games
 >   partial after a provider pagination cursor was discarded), and **`results` was
 >   never fetchable** because the planner's NBA family vocabulary omitted it.
-> * **NBA March 2026 offline `results` repair — APPLIED (2026-08-05)**, reported in
->   `F1_NBA_2026_03_RESULTS_REPAIR.md`. The 239 result observations were populated
->   offline from preserved live responses through the production normalizer:
->   **no provider request occurred**, the executed manifest and checkpoint were not
->   changed, and a frozen pre-repair database preserves the original execution
->   state locally. NBA typed result coverage is now **239/239**. That repair has
->   **not** been independently reviewed.
+> * **NBA March 2026 offline `results` repair — APPLIED (2026-08-05) and
+>   INDEPENDENTLY REVIEWED AND ACCEPTED (2026-08-06)**, reported in
+>   `F1_NBA_2026_03_RESULTS_REPAIR.md` and
+>   `NBA_RESULTS_REPAIR_INDEPENDENT_REVIEW.md`. The 239 result observations were
+>   populated offline from preserved live responses through the production
+>   normalizer: **no provider request occurred**, the executed manifest and
+>   checkpoint were not changed, and a frozen pre-repair database preserves the
+>   original execution state locally. NBA typed result coverage is now
+>   **239/239**. The review rebuilt the repair from that frozen evidence and
+>   reproduced the committed rows and provenance record field-for-field, proved
+>   atomic rollback at four injection points and safe concurrency, and hardened
+>   five latent input-validation gaps that had not affected the applied data.
 >
 > **Usable point-in-time labels remain 0/239.** The results gap is closed; the
 > remaining blocker is that no canonical `games` exist because matching has not

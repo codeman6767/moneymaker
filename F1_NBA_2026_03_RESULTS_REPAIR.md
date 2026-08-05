@@ -12,6 +12,15 @@ no checkpoint modification, and the combined F1 review was not begun.
 > pre-repair database preserved. **Usable point-in-time labels remain 0/239** —
 > the results gap is closed, the canonical-matching gap is not.
 
+> **INDEPENDENTLY REVIEWED AND ACCEPTED (2026-08-06)** —
+> `NBA_RESULTS_REPAIR_INDEPENDENT_REVIEW.md`. Copies rebuilt from the frozen
+> pre-repair evidence reproduce the committed 239 rows and the provenance record
+> **exactly, field for field**. The review also found and repaired five latent
+> hardening defects — non-integer score coercion, negative scores, non-positive
+> periods, an unsanitized `RecursionError` on a hostile body, and a silent pass
+> when selected games have no usable preserved response. **None affected this
+> repair's data**, which was re-verified byte-identical after the fixes.
+
 ---
 
 ## 1. Authorization boundary
@@ -378,6 +387,8 @@ result observations, every score agreeing with three independent sources, exact
 provenance preservation, byte-identical checkpoint and frozen evidence,
 idempotent on repeat, and zero provider contact.
 
-**This repair has not been independently reviewed.** That is a separate,
-explicitly authorized step. Combined F1 review has not begun. **F1 remains
-incomplete and F2 remains unauthorized.**
+**This repair has since been independently reviewed and ACCEPTED** (2026-08-06,
+`NBA_RESULTS_REPAIR_INDEPENDENT_REVIEW.md`), which reproduced it from the frozen
+evidence field-for-field and hardened five latent input-validation gaps that did
+not affect its data. Combined F1 review has not begun. **F1 remains incomplete
+and F2 remains unauthorized.**

@@ -30,7 +30,8 @@ canonical-matching defects were not repaired, and F2 was not begun.
 > Everything else in this review still stands as written and describes the corpus
 > **as the month execution left it**: the `lineups` family is still unaccepted for
 > 40 games, and **usable point-in-time labels are still 0/239** because canonical
-> matching has not run. That repair has not been independently reviewed.
+> matching has not run. That repair has since been **independently reviewed and
+> accepted** — `NBA_RESULTS_REPAIR_INDEPENDENT_REVIEW.md`.
 
 ---
 

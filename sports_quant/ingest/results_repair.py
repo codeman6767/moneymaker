@@ -135,6 +135,9 @@ class RepairResult:
     valid_results: int = 0
     rejected: int = 0
     rejections: list[str] = field(default_factory=list)
+    #: Selected games this repair cannot supply a result for, because no usable
+    #: preserved response exists and no result row is present already.
+    games_without_response: int = 0
     #: Persistence outcome (all zero in dry-run).
     results_inserted: int = 0
     results_unchanged: int = 0
@@ -366,6 +369,16 @@ def _collect_candidates(conn: sqlite3.Connection, result: RepairResult) -> list[
 
     result.candidates = len(grouped)
     result.valid_results = len(candidates)
+
+    # COVERAGE. A selected game that produced no candidate is not "nothing to do"
+    # -- it is a game this repair cannot fix. Left silent, a skeleton-only corpus
+    # reported `results_inserted=0, rejected=0, already_complete=True`, which an
+    # operator would reasonably read as "the results are already in place". A game
+    # that ALREADY holds a result row is genuinely fine and is not counted here.
+    covered = {c.provider_game_id for c in candidates}
+    with_existing = {r[0] for r in conn.execute(
+        "SELECT DISTINCT provider_game_id FROM nba_game_results")}
+    result.games_without_response = len(set(refs) - covered - with_existing)
     return candidates
 
 
@@ -374,11 +387,37 @@ def _payload_of(body: Optional[str]) -> Optional[dict[str, Any]]:
         return None
     try:
         data = json.loads(body).get("data")
-    except (json.JSONDecodeError, AttributeError, TypeError):
+    # ``RecursionError`` belongs here: a deeply nested body blows the JSON
+    # decoder's stack, and a corrupt preserved response must fail CLOSED with a
+    # sanitized refusal rather than escape as a raw traceback.
+    except (json.JSONDecodeError, AttributeError, TypeError, RecursionError,
+            ValueError):
         return None
     if isinstance(data, list):
         data = data[0] if data else None
     return data if isinstance(data, dict) else None
+
+
+def _exact_score(payload: dict[str, Any], key: str) -> tuple[Optional[int], Optional[str]]:
+    """The provider's score EXACTLY, or a reason it cannot be trusted.
+
+    The shared normalizer is deliberately permissive -- live ingestion has to
+    survive odd provider payloads, and ``_opt_int`` therefore accepts anything
+    ``int()`` will swallow. A *repair* has no such excuse: ``int(110.7)`` is
+    ``110``, a number the provider never sent, and persisting it would be exactly
+    the fabrication this command exists to avoid. So only a genuine, non-negative
+    ``int`` is accepted here; ``bool`` is not an ``int`` for this purpose.
+    """
+
+    value = payload.get(key)
+    if value is None:
+        return None, "final score is missing or asymmetric"
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None, (f"{key} is not an integer ({type(value).__name__}); refusing to "
+                      "coerce a provider value")
+    if value < 0:
+        return None, f"{key} is negative; not a possible final score"
+    return value, None
 
 
 def _provider_game_id(payload: dict[str, Any]) -> Optional[str]:
@@ -408,12 +447,26 @@ def _build(row: sqlite3.Row, gid: str, game_ref_id: str,
         # Never coerce a missing side to zero and never persist a half score.
         result.note(f"game {gid}: final score is missing or asymmetric")
         return None
+    # Re-read both scores STRICTLY from the payload. The normalized values above
+    # have already been through the permissive `_opt_int`, so this is what catches
+    # a float, a numeric string or a negative that it would have silently accepted.
+    home_score, home_reason = _exact_score(payload, "home_team_score")
+    away_score, away_reason = _exact_score(payload, "visitor_team_score")
+    if home_reason or away_reason:
+        result.note(f"game {gid}: {home_reason or away_reason}")
+        return None
+    assert home_score is not None and away_score is not None  # narrowed above
     if norm.mapped_status != "final":
         result.note(f"game {gid}: status is {norm.mapped_status!r}, not final")
         return None
     if norm.winning_side not in ("home", "away"):
         # NBA games cannot end tied; a tie means the payload is not a real final.
         result.note(f"game {gid}: final score is tied or has no winner")
+        return None
+    if norm.period is not None and norm.period < 1:
+        # A basketball game is played in periods numbered from 1. Absent is fine;
+        # zero or negative is a payload we cannot interpret.
+        result.note(f"game {gid}: period {norm.period} is not a valid period number")
         return None
     return _Candidate(
         provider_game_id=gid,
@@ -424,8 +477,9 @@ def _build(row: sqlite3.Row, gid: str, game_ref_id: str,
         # arrived, never the replay wall clock.
         observed_at=str(row["received_at"]),
         run_id=row["run_id"],
-        home_points=norm.home_score,
-        away_points=norm.away_score,
+        # the STRICTLY re-read provider integers, not the permissive ones
+        home_points=home_score,
+        away_points=away_score,
         period=norm.period,
         winning_side=norm.winning_side,
         mapped_status=norm.mapped_status,
@@ -499,6 +553,12 @@ def repair_nba_results_from_raw(
         raise ResultsRepairError(
             f"{result.rejected} preserved response(s) could not be replayed "
             f"unambiguously: {'; '.join(result.rejections[:5])}")
+    if result.games_without_response:
+        raise ResultsRepairError(
+            f"{result.games_without_response} of {result.selected_games} selected "
+            "game(s) are without a usable preserved response and hold no result "
+            "row; this corpus cannot be fully repaired offline, and reporting "
+            "success would misrepresent it")
 
     if dry_run:
         result.results_after = result.results_before
@@ -592,7 +652,8 @@ def render_repair(result: RepairResult, out: Any) -> None:
         f"single_game={result.single_game_responses} "
         f"selected_games={result.selected_games}")
     out(f"  normalize: candidates={result.candidates} valid={result.valid_results} "
-        f"rejected={result.rejected}")
+        f"rejected={result.rejected} "
+        f"selected_without_response={result.games_without_response}")
     out(f"  results:   before={result.results_before} inserted={result.results_inserted} "
         f"unchanged={result.results_unchanged} after={result.results_after} "
         f"corrections={result.corrections_appended}")
