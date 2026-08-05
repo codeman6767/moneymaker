@@ -24,7 +24,8 @@ each execution.
 | **MLB June-2026 month execution** | **executed, independently reviewed** |
 | **NBA March-2026 month execution** | **executed, independently reviewed** |
 | NBA `lineups` family | **not accepted** — 40/239 games partial (ignored provider cursor) |
-| NBA `results` family | **not fetched** — planner vocabulary defect, repaired; offline replay proven |
+| NBA `results` family | **repaired offline** — 239/239 typed results replayed from preserved responses (`F1_NBA_2026_03_RESULTS_REPAIR.md`); not yet independently reviewed |
+| NBA usable PIT labels | **0/239** — blocked by canonical matching, not by results |
 | Combined F1 coverage/depth review | **not begun** |
 | F1 | **incomplete** |
 | F2 | **unauthorized** |
@@ -38,12 +39,29 @@ accounting identity, 240/240 units completed, checkpoint `completed` with one
 process in v2 provenance. Normalized: 239 schedule observations, 478 team-stat rows
 (identity + final score — BALLDONTLIE publishes no team aggregate line), 1,930
 quarter lines that sum exactly to the provider final score for all 239 games,
-14,815 player-stat rows, 114,738 plays, 478 lineup snapshots, **0
-`nba_game_results`**.
+14,815 player-stat rows, 114,738 plays, 478 lineup snapshots, and — after the
+offline repair below — **239 `nba_game_results`** (0 at execution time).
 
-**Labels are 0/239** under the real point-in-time contract, for two independent
-reasons: `nba_game_results` is empty, and no canonical `games` exist because
-matching has not run. 239/239 final statuses is not 239 accepted labels.
+**Labels are 0/239** under the real point-in-time contract. The results half of
+that has been fixed; the remaining blocker is that no canonical `games` exist
+because matching has not run. 239/239 final statuses, and now 239/239 typed
+provider results, is still not 239 accepted labels.
+
+#### Offline results repair (applied 2026-08-05)
+
+`results` was missing from the planner's NBA family vocabulary, so the month run
+could never populate the one table the point-in-time dataset reads labels from.
+The vocabulary defect was repaired during the execution review; the March corpus
+itself was then populated by
+`sports_quant repair-nba-results-from-raw --offline`, which replays the preserved
+`/v1/games/{id}` bodies through the production normalizer and repository.
+
+**239 inserted, 0 corrections, 0 new raw responses, 0 provider requests**, the
+executed manifest and checkpoint unchanged, a frozen pre-repair database kept
+locally, and the replay is idempotent. Scores agree with the preserved bodies
+239/239, with quarter-line sums 239/239 and with team-statistics points 478/478.
+Full detail in `F1_NBA_2026_03_RESULTS_REPAIR.md`. **That repair has not been
+independently reviewed.**
 
 ## The two slices
 
@@ -413,15 +431,14 @@ request cap is the manifest's, and the user has authorized that specific step.
 
 ### Outstanding repairs before step 6
 
-Neither is authorized by this document, and neither has been executed.
+Nothing here is authorized by this document.
 
-* **NBA results — offline.** `results` was missing from the planner's NBA family
-  vocabulary, so no NBA manifest could declare it and the March run produced zero
-  `nba_game_results` — the only table the point-in-time dataset reads labels from.
-  The vocabulary defect is repaired; populating the March corpus is a replay of the
-  239 preserved `/v1/games/{id}` bodies through the production normalizer, carrying
-  each response's stored receipt time and raw-response id. **No provider request.**
-* **NBA lineups — targeted live.** 40 of 239 `/v1/lineups` responses advertised a
+* **NBA results — offline. DONE (2026-08-05).** Applied under separate
+  authorization: 239/239 typed results replayed from preserved responses with no
+  provider request, the executed manifest and checkpoint unchanged. Still to do:
+  an **independent review** of that repair. See
+  `F1_NBA_2026_03_RESULTS_REPAIR.md`.
+* **NBA lineups — targeted live. NOT executed.** 40 of 239 `/v1/lineups` responses advertised a
   `next_cursor` that the single bounded per-game request discarded, so those games
   hold partial lineups. Recovery needs the continuation pages (≤ 8 per game, ≤ 320
   requests), a `cursor` parameter on `fetch_lineups`, a **new** manifest (the

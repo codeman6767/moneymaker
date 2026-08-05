@@ -190,10 +190,20 @@ nothing below is authorized by this milestone:
 >   games selected with a closed accounting identity, 240/240 units complete.
 >   Six of seven families accepted; **`lineups` is not accepted** (40/239 games
 >   partial after a provider pagination cursor was discarded), and **`results` was
->   never fetchable** because the planner's NBA family vocabulary omitted it — now
->   repaired, with offline replay proven. **Labels are 0/239** under the real
->   point-in-time contract: `nba_game_results` is empty and no canonical `games`
->   exist because matching has not run.
+>   never fetchable** because the planner's NBA family vocabulary omitted it.
+> * **NBA March 2026 offline `results` repair — APPLIED (2026-08-05)**, reported in
+>   `F1_NBA_2026_03_RESULTS_REPAIR.md`. The 239 result observations were populated
+>   offline from preserved live responses through the production normalizer:
+>   **no provider request occurred**, the executed manifest and checkpoint were not
+>   changed, and a frozen pre-repair database preserves the original execution
+>   state locally. NBA typed result coverage is now **239/239**. That repair has
+>   **not** been independently reviewed.
+>
+> **Usable point-in-time labels remain 0/239.** The results gap is closed; the
+> remaining blocker is that no canonical `games` exist because matching has not
+> run. The dataset builder must not be weakened to accept provider-only ids.
+> Lineups remain unaccepted for 40 games and a separately authorized targeted
+> lineup continuation run is still required.
 >
 > **The combined F1 coverage/depth review has NOT begun. F1 remains incomplete and
 > F2 remains unauthorized.** Canonical matching remains blocked by three separately

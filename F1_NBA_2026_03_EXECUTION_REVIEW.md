@@ -19,6 +19,19 @@ canonical-matching defects were not repaired, and F2 was not begun.
 > is **478 rows, not zero**, and `pages_fetched = 3` is a *listing-page* count
 > beside 1,437 provider responses. Every other reported figure reconciled exactly.
 
+> **UPDATE (2026-08-05) — the offline results repair this review specified has
+> since been applied.** `nba_game_results` is now **239/239** in the March working
+> database, populated by replaying the preserved `/v1/games/{id}` bodies through
+> the production normalizer with each response's own observation time and
+> provenance. **No provider request was made**, the executed manifest and
+> checkpoint were not changed, and a frozen pre-repair database preserves the
+> original execution state locally. See `F1_NBA_2026_03_RESULTS_REPAIR.md`.
+>
+> Everything else in this review still stands as written and describes the corpus
+> **as the month execution left it**: the `lineups` family is still unaccepted for
+> 40 games, and **usable point-in-time labels are still 0/239** because canonical
+> matching has not run. That repair has not been independently reviewed.
+
 ---
 
 ## 1. Review boundary and zero-network proof
@@ -760,12 +773,15 @@ computed before those three are fixed would be unreproducible and misleading.
 
 ## 15. Required repairs, exact scope
 
-### Offline (authorized separately; no provider contact)
+### Offline — **DONE** (separately authorized, applied 2026-08-05)
 Replay the 239 preserved `/v1/games/{id}` responses through
 `SqliteNbaResultRepository.append`, carrying each response's stored `received_at`
 as `observed_at`/`ingested_at` and its stored `raw_response_id`/`body_hash` as
 provenance, into the March scratch database. Expected: 239 inserted, 0 corrections,
-0 new raw responses, 0 provider requests. Proven in §5 on a copy.
+0 new raw responses, 0 provider requests. Proven in §5 on a copy — and since
+**applied exactly as specified**: 239 inserted, 0 corrections, 0 new raw
+responses, 0 provider requests, checkpoint byte-identical. See
+`F1_NBA_2026_03_RESULTS_REPAIR.md`.
 
 ### Targeted live repair — lineups only (NOT executed; needs separate authorization)
 

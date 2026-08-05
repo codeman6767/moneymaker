@@ -49,6 +49,13 @@ from .ingest.provider_audit import (
     build_open_meteo_probes,
     declaration_for,
 )
+from .ingest.results_repair import SUPPORTED_LEAGUE as REPAIR_LEAGUE
+from .ingest.results_repair import SUPPORTED_PROVIDER as REPAIR_PROVIDER
+from .ingest.results_repair import (
+    ResultsRepairError,
+    render_repair,
+    repair_nba_results_from_raw,
+)
 from .ingest.venues_ingestor import VenueIngestResult, ingest_venues
 from .ingest.weather_ingestor import WeatherClients, WeatherIngestResult, ingest_weather
 from .matching.runner import (
@@ -825,6 +832,53 @@ def _report_venues(result: VenueIngestResult, out: Printer, *, as_json: bool) ->
         result.status, result.status.upper()
     )
     out(f"[{label2}] {result.status}")
+
+
+def run_repair_nba_results(
+    *,
+    database_path: Path,
+    manifest_path: Path,
+    provider: str,
+    league: str,
+    date_range: str,
+    offline: bool = False,
+    dry_run: bool = False,
+    as_json: bool = False,
+    forbidden_paths: tuple[Path, ...] = (),
+    out: Printer = print,
+) -> int:
+    """OFFLINE results replay. Loads no settings and builds no provider client.
+
+    Deliberately has no settings fallback for ``--db``: resolving a default
+    database would mean loading configuration, and this command must be provable
+    to touch no credential at all. The path is always explicit.
+    """
+
+    try:
+        result = repair_nba_results_from_raw(
+            database_path=database_path,
+            manifest_path=manifest_path,
+            provider=provider,
+            league=league,
+            date_range=date_range,
+            offline=offline,
+            dry_run=dry_run,
+            forbidden_paths=forbidden_paths,
+        )
+    except ResultsRepairError as exc:
+        # Sanitized by construction: the repair never puts a body, header,
+        # credential or provider URL into its refusal messages.
+        if as_json:
+            out(json.dumps({"command": "repair-nba-results-from-raw",
+                            "refused": True, "reason": str(exc)}, sort_keys=True))
+        else:
+            out(f"[FAILED ] {exc}")
+        return EXIT_USAGE
+    if as_json:
+        out(json.dumps(result.as_dict(), sort_keys=True))
+    else:
+        render_repair(result, out)
+    return 0
 
 
 def run_ingest_venues(
@@ -1761,6 +1815,31 @@ def main(argv: Optional[list[str]] = None) -> int:
     injuries.add_argument("--dry-run", action="store_true", help="Fetch + normalize but persist nothing")
     injuries.add_argument("--json", dest="as_json", action="store_true", help="Machine-readable output")
 
+    # Narrow, single-purpose OFFLINE repair. It takes no URL, no key and no
+    # network option by construction, and argparse refuses any such flag.
+    repair = sub.add_parser(
+        "repair-nba-results-from-raw",
+        help=("OFFLINE: replay the NBA results family from preserved raw responses "
+              "(no provider request, no client, no credential)"),
+    )
+    repair.add_argument("--db", dest="database_path", type=Path, required=True,
+                        metavar="PATH", help="Explicit target database (required)")
+    repair.add_argument("--manifest", dest="manifest_path", type=Path, required=True,
+                        metavar="PATH", help="The committed manifest the database is bound to")
+    repair.add_argument("--provider", required=True, choices=[REPAIR_PROVIDER])
+    repair.add_argument("--league", required=True, choices=[REPAIR_LEAGUE])
+    repair.add_argument("--date-range", dest="date_range", required=True,
+                        metavar="YYYY-MM-DD..YYYY-MM-DD")
+    repair.add_argument("--offline", action="store_true", required=True,
+                        help="Required acknowledgement that this makes no provider request")
+    repair.add_argument("--forbid-path", dest="forbidden_paths", action="append",
+                        type=Path, default=[], metavar="PATH",
+                        help="Refuse if the target aliases this path (repeatable)")
+    repair.add_argument("--dry-run", action="store_true",
+                        help="Normalize and validate everything; persist nothing")
+    repair.add_argument("--json", dest="as_json", action="store_true",
+                        help="Machine-readable output")
+
     hoopr = sub.add_parser(
         "import-hoopr", help="Import a hoopR play-by-play Parquet file OFFLINE (no network, no R)"
     )
@@ -1889,6 +1968,19 @@ def main(argv: Optional[list[str]] = None) -> int:
         except ReadOnlyStartupError as exc:
             print(str(exc))
             return 2
+
+    if args.command == "repair-nba-results-from-raw":
+        return run_repair_nba_results(
+            database_path=args.database_path,
+            manifest_path=args.manifest_path,
+            provider=args.provider,
+            league=args.league,
+            date_range=args.date_range,
+            offline=args.offline,
+            dry_run=args.dry_run,
+            as_json=args.as_json,
+            forbidden_paths=tuple(args.forbidden_paths),
+        )
 
     if args.command == "ingest-venues":
         try:
