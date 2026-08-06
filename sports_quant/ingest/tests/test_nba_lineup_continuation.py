@@ -450,8 +450,9 @@ def _run_one(recorder: _Recorder, target: LineupTarget, *,
 
     ex = LineupContinuationExecutor(
         database=object(), client_factory=_factory(recorder), targets=(target,),
-        date_range=DATE_RANGE, max_pages=max_pages)
-    return asyncio.run(ex._run_target(object(), target))
+        date_range=DATE_RANGE, max_pages=max_pages, persist=False)
+    outcome, _responses = asyncio.run(ex._run_target(object(), target))
+    return outcome
 
 
 def test_single_continuation_page_terminates_the_chain() -> None:
@@ -540,8 +541,8 @@ def test_structurally_malformed_page_fails_closed() -> None:
     assert any(DQ_MALFORMED_PAGE in f for f in outcome.findings)
 
 
-def test_unparseable_body_is_a_terminal_request_failure() -> None:
-    """Bytes the client cannot decode never reach normalization; still closed."""
+def test_unparseable_body_is_a_provider_terminal_failure() -> None:
+    """Bytes the client cannot decode are a PROVIDER failure, and stay closed."""
 
     rec = _Recorder({500: "malformed"})
     outcome = _run_one(rec, _target())
@@ -640,8 +641,8 @@ def test_forty_target_differential_run_completes_within_budget() -> None:
     targets = _forty_targets()
     ex = LineupContinuationExecutor(
         database=object(), client_factory=_factory(rec), targets=targets,
-        date_range=DATE_RANGE)
-    outcomes = [asyncio.run(ex._run_target(object(), t)) for t in targets]
+        date_range=DATE_RANGE, persist=False)
+    outcomes = [asyncio.run(ex._run_target(object(), t))[0] for t in targets]
 
     assert all(o.complete for o in outcomes)
     assert len(rec.requests) == 20 * 1 + 10 * 3 + 8 * 8 + 2 + 2
@@ -660,8 +661,8 @@ def test_forty_target_run_is_order_independent() -> None:
         rec = _Recorder(_forty_pages())
         ex = LineupContinuationExecutor(
             database=object(), client_factory=_factory(rec), targets=tuple(order),
-            date_range=DATE_RANGE)
-        out = [asyncio.run(ex._run_target(object(), t)) for t in order]
+            date_range=DATE_RANGE, persist=False)
+        out = [asyncio.run(ex._run_target(object(), t))[0] for t in order]
         return sorted((o.provider_game_id, o.stop_reason, len(o.pages),
                        tuple(o.cursor_chain), o.players_added) for o in out)
 
@@ -722,7 +723,7 @@ def _run_pilot(tmp_path: Path, recorder: _Recorder, targets: tuple[LineupTarget,
     manifest = _recovery_manifest(len(targets))
     executor = LineupContinuationExecutor(
         database=object(), client_factory=_gated_factory(recorder), targets=targets,
-        date_range=DATE_RANGE)
+        date_range=DATE_RANGE, persist=False)
     result = run_pilot(
         manifest=manifest, gate=_gate(request_cap, sleeps), executor=executor,
         checkpoint_path=ckpt or (tmp_path / "rec.ckpt"),
@@ -1054,7 +1055,7 @@ def test_an_incomplete_target_raises_and_is_never_checkpointed() -> None:
     rec = _Recorder({500: lineup_body(1, [26], next_cursor=500)})   # repeats
     ex = LineupContinuationExecutor(
         database=object(), client_factory=_factory(rec), targets=(_target("1", 500),),
-        date_range=DATE_RANGE)
+        date_range=DATE_RANGE, persist=False)
     with pytest.raises(ContinuationUnitFailed, match="repeated_cursor"):
         list(ex.iter_units(gate=object(), completed=set()))
     assert ex.report.targets_incomplete == 1
@@ -1066,7 +1067,7 @@ def test_a_completed_target_is_yielded_once_and_then_skipped() -> None:
     rec = _Recorder({500: lineup_body(1, [26], next_cursor=None)})
     ex = LineupContinuationExecutor(
         database=object(), client_factory=_factory(rec), targets=(_target("1", 500),),
-        date_range=DATE_RANGE)
+        date_range=DATE_RANGE, persist=False)
     units = list(ex.iter_units(gate=object(), completed=set()))
     assert len(units) == 1 and units[0].family == "lineups_continuation"
     assert ex.report.success is True
@@ -1075,7 +1076,7 @@ def test_a_completed_target_is_yielded_once_and_then_skipped() -> None:
     rec2 = _Recorder({500: lineup_body(1, [26], next_cursor=None)})
     ex2 = LineupContinuationExecutor(
         database=object(), client_factory=_factory(rec2), targets=(_target("1", 500),),
-        date_range=DATE_RANGE)
+        date_range=DATE_RANGE, persist=False)
     assert list(ex2.iter_units(gate=object(), completed=done)) == []
     assert rec2.requests == [], "a completed unit must be skipped with zero transport"
     assert ex2.remaining_identities(completed=done) == ()

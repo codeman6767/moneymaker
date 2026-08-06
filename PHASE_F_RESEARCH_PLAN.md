@@ -218,9 +218,20 @@ nothing below is authorized by this milestone:
 > 60/min. No cursor value is committed — cursors are re-derived from the
 > protected corpus at execution time and the run refuses if the digest has moved.
 > The recovery writes only to new artifacts; the executed March manifest,
-> checkpoint and database are untouched. **A fresh provider audit and explicit
-> authorization remain required**, followed by an independent execution review and
-> a separately authorized offline merge.
+> checkpoint and database are untouched.
+>
+> **Independently reviewed and ACCEPTED (2026-08-07)** —
+> `NBA_LINEUP_CONTINUATION_PREPARATION_REVIEW.md`. The review reproduced the
+> target derivation, digest, manifest identity and source fingerprint
+> independently, and repaired five defects, two of them blockers: the executor
+> **persisted nothing**, and `--execute` was **not wired**. The production path is
+> now fully wired and was exercised end to end over all 40 targets through a mock
+> transport only — 90 continuation requests, zero first pages, all evidence
+> durable, completed resume byte-identical.
+>
+> **A fresh provider audit and explicit authorization remain required**, followed
+> by an independent execution review and a separately authorized offline merge.
+> No code change should be needed between this review and the live run.
 >
 > **The combined F1 coverage/depth review has NOT begun. F1 remains incomplete and
 > F2 remains unauthorized.** Canonical matching remains blocked by three separately

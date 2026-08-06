@@ -23,7 +23,8 @@ each execution.
 | Official team / game / player matching mechanics | proven offline, one game per league |
 | **MLB June-2026 month execution** | **executed, independently reviewed** |
 | **NBA March-2026 month execution** | **executed, independently reviewed** |
-| NBA `lineups` family | **not accepted** — 40/239 games partial (ignored provider cursor); **targeted recovery prepared offline, NOT executed** |
+| NBA `lineups` family | **not accepted** — 40/239 games partial (ignored provider cursor) |
+| NBA lineup-continuation recovery | **prepared, independently reviewed and accepted; NOT executed** (`NBA_LINEUP_CONTINUATION_PREPARATION_REVIEW.md`) |
 | NBA `results` family | **repaired offline, independently reviewed and accepted** — 239/239 typed results (`F1_NBA_2026_03_RESULTS_REPAIR.md`, `NBA_RESULTS_REPAIR_INDEPENDENT_REVIEW.md`) |
 | NBA usable PIT labels | **0/239** — blocked by canonical matching, not by results |
 | Combined F1 coverage/depth review | **not begun** |
@@ -438,8 +439,8 @@ task; none of them is authorized by this document.
 Strictly sequential, and **no step below is authorized by this document**:
 
 1. Commit and independently validate the continuation implementation and
-   manifest. *(implementation and manifest committed; independent validation
-   still outstanding)*
+   manifest. — **done**, `NBA_LINEUP_CONTINUATION_PREPARATION_REVIEW.md`
+   (accepted; five defects repaired, execution path fully wired, never executed)
 2. Fresh BALLDONTLIE provider audit, on the day of the run.
 3. Explicitly authorized lineup-continuation **live execution only**.
 4. Independent continuation execution review.
@@ -496,8 +497,19 @@ Nothing here is authorized by this document.
   later, separately authorized offline merge applies reviewed continuation
   evidence to a protected copy of the March corpus.
 
+  **Independently reviewed and ACCEPTED (2026-08-07)** —
+  `NBA_LINEUP_CONTINUATION_PREPARATION_REVIEW.md`. The review reproduced the
+  target derivation, digest, manifest identity and source fingerprint
+  independently, and repaired five defects: the executor **persisted nothing**,
+  `--execute` was **not wired**, contradictory rows resolved by traversal order,
+  cursor typing was inconsistent (text accepted on write but unreadable on read),
+  and every exception was classified as a provider failure. The production path
+  is now fully wired and was exercised end to end over all 40 targets through a
+  mock transport only.
+
   Still required before any of it runs: a fresh BALLDONTLIE provider audit and
-  explicit authorization for that specific step.
+  explicit authorization for that specific step. No code change should be needed
+  between that review and the run.
 
 ## Regenerating the manifests
 

@@ -845,23 +845,33 @@ def run_nba_lineup_continuation(
     resume: bool = False,
     as_json: bool = False,
     out: Printer = print,
+    client_factory: Optional[Any] = None,
+    # Structural on purpose: only `nba_data_api_key` is read, so a test can
+    # inject a stand-in and never touch a real credential.
+    settings: Optional[Any] = None,
 ) -> int:
-    """Derive and validate the bounded NBA lineup-continuation recovery.
+    """Derive, validate and (when separately authorized) run the bounded NBA
+    lineup-continuation recovery.
 
     OFFLINE by default. It loads the committed recovery manifest, re-derives the
     target set from the protected source corpus (read-only), and checks the
     derivation against the manifest's binding -- target count, target digest,
-    selected-game count and source fingerprint. No provider client is built and
-    no settings are loaded on this path.
+    selected-game count and source fingerprint. On this path no provider client is
+    built and no settings are loaded.
 
     ``--execute`` performs the live continuation and is a SEPARATELY AUTHORIZED
-    step: it additionally requires the process-scoped F1B authorization, exactly
-    like every other live provider run in this repository.
+    step. Every bound is verified BEFORE a client exists: authorization, explicit
+    recovery paths, path aliasing, the manifest binding, the source fingerprint
+    and target digest, and the presence of the configured API key. ``settings``
+    and ``client_factory`` are injectable so the full production path can be
+    exercised through a mock transport without a real credential.
     """
 
     from .ingest.lineup_continuation import (
         LineupContinuationError,
+        LineupContinuationExecutor,
         derive_targets,
+        render_report,
         render_survey,
     )
     from .ingest.manifest import ManifestError, load_and_validate
@@ -905,7 +915,7 @@ def run_nba_lineup_continuation(
             "source database fingerprint does not match the manifest; the corpus "
             "has changed since this recovery was reviewed", as_json, out)
 
-    payload = {
+    payload: dict[str, Any] = {
         "command": "nba-lineup-continuation",
         "mode": "execute" if execute else "offline_validation",
         "manifest_hash": manifest.manifest_hash(),
@@ -936,7 +946,8 @@ def run_nba_lineup_continuation(
             out("  offline validation only; --execute is separately authorized")
         return 0
 
-    # ---- live execution boundary (not exercised by this preparation task) --- #
+    # ---------------- live execution boundary ---------------------------- #
+    # Everything below happens BEFORE a provider client exists.
     if os.environ.get("MONEYMAKER_F1B_AUTHORIZED") != "1":
         return _lineup_refusal(
             "live lineup continuation is not authorized; a separate reviewed "
@@ -946,15 +957,192 @@ def run_nba_lineup_continuation(
         return _lineup_refusal(
             "--execute requires an explicit --recovery-db and --checkpoint",
             as_json, out)
-    for protected in (Path(source_db),):
-        if Path(recovery_db).resolve() == protected.resolve():
+    recovery_path, checkpoint_path = Path(recovery_db), Path(checkpoint)
+    source_path = Path(source_db)
+    for label, candidate in (("recovery database", recovery_path),
+                             ("checkpoint", checkpoint_path)):
+        if _same_file_as(candidate, source_path):
             return _lineup_refusal(
-                "refusing to write the recovery into the protected source corpus",
+                f"refusing to write the {label} onto the protected source corpus",
                 as_json, out)
-    return _lineup_refusal(
-        "live continuation execution is prepared but intentionally not wired to a "
-        "default client here; it must be launched by the separately authorized "
-        "execution step", as_json, out)
+        if candidate.is_symlink():
+            return _lineup_refusal(
+                f"refusing to write the {label} through a symlink", as_json, out)
+
+    # Authentication is checked by PRESENCE only -- never printed, hashed or
+    # logged -- and before the recovery database is created or mutated.
+    try:
+        resolved = settings if settings is not None else load_settings()
+    except ReadOnlyStartupError as exc:
+        return _lineup_refusal(f"read-only startup invariant failed: {exc}",
+                               as_json, out)
+    if not _has_nba_key(resolved):
+        return _lineup_refusal(
+            "no BALLDONTLIE API key is configured; the continuation cannot run",
+            as_json, out)
+
+    # Recovery database contract: a brand-new schema-v17 database is created
+    # here, offline, before any client exists. An existing NON-EMPTY one is only
+    # acceptable under --resume with a checkpoint that matches this manifest.
+    code = _prepare_recovery_database(recovery_path, checkpoint_path, manifest,
+                                      resume=resume, as_json=as_json, out=out)
+    if code is not None:
+        return code
+
+    from .db.engine import Database
+    from .ingest.cost_policies import (
+        build_balldontlie_policy,
+        build_balldontlie_rate_policy,
+    )
+    from .ingest.pilot import run_pilot
+    from .request_control import CreditBudget, RequestBudget, RequestGate
+
+    rate_policy = build_balldontlie_rate_policy(
+        tier="goat", configured_per_min=manifest.configured_rate_per_min or 60)
+    gate = RequestGate(
+        request_budget=RequestBudget(max_requests=manifest.request_cap or 0),
+        credit_budget=CreditBudget(applicable=False),
+        cost_policy=build_balldontlie_policy(), rate_policy=rate_policy)
+    gate.set_auth_context(auth_applicable=True, configured_tier=rate_policy.tier)
+
+    factory = client_factory if client_factory is not None else (
+        _balldontlie_continuation_factory(resolved))
+    database = Database(recovery_path)
+    executor = LineupContinuationExecutor(
+        database=database, client_factory=factory, targets=survey.targets,
+        date_range=manifest.date_range,
+        max_pages=int(binding["max_continuation_pages"]))
+
+    def _fingerprint() -> str:
+        classified = classify_scratch_db(recovery_path, resume=True,
+                                         expected_fingerprint=None)
+        return classified.fingerprint or ""
+
+    result = run_pilot(
+        manifest=manifest, gate=gate, executor=executor,
+        checkpoint_path=checkpoint_path,
+        scratch_fingerprint=_fingerprint(), resume=resume,
+        code_version="nba-lineup-continuation", fingerprint_fn=_fingerprint)
+
+    payload.update({
+        "executed": True,
+        "network_occurred": bool(result.usage.get("transport_starts", 0)),
+        "targets_completed": executor.report.targets_completed,
+        "targets_incomplete": executor.report.targets_incomplete,
+        "continuation_requests": executor.report.continuation_requests,
+        "pages_persisted": executor.report.pages_persisted,
+        "lineup_rows": executor.report.lineup_rows,
+        "findings": executor.report.findings,
+        "first_page_requests": executor.report.first_page_requests,
+        "success": executor.report.success,
+        "completed_units": result.completed,
+        "performed_new_work": result.performed_new_work,
+        "checkpoint_mutated": result.checkpoint_mutated,
+        "usage": dict(result.usage),
+        "report": executor.report.as_dict(),
+    })
+    if as_json:
+        out(json.dumps(payload, sort_keys=True, default=str))
+    else:
+        render_report(executor.report, out)
+        out(f"  units:     completed={result.completed} "
+            f"new_work={result.performed_new_work} "
+            f"checkpoint_mutated={result.checkpoint_mutated}")
+    return 0 if executor.report.success else EXIT_ACTIVE_FAILURE
+
+
+def _has_nba_key(settings: Any) -> bool:
+    """Whether a BALLDONTLIE key is configured. Never reveals the value."""
+
+    secret = getattr(settings, "nba_data_api_key", None)
+    if secret is None:
+        return False
+    value = secret.get_secret_value() if hasattr(secret, "get_secret_value") else secret
+    return bool(value and str(value).strip())
+
+
+def _balldontlie_continuation_factory(settings: Any) -> Any:
+    """The real gated client. Built only inside the authorized execute branch."""
+
+    def factory(gate: Any) -> Any:
+        from .providers.balldontlie import BalldontlieClient
+
+        return BalldontlieClient(settings.nba_data_api_key, gate=gate, league="nba")
+
+    return factory
+
+
+def _same_file_as(candidate: Path, protected: Path) -> bool:
+    try:
+        if candidate.resolve() == protected.resolve():
+            return True
+    except OSError:
+        pass
+    try:
+        a, b = candidate.lstat(), protected.lstat()
+    except OSError:
+        return False
+    return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+
+
+def _prepare_recovery_database(
+    recovery_path: Path, checkpoint_path: Path, manifest: Any, *, resume: bool,
+    as_json: bool, out: Printer,
+) -> Optional[int]:
+    """Create or validate the recovery database. Returns an exit code on refusal.
+
+    Contract: a fresh run creates a brand-new schema-v17 database here, offline,
+    before any client exists. A database that already holds recovery evidence is
+    only acceptable under ``--resume`` with a checkpoint bound to this manifest --
+    otherwise a second run could silently append to someone else's evidence.
+    """
+
+    import sqlite3 as _sqlite3
+
+    from .db.init import initialize_database
+    from .ingest.checkpoint import CheckpointError, load_checkpoint
+
+    existing = recovery_path.exists()
+    if existing:
+        try:
+            con = _sqlite3.connect(f"file:{recovery_path.as_posix()}?mode=ro", uri=True)
+            try:
+                version = con.execute(
+                    "SELECT MAX(version) FROM schema_versions").fetchone()[0]
+                rows = con.execute("SELECT COUNT(*) FROM raw_responses").fetchone()[0]
+            finally:
+                con.close()
+        except _sqlite3.Error as exc:
+            return _lineup_refusal(f"recovery database is unusable: {exc}",
+                                   as_json, out)
+        if version != manifest.expected_schema_version:
+            return _lineup_refusal(
+                f"recovery database is schema v{version}, expected "
+                f"v{manifest.expected_schema_version}", as_json, out)
+        if rows and not resume:
+            return _lineup_refusal(
+                "recovery database already holds continuation evidence; pass "
+                "--resume with its matching checkpoint, or use a new path",
+                as_json, out)
+        if rows and resume:
+            if not checkpoint_path.exists():
+                return _lineup_refusal(
+                    "--resume requires the recovery checkpoint that produced this "
+                    "database", as_json, out)
+            try:
+                ck = load_checkpoint(checkpoint_path)
+            except CheckpointError as exc:
+                return _lineup_refusal(str(exc), as_json, out)
+            if ck.manifest_hash != manifest.manifest_hash():
+                return _lineup_refusal(
+                    "recovery checkpoint does not match this manifest", as_json, out)
+    else:
+        if resume:
+            return _lineup_refusal(
+                "--resume was requested but the recovery database does not exist",
+                as_json, out)
+        initialize_database(recovery_path)      # brand new, schema v17, offline
+    return None
 
 
 def _lineup_refusal(reason: str, as_json: bool, out: Printer) -> int:

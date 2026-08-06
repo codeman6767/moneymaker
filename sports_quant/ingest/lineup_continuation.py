@@ -32,9 +32,12 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
+
+from streaming.event_envelope import canonical_json
 
 #: Endpoint whose first pages the month run preserved and whose continuations
 #: this recovery fetches.
@@ -336,6 +339,13 @@ DQ_EMPTY_PAGE_WITH_CURSOR = "DQ-NBA-LINEUP-R005"
 DQ_TERMINAL_FAILURE = "DQ-NBA-LINEUP-R006"
 DQ_SILENT_LOSS = "DQ-NBA-LINEUP-R007"
 DQ_CONFLICTING_PLAYER = "DQ-NBA-LINEUP-R008"
+#: One sanitized durable record per target holding its whole cursor chain.
+DQ_CHAIN_PROVENANCE = "DQ-NBA-LINEUP-R009"
+
+#: Recorded on every recovery ingestion run, so recovery work is never
+#: mistaken for the original live month ingestion.
+RECOVERY_COMMAND = "nba-lineup-continuation"
+RECOVERY_TOOL_VERSION = "sports_quant 0.1.0"
 
 #: Why a game's cursor chain stopped. Only ``exhausted`` is completion.
 STOP_EXHAUSTED = "exhausted"          # provider returned a null next_cursor
@@ -344,6 +354,9 @@ STOP_REPEATED_CURSOR = "repeated_cursor"
 STOP_WRONG_GAME = "wrong_game"
 STOP_MALFORMED = "malformed"
 STOP_FAILED = "request_failed"
+#: The aggregate request budget stopped the run mid-chain. This is a
+#: controlled truncation the pilot runner owns, NOT a provider failure.
+STOP_BUDGET_EXHAUSTED = "budget_exhausted"
 
 
 @dataclass
@@ -465,36 +478,69 @@ def lineup_row_content(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _row_provenance_key(page_ordinal: int, row: dict[str, Any]) -> tuple:
+    """A deterministic ordering key for one observed lineup row.
+
+    Ordering is by PROVENANCE, not by the order pages or rows happen to be
+    handed to the merge: the continuation page they arrived on, then the
+    provider's own lineup-row id, then the team and player ids. That is what
+    makes "keep the first observation" a defensible rule -- "first" means the
+    earliest page and lowest provider row id, which is a property of the
+    evidence, not of traversal.
+    """
+
+    raw_id = row.get("id")
+    id_key = (0, int(raw_id), "") if isinstance(raw_id, int) and not isinstance(
+        raw_id, bool) else (1, 0, str(raw_id))
+    key = semantic_lineup_key(row)
+    return (page_ordinal, id_key, key or ("", ""))
+
+
 def merge_lineup_rows(
-    pages: Iterable[Iterable[dict[str, Any]]],
+    pages: Iterable[Any],
 ) -> tuple[dict[tuple[str, str], dict[str, Any]], list[tuple[str, str]], int]:
     """Deterministically fold continuation pages into one lineup set.
 
-    Returns ``(by_identity, conflicts, rejected)``. Identical repeats collapse;
-    a contradictory repeat keeps the FIRST observation and is reported as a
-    conflict rather than silently overwritten. The result is independent of page
-    and row order, so a recovery cannot depend on traversal.
+    ``pages`` is an iterable of either bare row lists (page ordinals are then
+    taken from position) or ``(page_ordinal, rows)`` pairs. Every row is sorted by
+    :func:`_row_provenance_key` BEFORE folding, so the outcome depends only on the
+    evidence and not on the order the caller supplies.
+
+    Returns ``(by_identity, conflicts, rejected)``. Identical repeats collapse; a
+    contradictory repeat keeps the provenance-earliest observation and is reported
+    as a conflict rather than silently overwritten. Both the retained value and
+    the conflict list are traversal-independent.
     """
 
-    merged: dict[tuple[str, str], dict[str, Any]] = {}
-    conflicts: list[tuple[str, str]] = []
+    flattened: list[tuple[tuple, dict[str, Any]]] = []
     rejected = 0
-    for page in pages:
-        for row in page:
-            if not isinstance(row, dict):
+    for position, page in enumerate(pages, start=1):
+        if (isinstance(page, tuple) and len(page) == 2
+                and isinstance(page[0], int) and not isinstance(page[0], bool)):
+            ordinal, rows = page
+        else:
+            ordinal, rows = position, page
+        for row in rows:
+            if not isinstance(row, dict) or semantic_lineup_key(row) is None:
                 rejected += 1
                 continue
-            key = semantic_lineup_key(row)
-            if key is None:
-                rejected += 1
-                continue
-            content = lineup_row_content(row)
-            existing = merged.get(key)
-            if existing is None:
-                merged[key] = content
-            elif existing != content and key not in conflicts:
-                conflicts.append(key)
+            flattened.append((_row_provenance_key(ordinal, row), row))
+
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    conflicts: set[tuple[str, str]] = set()
+    for _key, row in sorted(flattened, key=lambda item: item[0]):
+        identity = semantic_lineup_key(row)
+        assert identity is not None            # filtered above
+        content = lineup_row_content(row)
+        existing = merged.get(identity)
+        if existing is None:
+            merged[identity] = content
+        elif existing != content:
+            conflicts.add(identity)
     return merged, sorted(conflicts), rejected
+
+
+from ..request_control import BudgetExhausted  # noqa: E402
 
 
 class ContinuationUnitFailed(RuntimeError):
@@ -507,7 +553,8 @@ class LineupContinuationExecutor:
     Reusing ``run_pilot`` is deliberate: it already supplies per-unit
     checkpointing, resume that skips a completed unit with zero transport, the
     budget gate wired into the transport, and v2 usage provenance. This class
-    supplies only the continuation-specific work.
+    supplies the continuation-specific work and persists its own evidence into
+    the RECOVERY database -- never into the executed March corpus.
     """
 
     def __init__(
@@ -519,6 +566,7 @@ class LineupContinuationExecutor:
         date_range: str,
         max_pages: int = MAX_CONTINUATION_PAGES,
         per_page: int = LINEUPS_PER_PAGE,
+        persist: bool = True,
     ) -> None:
         if max_pages < 1 or max_pages > MAX_CONTINUATION_PAGES:
             raise LineupContinuationError(
@@ -536,6 +584,7 @@ class LineupContinuationExecutor:
         self._range = date_range
         self._max_pages = max_pages
         self._per_page = per_page
+        self._persist = persist
         self._in_flight: Optional[str] = None
         self.report = ContinuationReport(targets=len(self._targets))
 
@@ -567,10 +616,24 @@ class LineupContinuationExecutor:
             if identity in completed:
                 continue                      # already durable -> zero transport
             self._in_flight = identity
-            outcome = asyncio.run(self._run_target(gate, target))
+            try:
+                outcome, responses = asyncio.run(self._run_target(gate, target))
+            except BudgetExhausted:
+                # The gate stopped this chain. Record the target honestly as
+                # incomplete, then re-raise so the runner performs its normal
+                # controlled truncation -- this is not a provider failure and
+                # must not be reported as one.
+                self.report.outcomes.append(ContinuationOutcome(
+                    provider_game_id=target.provider_game_id,
+                    start_cursor=target.start_cursor,
+                    stop_reason=STOP_BUDGET_EXHAUSTED))
+                self.report.targets_incomplete += 1
+                self._in_flight = None
+                raise
+            persisted = self._persist_target(target, outcome, responses)
             self.report.outcomes.append(outcome)
             self.report.continuation_requests += len(outcome.pages)
-            self.report.pages_persisted += len(outcome.pages)
+            self.report.pages_persisted += persisted
             self.report.lineup_rows += outcome.lineup_rows
             self.report.findings += len(outcome.findings)
             if not outcome.complete:
@@ -582,39 +645,53 @@ class LineupContinuationExecutor:
                     f"game {target.provider_game_id}: {outcome.stop_reason}")
             self.report.targets_completed += 1
             self._in_flight = None
-            yield _unit_done(identity, bool(outcome.pages))
+            yield _unit_done(identity, persisted > 0)
 
-    async def _run_target(self, gate: Any, target: LineupTarget) -> ContinuationOutcome:
-        """Walk one game's cursor chain, bounded and fail-closed."""
+    async def _run_target(self, gate: Any, target: LineupTarget) -> Any:
+        """Walk one game's cursor chain, bounded and fail-closed.
+
+        Returns ``(outcome, responses)``; the responses are handed to persistence
+        so every fetched page becomes durable evidence, including the pages of a
+        chain that ended badly.
+        """
+
+        import httpx
 
         from ..providers.balldontlie import next_cursor
+        from ..providers.base_provider import ProviderError
 
         outcome = ContinuationOutcome(provider_game_id=target.provider_game_id,
                                       start_cursor=target.start_cursor)
+        responses: list[Any] = []
         seen: set[object] = {target.start_cursor}
         cursor: object = target.start_cursor
         client = self._client_factory(gate)
-        payloads: list[list[dict[str, Any]]] = []
+        payloads: list[tuple[int, list[dict[str, Any]]]] = []
         try:
             for ordinal in range(1, self._max_pages + 1):
                 try:
                     response = await client.fetch_lineups(
                         game_ids=[target.provider_game_id], per_page=self._per_page,
                         cursor=cursor)
-                except Exception as exc:                        # noqa: BLE001
+                # ONLY provider/transport failures are a provider terminal
+                # failure. A TypeError or a sqlite error is OUR bug and must
+                # surface as itself rather than be misreported as the provider's.
+                except (ProviderError, httpx.HTTPError) as exc:
                     outcome.stop_reason = STOP_FAILED
                     outcome.findings.append(
                         f"{DQ_TERMINAL_FAILURE}: continuation request failed "
                         f"({type(exc).__name__})")
-                    return outcome
+                    return outcome, responses
 
                 rows, ok = _rows_of(response.data)
                 if not ok:
+                    responses.append(response)
                     outcome.stop_reason = STOP_MALFORMED
                     outcome.findings.append(
                         f"{DQ_MALFORMED_PAGE}: page {ordinal} is not a usable payload")
-                    return outcome
+                    return outcome, responses
 
+                responses.append(response)
                 wrong = {str(r.get("game_id")) for r in rows
                          if isinstance(r, dict) and r.get("game_id") is not None}
                 if wrong - {str(target.provider_game_id)}:
@@ -623,17 +700,15 @@ class LineupContinuationExecutor:
                     outcome.stop_reason = STOP_WRONG_GAME
                     outcome.findings.append(
                         f"{DQ_WRONG_GAME}: page {ordinal} carries a different game id")
-                    return outcome
+                    return outcome, responses
 
                 nxt = next_cursor(response.data)
-                exchange = response.exchange
                 outcome.pages.append(ContinuationPage(
                     provider_game_id=target.provider_game_id, page_ordinal=ordinal,
                     requested_cursor=cursor, returned_cursor=nxt, rows=len(rows),
-                    raw_response_id="", raw_response_hash="",
-                    observed_at=str(getattr(exchange, "received_at", "")),
+                    observed_at=str(getattr(response.exchange, "received_at", "")),
                 ))
-                payloads.append([r for r in rows if isinstance(r, dict)])
+                payloads.append((ordinal, [r for r in rows if isinstance(r, dict)]))
 
                 if not rows and nxt is not None:
                     outcome.findings.append(
@@ -650,7 +725,7 @@ class LineupContinuationExecutor:
                     outcome.findings.append(
                         f"{DQ_REPEATED_CURSOR}: page {ordinal} returned an "
                         "already-requested cursor")
-                    return outcome
+                    return outcome, responses
                 seen.add(nxt)
                 cursor = nxt
             else:
@@ -658,22 +733,207 @@ class LineupContinuationExecutor:
                 outcome.findings.append(
                     f"{DQ_PAGE_LIMIT_REACHED}: {self._max_pages} continuation pages "
                     "fetched and the provider still advertises more")
-                return outcome
+                return outcome, responses
         finally:
-            await client.aclose()
+            await client.aclose()          # exactly once, on every path
 
         merged, conflicts, rejected = merge_lineup_rows(payloads)
-        outcome.lineup_rows = sum(len(p) for p in payloads)
+        outcome.lineup_rows = sum(len(rows) for _o, rows in payloads)
         outcome.players_added = len(merged)
         for team_id, player_id in conflicts:
             outcome.findings.append(
                 f"{DQ_CONFLICTING_PLAYER}: team {team_id} player {player_id} was "
                 "observed with contradictory position/starter across pages; the "
-                "first observation was kept")
+                "provenance-earliest observation was kept")
         if rejected:
             outcome.findings.append(
                 f"{DQ_SILENT_LOSS}: {rejected} row(s) could not be normalized")
-        return outcome
+        return outcome, responses
+
+    # -- persistence -------------------------------------------------------- #
+    def _persist_target(self, target: LineupTarget, outcome: ContinuationOutcome,
+                        responses: list[Any]) -> int:
+        """Write this target's continuation evidence into the RECOVERY database.
+
+        Everything a later reviewer or merge needs becomes durable here: the raw
+        continuation responses (whose stored request params carry the REQUESTED
+        cursor and whose bodies carry the RETURNED cursor), the provider
+        references and identity observations they contain, the lineup rows they
+        added, this target's cursor-chain summary, and every finding. Pages of a
+        chain that ended badly are persisted too -- evidence of a failure is still
+        evidence.
+        """
+
+        if not self._persist or not responses:
+            return 0
+
+        from ..db.engine import transaction
+        from ..db.repositories.data_quality import SqliteDataQualityRepository
+        from ..db.repositories.ingestion_runs import SqliteIngestionRunRepository
+        from ..db.repositories.lineups import LineupPlayerInput, SqliteLineupRepository
+        from ..db.repositories.raw_responses import (
+            SqliteRawResponseRepository,
+            response_content_hash,
+        )
+        from ..db.repositories.references import SqliteProviderReferenceRepository
+        from ..db.schema import to_iso
+        from .identity_record import IdentityRecorder
+
+        stored = 0
+        with self._database.connection() as conn:
+            runs = SqliteIngestionRunRepository(conn)
+            with transaction(conn):
+                run = runs.start(
+                    command=RECOVERY_COMMAND, provider=SUPPORTED_PROVIDER,
+                    operation="lineup_continuation", sport=SUPPORTED_LEAGUE,
+                    args_json=canonical_json({
+                        "provider_game_id": target.provider_game_id,
+                        "date_range": self._range,
+                        "max_continuation_pages": self._max_pages,
+                        "contract_version": RECOVERY_CONTRACT_VERSION,
+                    }),
+                    started_monotonic_ns=time.monotonic_ns(),
+                    tool_version=RECOVERY_TOOL_VERSION)
+
+            raw_repo = SqliteRawResponseRepository(conn)
+            refs = SqliteProviderReferenceRepository(conn)
+            dq = SqliteDataQualityRepository(conn)
+            lineups = SqliteLineupRepository(conn)
+            identities = IdentityRecorder(conn=conn)
+
+            raws: list[tuple[str, str, str]] = []
+            for response in responses:
+                exchange = response.exchange
+                content_hash = response_content_hash(
+                    provider=SUPPORTED_PROVIDER, endpoint=exchange.endpoint,
+                    request_params=exchange.request_params, body=exchange.body)
+                with transaction(conn):
+                    raw = raw_repo.store(
+                        run_id=run.run_id, provider=SUPPORTED_PROVIDER,
+                        endpoint=exchange.endpoint,
+                        request_params_json=canonical_json(exchange.request_params),
+                        http_status=exchange.http_status,
+                        response_headers_json=canonical_json(exchange.response_headers),
+                        requested_at=to_iso(exchange.requested_at),
+                        received_at=to_iso(exchange.received_at),
+                        elapsed_ns=exchange.elapsed_ns, body=exchange.body,
+                        content_hash=content_hash,
+                        content_type=exchange.content_type)
+                raws.append((raw.raw_response_id, content_hash, raw.received_at))
+                stored += 1
+                with transaction(conn):
+                    identities.observe_response(
+                        provider=SUPPORTED_PROVIDER, endpoint=exchange.endpoint,
+                        body=exchange.body, raw_response_id=raw.raw_response_id,
+                        raw_response_hash=content_hash, observed_at=raw.received_at)
+
+            anchor_id, anchor_hash, anchor_observed = raws[0]
+            with transaction(conn):
+                game_ref, _out = refs.upsert(
+                    kind="game", provider=SUPPORTED_PROVIDER,
+                    provider_entity_id=target.provider_game_id,
+                    raw_response_id=anchor_id, raw_response_hash=anchor_hash,
+                    observed_at=anchor_observed)
+
+            # Lineup rows, merged deterministically across this target's pages.
+            payloads: list[tuple[int, list[dict[str, Any]]]] = []
+            for page, (_rid, _rh, _obs) in zip(outcome.pages, raws, strict=False):
+                body = json.loads(responses[page.page_ordinal - 1].exchange.body)
+                rows = body.get("data") or []
+                payloads.append((page.page_ordinal,
+                                 [r for r in rows if isinstance(r, dict)]))
+            merged, conflicts, _rejected = merge_lineup_rows(payloads)
+
+            by_team: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+            for (team_id, player_id), content in merged.items():
+                by_team.setdefault(team_id, []).append((player_id, content))
+            ingested = to_iso(_now())
+            for team_id in sorted(by_team, key=_canonical_id_key):
+                entries = sorted(by_team[team_id],
+                                 key=lambda item: (not item[1]["starter"],
+                                                   _canonical_id_key(item[0])))
+                players = []
+                for ordinal, (player_id, content) in enumerate(entries, start=1):
+                    with transaction(conn):
+                        refs.upsert(kind="player", provider=SUPPORTED_PROVIDER,
+                                    provider_entity_id=player_id,
+                                    raw_response_id=anchor_id,
+                                    raw_response_hash=anchor_hash,
+                                    observed_at=anchor_observed)
+                    players.append(LineupPlayerInput(
+                        batting_order=ordinal, provider_player_id=player_id,
+                        position=content["position"], is_starter=content["starter"]))
+                with transaction(conn):
+                    refs.upsert(kind="team", provider=SUPPORTED_PROVIDER,
+                                provider_entity_id=team_id,
+                                raw_response_id=anchor_id,
+                                raw_response_hash=anchor_hash,
+                                observed_at=anchor_observed)
+                    lineups.append(
+                        game_ref_id=game_ref.reference_id, provider=SUPPORTED_PROVIDER,
+                        provider_game_id=target.provider_game_id,
+                        provider_team_id=team_id, players=players,
+                        observed_at=anchor_observed, ingested_at=ingested,
+                        run_id=run.run_id, raw_response_id=anchor_id,
+                        raw_response_hash=anchor_hash,
+                        # A posted lineup is NEVER a confirmed pregame starter set,
+                        # and a CONTINUATION alone is not even a whole lineup.
+                        is_confirmed=False)
+
+            with transaction(conn):
+                # The cursor chain, in one sanitized durable record: ids and
+                # cursors only, no body and no player name.
+                dq.record(
+                    severity="note", rule_code=DQ_CHAIN_PROVENANCE,
+                    entity_type="game", entity_id=target.provider_game_id,
+                    provider=SUPPORTED_PROVIDER, run_id=run.run_id,
+                    raw_response_id=anchor_id,
+                    description=(
+                        f"lineup continuation for game {target.provider_game_id}: "
+                        f"{len(outcome.pages)} page(s), stop={outcome.stop_reason}; "
+                        "page one remains in the executed March corpus and is NOT "
+                        "duplicated here"),
+                    detail_json=canonical_json({
+                        "contract_version": RECOVERY_CONTRACT_VERSION,
+                        "first_page_raw_response_id": target.first_raw_response_id,
+                        "first_page_raw_response_hash": target.first_raw_response_hash,
+                        "start_cursor": target.start_cursor,
+                        "cursor_chain": [p.requested_cursor for p in outcome.pages],
+                        "returned_cursors": [p.returned_cursor for p in outcome.pages],
+                        "page_ordinals": [p.page_ordinal for p in outcome.pages],
+                        "rows_per_page": [p.rows for p in outcome.pages],
+                        "stop_reason": outcome.stop_reason,
+                        "complete": outcome.complete,
+                        "players_added": outcome.players_added,
+                        "conflicts": [f"{t}:{p}" for t, p in conflicts],
+                    }))
+                for text in outcome.findings:
+                    code, _sep, message = text.partition(": ")
+                    dq.record(
+                        severity="note" if outcome.complete else "issue",
+                        rule_code=code, entity_type="game",
+                        entity_id=target.provider_game_id, provider=SUPPORTED_PROVIDER,
+                        run_id=run.run_id, raw_response_id=anchor_id,
+                        description=message or text)
+
+            with transaction(conn):
+                runs.complete(
+                    run.run_id,
+                    status="succeeded" if outcome.complete else "failed",
+                    duration_ns=0, requests_made=len(outcome.pages),
+                    records_received=outcome.lineup_rows,
+                    records_normalized=outcome.players_added,
+                    records_inserted=outcome.players_added,
+                    error_type=None if outcome.complete else outcome.stop_reason,
+                    error_message=None if outcome.complete else
+                    f"continuation stopped: {outcome.stop_reason}")
+        return stored
+
+
+def _now() -> Any:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc)
 
 
 def _rows_of(data: Any) -> tuple[list[Any], bool]:

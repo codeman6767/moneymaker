@@ -39,16 +39,20 @@ _MAX_LIST_SIZE = 100
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-def _validate_cursor(cursor: object) -> object:
-    """Accept a provider pagination cursor without reinterpreting it.
+def _validate_cursor(cursor: object) -> int:
+    """Accept a BALLDONTLIE pagination cursor, which is an INTEGER.
 
-    A cursor is the provider's own opaque continuation token. It may be an
-    integer (BALLDONTLIE's current form) or opaque text, and we must pass it back
-    EXACTLY as issued -- normalizing it is how a paginator silently starts from
-    the wrong place. So this only refuses values that cannot be a token at all:
-    ``None`` (the caller should omit the parameter instead), ``bool``, an empty
-    or whitespace-only string, and any container, which would serialize as a
-    repeated query parameter rather than one value.
+    The adapter contract is integer-only, and deliberately so: :func:`next_cursor`
+    reads ``meta.next_cursor`` as an ``int`` and returns ``None`` for anything
+    else. Accepting an opaque string here would let a caller SEND a token that
+    the same module could never READ back from the next payload -- the paginator
+    would treat a live chain as finished and silently truncate, which is the exact
+    class of defect this cursor support exists to fix. So the two ends are kept
+    consistent rather than one being permissive.
+
+    Refuses ``None`` (omit the parameter instead), ``bool`` (an ``int`` subclass
+    that is never an id), containers (which serialize as a repeated parameter
+    rather than one value), and every other type.
     """
 
     if cursor is None:
@@ -57,13 +61,11 @@ def _validate_cursor(cursor: object) -> object:
         raise ValueError("cursor must not be a bool")
     if isinstance(cursor, (list, tuple, set, dict)):
         raise ValueError("cursor must be a single scalar value, not a container")
-    if isinstance(cursor, str):
-        if not cursor.strip():
-            raise ValueError("cursor must not be blank")
-        return cursor
     if isinstance(cursor, int):
         return cursor
-    raise ValueError(f"unsupported cursor type {type(cursor).__name__}")
+    raise ValueError(
+        f"cursor must be an integer (got {type(cursor).__name__}); BALLDONTLIE "
+        "cursors are integers and `next_cursor` reads only integers")
 
 
 def _validate_game_id(game_id: object) -> int:
@@ -460,8 +462,9 @@ class BalldontlieClient(BaseProviderClient):
         ``httpx``: it is never pre-quoted, never wrapped in a list (which would
         serialize a repeated parameter) and never stringified through a container
         (which is what produced the unusable ``"[18447686]"`` provenance the
-        execution review found). Opaque non-numeric cursors are accepted as-is --
-        a cursor is the provider's token, not ours to interpret.
+        execution review found). A cursor is an INTEGER -- the same form
+        :func:`next_cursor` reads back -- so a token can always be round-tripped
+        through this module rather than sent and then silently unreadable.
         """
 
         validated = [_validate_game_id(g) for g in game_ids]

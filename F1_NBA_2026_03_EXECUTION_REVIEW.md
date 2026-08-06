@@ -796,8 +796,17 @@ responses, 0 provider requests, checkpoint byte-identical. See
 > `03d3df93…`. Cursors are **not** committed; they are re-derived from the
 > protected corpus at execution time and the run refuses if the digest has moved.
 > The recovery writes only to `data\f1_nba_lineups_2026_03_recovery.db` and its
-> own checkpoint. **The live run itself still requires a fresh provider audit and
-> explicit authorization**, then an independent review and a separate offline
+> own checkpoint.
+>
+> That preparation has since been **independently reviewed and ACCEPTED**
+> (2026-08-07, `NBA_LINEUP_CONTINUATION_PREPARATION_REVIEW.md`), which repaired
+> five defects — the executor persisted nothing, `--execute` was not wired,
+> conflicts resolved by traversal order, cursor typing was inconsistent, and every
+> exception was blamed on the provider — and exercised the now fully wired
+> production path over all 40 targets through a mock transport.
+>
+> **The live run itself still requires a fresh provider audit and explicit
+> authorization**, then an independent execution review and a separate offline
 > merge.
 
 | | |

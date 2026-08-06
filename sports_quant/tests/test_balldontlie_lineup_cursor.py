@@ -87,26 +87,43 @@ async def test_continuation_page_sends_the_cursor_once() -> None:
 
 
 @pytest.mark.asyncio
-async def test_opaque_text_cursor_survives_unmodified() -> None:
-    """A cursor is the provider's token; normalizing it would resume elsewhere."""
+async def test_a_text_cursor_is_refused_so_the_two_ends_stay_consistent() -> None:
+    """The adapter contract is integer-only, deliberately.
 
-    opaque = "eyJvZmZzZXQiOjI1fQ"
-    await _call(game_ids=[18447686], cursor=opaque)
-    assert SEEN[0].url.params["cursor"] == opaque
+    ``next_cursor`` reads ``meta.next_cursor`` as an ``int`` and returns ``None``
+    for anything else. Accepting an opaque string here would let a caller SEND a
+    token this module could never READ back, so a live chain would look finished
+    and truncate silently -- the very defect cursor support exists to fix.
+    """
+
+    del SEEN[:]
+    client = _client()
+    try:
+        with pytest.raises(ValueError, match="integer"):
+            await client.fetch_lineups(game_ids=[18447686], cursor="eyJvZmZzZXQiOjI1fQ")
+    finally:
+        await client.aclose()
+    assert SEEN == []
+    # ... and the read side genuinely does not understand text
+    assert next_cursor({"meta": {"next_cursor": "eyJvZmZzZXQiOjI1fQ"}}) is None
 
 
 @pytest.mark.parametrize("cursor,expected", [
-    ("a b", "a b"),            # space
-    ("a+b", "a+b"),            # plus must survive round-trip, not become a space
-    ("a/b=", "a/b="),          # reserved characters
-    ("a%20b", "a%20b"),        # already-percent-looking text is NOT re-decoded
+    (0, "0"),                  # 0 is a valid cursor, not a falsy "absent"
+    (25, "25"),
+    (5615604, "5615604"),
+    (2**63, str(2**63)),       # very large ids are not truncated
 ])
 @pytest.mark.asyncio
-async def test_cursor_is_encoded_exactly_once(cursor: str, expected: str) -> None:
+async def test_integer_cursor_is_encoded_exactly_once(cursor: int,
+                                                      expected: str) -> None:
     """Double encoding would send a token the provider never issued."""
 
     await _call(game_ids=[18447686], cursor=cursor)
+    items = SEEN[0].url.params.multi_items()
     assert SEEN[0].url.params["cursor"] == expected
+    assert [k for k, _ in items].count("cursor") == 1
+    assert f"cursor={expected}" in str(SEEN[0].url)
 
 
 @pytest.mark.asyncio
@@ -125,8 +142,8 @@ async def test_cursor_is_never_serialized_as_a_container() -> None:
     assert SEEN[0].url.params.get_list("game_ids[]") == ["18447686"]
 
 
-@pytest.mark.parametrize("bad", [[5615604], (5615604,), {"c": 1}, True, "", "   ",
-                                 3.5, object()])
+@pytest.mark.parametrize("bad", [[5615604], (5615604,), {"c": 1}, True, False, "",
+                                 "   ", "5615604", "abc", 3.5, object(), b"5"])
 @pytest.mark.asyncio
 async def test_unusable_cursor_values_are_refused_before_any_request(bad: Any) -> None:
     del SEEN[:]
