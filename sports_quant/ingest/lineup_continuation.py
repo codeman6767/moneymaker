@@ -417,6 +417,24 @@ class ContinuationReport:
 
         return self.targets > 0 and self.targets_incomplete == 0
 
+    @property
+    def empty_continuation_pages(self) -> int:
+        """Continuation pages the provider returned with no rows.
+
+        A page-level count, not a target-level one. An empty page is ordinary
+        when page one was exactly full: the provider advertises a cursor and the
+        page behind it is legitimately empty. Only an empty page that advertises
+        a FURTHER cursor is anomalous, and that already raises R005. The count is
+        surfaced because "40 pages, 32 rows" is otherwise indistinguishable from
+        silent normalization loss without re-reading every stored body.
+        """
+
+        return sum(1 for o in self.outcomes for p in o.pages if p.rows == 0)
+
+    @property
+    def nonempty_continuation_pages(self) -> int:
+        return sum(1 for o in self.outcomes for p in o.pages if p.rows > 0)
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "contract_version": self.contract_version,
@@ -425,6 +443,8 @@ class ContinuationReport:
             "targets_incomplete": self.targets_incomplete,
             "continuation_requests": self.continuation_requests,
             "pages_persisted": self.pages_persisted,
+            "empty_continuation_pages": self.empty_continuation_pages,
+            "nonempty_continuation_pages": self.nonempty_continuation_pages,
             "lineup_rows": self.lineup_rows,
             "findings": self.findings,
             "first_page_requests": self.first_page_requests,
@@ -984,7 +1004,9 @@ def render_report(report: ContinuationReport, out: Any) -> None:
     out(f"  requests:  continuation_pages={report.continuation_requests} "
         f"first_page_requests={report.first_page_requests}")
     out(f"  rows:      lineup_rows={report.lineup_rows} "
-        f"pages_persisted={report.pages_persisted}")
+        f"pages_persisted={report.pages_persisted} "
+        f"empty_pages={report.empty_continuation_pages} "
+        f"nonempty_pages={report.nonempty_continuation_pages}")
     out(f"  findings:  {report.findings}")
     for outcome in sorted(report.outcomes,
                           key=lambda o: _canonical_id_key(o.provider_game_id)):

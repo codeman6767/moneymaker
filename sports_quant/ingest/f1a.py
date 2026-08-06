@@ -530,19 +530,34 @@ def _render_rate_line(u: Mapping[str, Any]) -> str:
     never read as a ceiling the provider published. An unknown provider maximum
     prints as ``unknown``, not ``None/min``. ``rate_limited`` reflects an ACTUAL
     delay or a 429 -- never the mere existence of a policy.
+
+    ``basis`` and ``tier_verified`` answer different questions and the word
+    "verified" appears in both. ``verified_tier_max`` says only that the ceiling
+    comes from a provider-published per-tier maximum rather than a number we
+    chose; ``tier_verified`` says whether THIS run actually confirmed the account
+    sits on that tier. A published ceiling keyed to an unconfirmed tier is still
+    an assumption, so the caveat is printed next to the number it qualifies --
+    otherwise this single line reads as a verified provider limit when the run's
+    own evidence says ``configured_not_verified``.
     """
 
     basis = u.get("rate_policy_basis") or "none"
     provider_max = u.get("provider_rate_limit_per_min")
     courtesy = " (PROJECT COURTESY CAP, not a provider limit)" if (
         basis == RATE_BASIS_PROJECT_COURTESY) else ""
+    unverified = (
+        " (TIER NOT VERIFIED: ceiling assumes the configured tier)"
+        if (basis != RATE_BASIS_PROJECT_COURTESY and provider_max is not None
+            and not u.get("tier_verified", False))
+        else "")
     return (
         f"  rate:      policy_active={u.get('rate_policy_active', False)} "
         f"basis={basis} "
         f"version={u.get('rate_policy_version') or 'n/a'} "
         f"configured={u.get('configured_rate_per_min')}/min{courtesy} "
         f"provider_max="
-        f"{'unknown' if provider_max is None else str(provider_max) + '/min'} "
+        f"{'unknown' if provider_max is None else str(provider_max) + '/min'}"
+        f"{unverified} "
         f"burst={u.get('rate_burst')} "
         f"min_interval={u.get('rate_min_interval_seconds')}s "
         f"throttle_events={u.get('throttle_events', 0)} "

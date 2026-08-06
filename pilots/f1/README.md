@@ -441,11 +441,15 @@ Strictly sequential, and **no step below is authorized by this document**:
 1. Commit and independently validate the continuation implementation and
    manifest. — **done**, `NBA_LINEUP_CONTINUATION_PREPARATION_REVIEW.md`
    (accepted; five defects repaired, execution path fully wired, never executed)
-2. Fresh BALLDONTLIE provider audit, on the day of the run.
-3. Explicitly authorized lineup-continuation **live execution only**.
-4. Independent continuation execution review.
+2. Fresh BALLDONTLIE provider audit, on the day of the run. — **done**
+   2026-08-06, AUDIT PASSED
+3. Explicitly authorized lineup-continuation **live execution only**. — **done**
+   2026-08-06, one process, exit 0, 40/40 targets, 40 requests
+4. Independent continuation execution review. — **done**,
+   `NBA_LINEUP_CONTINUATION_EXECUTION_REVIEW.md` (**accepted**; 40/40 games
+   merge-eligible; two reporting defects repaired)
 5. Offline merge of the reviewed continuation evidence into a **protected copy**
-   of the March corpus.
+   of the March corpus. — **may now be separately authorized; not yet done**
 6. Independent merge review.
 7. Repair the three canonical matching defects.
 8. Run matching and measure coverage.
@@ -465,9 +469,24 @@ Nothing here is authorized by this document.
   checkpoint unchanged) and independently reviewed and **accepted** 2026-08-06.
   See `F1_NBA_2026_03_RESULTS_REPAIR.md` and
   `NBA_RESULTS_REPAIR_INDEPENDENT_REVIEW.md`. Nothing outstanding.
-* **NBA lineups — targeted live. PREPARED OFFLINE, NOT executed.** 40 of 239
-  `/v1/lineups` responses advertised a `next_cursor` that the single bounded
-  per-game request discarded, so those games hold partial lineups.
+* **NBA lineups — targeted live. EXECUTED and REVIEWED; merge outstanding.**
+  40 of 239 `/v1/lineups` responses advertised a `next_cursor` that the single
+  bounded per-game request discarded, so those games held partial lineups.
+
+  Executed once on 2026-08-06 under separate authorization and independently
+  reviewed and **accepted** — `NBA_LINEUP_CONTINUATION_EXECUTION_REVIEW.md`.
+  40/40 cursor chains terminated normally at the provider, 40 requests, zero
+  retries/429s/failures, 32 continuation lineup rows recovered, all 42 protected
+  artifacts unchanged. **40/40 games are merge-eligible.** The offline merge into
+  a protected copy of the March corpus may now be separately authorized and has
+  **not** been performed.
+
+  The recovered volume is small because all 40 targets had exactly 25 rows on
+  page one — a full page at `per_page=25`, which is precisely why the provider
+  emitted a cursor for them and for none of the 199 games with 17–24 rows. 19 of
+  the 40 second pages were therefore legitimately empty. Merged totals are 25–29
+  with exactly two teams and exactly 10 starters per game, contiguous with the
+  accepted population.
 
   Everything that can be built without the provider now exists: `fetch_lineups`
   takes a `cursor`, the planner expresses a continuation shape, and

@@ -33,6 +33,23 @@ canonical-matching defects were not repaired, and F2 was not begun.
 > matching has not run. That repair has since been **independently reviewed and
 > accepted** — `NBA_RESULTS_REPAIR_INDEPENDENT_REVIEW.md`.
 
+> **UPDATE (2026-08-06) — the targeted live lineup recovery this review specified
+> has since been executed and independently reviewed.** One authorized execution
+> recovered all 40 truncated games: 40/40 provider cursor chains terminated
+> normally, 40 requests, zero first-page requests, zero failures, and the March
+> corpus was not modified. The execution review **accepted** the evidence and found
+> **40/40 games merge-eligible** —
+> `NBA_LINEUP_CONTINUATION_EXECUTION_REVIEW.md`.
+>
+> This review's diagnosis is confirmed by the recovered evidence: the 40 games are
+> exactly those whose page one held 25 rows — a full page at `per_page=25` — which
+> is why the discarded cursor mattered for them and for none of the other 199.
+>
+> The `lineups` family nevertheless **remains formally unaccepted here**: the
+> recovered rows live only in a separate recovery database and **no merge into the
+> March corpus has been performed or authorized**. Point-in-time labels remain
+> **0/239**.
+
 ---
 
 ## 1. Review boundary and zero-network proof

@@ -1031,6 +1031,8 @@ def run_nba_lineup_continuation(
         "targets_incomplete": executor.report.targets_incomplete,
         "continuation_requests": executor.report.continuation_requests,
         "pages_persisted": executor.report.pages_persisted,
+        "empty_continuation_pages": executor.report.empty_continuation_pages,
+        "nonempty_continuation_pages": executor.report.nonempty_continuation_pages,
         "lineup_rows": executor.report.lineup_rows,
         "findings": executor.report.findings,
         "first_page_requests": executor.report.first_page_requests,

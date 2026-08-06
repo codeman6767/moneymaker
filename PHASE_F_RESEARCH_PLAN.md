@@ -208,8 +208,8 @@ nothing below is authorized by this milestone:
 > remaining blocker is that no canonical `games` exist because matching has not
 > run. The dataset builder must not be weakened to accept provider-only ids.
 >
-> **NBA lineup-continuation recovery PREPARED OFFLINE (2026-08-06), NOT
-> EXECUTED.** Forty of 239 games still hold partial lineups. `fetch_lineups` now
+> **NBA lineup-continuation recovery EXECUTED and REVIEWED (2026-08-06); merge
+> outstanding.** Forty of 239 games held partial lineups. `fetch_lineups` now
 > takes a cursor, the planner expresses a bounded continuation shape, and
 > `pilots/f1/nba_lineups_2026_03_continuation.manifest.json` is committed
 > (manifest `a8979cd1…`, plan `3c0ec01c…`, bound to source manifest `901cb9de…`,
@@ -229,9 +229,36 @@ nothing below is authorized by this milestone:
 > transport only — 90 continuation requests, zero first pages, all evidence
 > durable, completed resume byte-identical.
 >
-> **A fresh provider audit and explicit authorization remain required**, followed
-> by an independent execution review and a separately authorized offline merge.
-> No code change should be needed between this review and the live run.
+> **EXECUTED LIVE (2026-08-06) and independently reviewed — ACCEPTED.** The fresh
+> BALLDONTLIE audit passed, then exactly one authorized execution ran: one logical
+> process, exit 0, 40/40 cursor chains terminated normally at the provider, 40
+> continuation requests, zero first-page requests, zero retries, zero 429s, zero
+> failures, checkpoint state `completed`, all 42 protected artifacts byte-identical.
+> See `NBA_LINEUP_CONTINUATION_EXECUTION_REVIEW.md`.
+>
+> The review reconstructed every chain, the full request accounting, the pacing
+> windows, the persistence and the checkpoint from preserved evidence, and
+> replayed all 40 responses through the production path into three fresh v17
+> databases that are semantically identical to the live one and idempotent on a
+> second run. Row accounting closes exactly: 32 raw rows = 32 normalized = 32
+> unique = 32 persisted, with zero rejection, zero overlap and zero silent loss.
+> **40/40 games are merge-eligible.**
+>
+> The recovered volume is small for a structural reason, not a defect: all 40
+> targets had exactly 25 rows on page one (a full page at `per_page=25`), which is
+> why the provider issued a cursor for exactly these games and for none of the 199
+> with 17–24 rows. 19 second pages were therefore legitimately empty. Merged
+> lineups are 25–29 players with exactly two teams and exactly 10 starters each,
+> contiguous with the accepted population.
+>
+> Two reporting defects were repaired: an unverified tier ceiling was rendered as
+> a verified provider maximum, and empty continuation pages were absent from the
+> report. Pacing enforcement was already correct — the limiter is built from the
+> configured 60/min, never the tier maximum, and the maximum count in any rolling
+> 60-second window was 40.
+>
+> **A separately authorized offline merge into a protected copy of the March
+> corpus is the next step and has NOT been performed.**
 >
 > **The combined F1 coverage/depth review has NOT begun. F1 remains incomplete and
 > F2 remains unauthorized.** Canonical matching remains blocked by three separately
