@@ -207,8 +207,20 @@ nothing below is authorized by this milestone:
 > **Usable point-in-time labels remain 0/239.** The results gap is closed; the
 > remaining blocker is that no canonical `games` exist because matching has not
 > run. The dataset builder must not be weakened to accept provider-only ids.
-> Lineups remain unaccepted for 40 games and a separately authorized targeted
-> lineup continuation run is still required.
+>
+> **NBA lineup-continuation recovery PREPARED OFFLINE (2026-08-06), NOT
+> EXECUTED.** Forty of 239 games still hold partial lineups. `fetch_lineups` now
+> takes a cursor, the planner expresses a bounded continuation shape, and
+> `pilots/f1/nba_lineups_2026_03_continuation.manifest.json` is committed
+> (manifest `a8979cd1…`, plan `3c0ec01c…`, bound to source manifest `901cb9de…`,
+> source plan `e29ef60c…`, source database fingerprint `b5b475a4…`, target digest
+> `03d3df93…`). Maximum live scope is **320 semantic requests / 640 attempts** at
+> 60/min. No cursor value is committed — cursors are re-derived from the
+> protected corpus at execution time and the run refuses if the digest has moved.
+> The recovery writes only to new artifacts; the executed March manifest,
+> checkpoint and database are untouched. **A fresh provider audit and explicit
+> authorization remain required**, followed by an independent execution review and
+> a separately authorized offline merge.
 >
 > **The combined F1 coverage/depth review has NOT begun. F1 remains incomplete and
 > F2 remains unauthorized.** Canonical matching remains blocked by three separately

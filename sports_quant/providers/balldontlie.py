@@ -39,6 +39,33 @@ _MAX_LIST_SIZE = 100
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
+def _validate_cursor(cursor: object) -> object:
+    """Accept a provider pagination cursor without reinterpreting it.
+
+    A cursor is the provider's own opaque continuation token. It may be an
+    integer (BALLDONTLIE's current form) or opaque text, and we must pass it back
+    EXACTLY as issued -- normalizing it is how a paginator silently starts from
+    the wrong place. So this only refuses values that cannot be a token at all:
+    ``None`` (the caller should omit the parameter instead), ``bool``, an empty
+    or whitespace-only string, and any container, which would serialize as a
+    repeated query parameter rather than one value.
+    """
+
+    if cursor is None:
+        raise ValueError("cursor must not be None; omit the parameter instead")
+    if isinstance(cursor, bool):
+        raise ValueError("cursor must not be a bool")
+    if isinstance(cursor, (list, tuple, set, dict)):
+        raise ValueError("cursor must be a single scalar value, not a container")
+    if isinstance(cursor, str):
+        if not cursor.strip():
+            raise ValueError("cursor must not be blank")
+        return cursor
+    if isinstance(cursor, int):
+        return cursor
+    raise ValueError(f"unsupported cursor type {type(cursor).__name__}")
+
+
 def _validate_game_id(game_id: object) -> int:
     """Coerce a provider game id to a positive int, or reject it.
 
@@ -415,21 +442,37 @@ class BalldontlieClient(BaseProviderClient):
         return await self._get("/v1/plays", params=params)
 
     async def fetch_lineups(
-        self, *, game_ids: Iterable[object], per_page: int = 25
+        self, *, game_ids: Iterable[object], per_page: int = 25,
+        cursor: Optional[object] = None,
     ) -> ProviderResponse:
         """GET /v1/lineups?game_ids[]=ID -- lineups for one or more games (GOAT).
 
         Requires at least one game id; every id is validated to a positive integer
         before the request. Sends the documented ``game_ids[]`` array parameter.
+
+        ``cursor`` requests a CONTINUATION page. It is omitted entirely when
+        ``None``, so an ordinary first-page call is byte-for-byte what it always
+        was. The month run had no cursor here at all, which is why 40 games kept
+        only their first 25 rows; see
+        :mod:`sports_quant.ingest.lineup_continuation`.
+
+        The value is passed through as a single scalar and encoded exactly once by
+        ``httpx``: it is never pre-quoted, never wrapped in a list (which would
+        serialize a repeated parameter) and never stringified through a container
+        (which is what produced the unusable ``"[18447686]"`` provenance the
+        execution review found). Opaque non-numeric cursors are accepted as-is --
+        a cursor is the provider's token, not ours to interpret.
         """
 
         validated = [_validate_game_id(g) for g in game_ids]
         if not validated:
             raise ValueError("fetch_lineups requires at least one game_id")
-        return await self._get(
-            "/v1/lineups",
-            params={"game_ids[]": validated, "per_page": _clamp_per_page(per_page)},
-        )
+        params: dict[str, Any] = {
+            "game_ids[]": validated, "per_page": _clamp_per_page(per_page),
+        }
+        if cursor is not None:
+            params["cursor"] = _validate_cursor(cursor)
+        return await self._get("/v1/lineups", params=params)
 
     async def fetch_advanced_stats(
         self,

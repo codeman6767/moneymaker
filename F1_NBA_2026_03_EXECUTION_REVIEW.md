@@ -784,7 +784,21 @@ provenance, into the March scratch database. Expected: 239 inserted, 0 correctio
 responses, 0 provider requests, checkpoint byte-identical. See
 `F1_NBA_2026_03_RESULTS_REPAIR.md`.
 
-### Targeted live repair — lineups only (NOT executed; needs separate authorization)
+### Targeted live repair — lineups only (PREPARED OFFLINE 2026-08-06; NOT executed)
+
+> Everything buildable without the provider now exists: `fetch_lineups` accepts a
+> cursor, the planner expresses a bounded continuation contingent (40 targets ×
+> ≤ 8 pages = **320** semantic requests, **640** attempts at `max_retries=1`), and
+> `pilots/f1/nba_lineups_2026_03_continuation.manifest.json` is committed
+> (manifest `a8979cd1…`, plan `3c0ec01c…`). It binds to this execution by source
+> manifest hash `901cb9de…`, source plan hash `e29ef60c…`, source database
+> fingerprint `b5b475a4…`, 239 selected games, 40 targets and target-set digest
+> `03d3df93…`. Cursors are **not** committed; they are re-derived from the
+> protected corpus at execution time and the run refuses if the digest has moved.
+> The recovery writes only to `data\f1_nba_lineups_2026_03_recovery.db` and its
+> own checkpoint. **The live run itself still requires a fresh provider audit and
+> explicit authorization**, then an independent review and a separate offline
+> merge.
 
 | | |
 |---|---|
@@ -798,7 +812,9 @@ responses, 0 provider requests, checkpoint byte-identical. See
 
 Until that runs, the 40 affected games must be treated as partial lineups —
 `DQ-NBA-LINEUP-002` now makes that durable for future runs, though the March rows
-predate the repair and carry no such note.
+predate the repair and carry no such note. `DQ-NBA-LINEUP-002` remains the
+**historical** signal that a first page was partial; the recovery run raises its
+own `DQ-NBA-LINEUP-R00x` findings rather than rewriting it.
 
 ---
 

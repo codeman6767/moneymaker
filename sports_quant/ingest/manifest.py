@@ -59,7 +59,7 @@ def _hash(text: str) -> str:
 def plan_body(plan: RequestPlan) -> dict[str, Any]:
     """The hashable, secret-free body of a plan (identities only, no wall-clock)."""
 
-    return {
+    body: dict[str, Any] = {
         "plan_version": plan.plan_version,
         "provider": plan.provider,
         "league": plan.league,
@@ -85,6 +85,13 @@ def plan_body(plan: RequestPlan) -> dict[str, Any]:
         "cost_policy_version": plan.cost_policy_version,
         "credits_applicable": plan.credits_applicable,
     }
+    if plan.recovery is not None:
+        # Only a targeted-recovery plan carries this, and the key is OMITTED
+        # otherwise, so every pre-existing plan hash is unchanged. Including it
+        # here is what makes the source evidence, target set and page bound part
+        # of the plan's identity: change any of them and the manifest hash moves.
+        body["recovery"] = plan.recovery.body()
+    return body
 
 
 def plan_hash(plan: RequestPlan) -> str:

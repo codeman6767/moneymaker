@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
-from typing import Optional
+from typing import Any, Optional
 
 from ..request_control import EndpointCostPolicy, RequestUnit
 from .cost_policies import build_balldontlie_policy, build_mlb_policy
@@ -83,6 +83,59 @@ class Contingent:
         return self.per_parent_max * self.parent_max
 
 
+#: Stage name for a targeted recovery that extends an already-executed run.
+RECOVERY_STAGE = "lineup_continuation_recovery"
+
+#: Contingent kind for CONTINUATION pages. Deliberately distinct from the month
+#: plan's ``per_game`` lineups contingent, which reserves exactly one request per
+#: game and is therefore the wrong shape for a paginated recovery.
+CONTINUATION_KIND = "continuation"
+
+#: Hard ceiling on continuation pages per target game, for any recovery plan.
+MAX_CONTINUATION_PAGES = 8
+
+
+@dataclass(frozen=True)
+class RecoveryBinding:
+    """What a targeted recovery is bound to in already-executed evidence.
+
+    Every field participates in the plan (and therefore manifest) hash, so the
+    identity of a recovery changes if the source corpus, the target set, or the
+    page bound changes. That is the point: a manifest reviewed against one body
+    of evidence must not silently execute against another.
+
+    No cursor value appears here. Cursors are re-derived from the protected
+    source database at execution time and checked against ``target_digest``, so
+    the committed artifact stays a description of WHICH games are being recovered
+    rather than a snapshot of provider pagination state.
+    """
+
+    purpose: str
+    contract_version: str
+    source_manifest_hash: str
+    source_plan_hash: str
+    source_database_fingerprint: str
+    source_date_range: str
+    source_selected_games: int
+    target_count: int
+    target_digest: str
+    max_continuation_pages: int
+
+    def body(self) -> dict[str, Any]:
+        return {
+            "purpose": self.purpose,
+            "contract_version": self.contract_version,
+            "source_manifest_hash": self.source_manifest_hash,
+            "source_plan_hash": self.source_plan_hash,
+            "source_database_fingerprint": self.source_database_fingerprint,
+            "source_date_range": self.source_date_range,
+            "source_selected_games": self.source_selected_games,
+            "target_count": self.target_count,
+            "target_digest": self.target_digest,
+            "max_continuation_pages": self.max_continuation_pages,
+        }
+
+
 @dataclass(frozen=True)
 class RequestPlan:
     """A deterministic, secret-free request plan for one provider/league/stage."""
@@ -98,6 +151,10 @@ class RequestPlan:
     cost_policy_version: str
     credits_applicable: bool
     plan_version: str = PLAN_VERSION
+    #: Present only for a targeted recovery plan. Absent (and omitted from the
+    #: hashed body) for every ordinary plan, so existing plan identities are
+    #: unchanged by this addition.
+    recovery: Optional[RecoveryBinding] = None
 
     # -- estimation ----------------------------------------------------------
     def _family_credit(self, family: str) -> Optional[int]:
@@ -312,3 +369,81 @@ def build_plan(
         return plan_nba(from_date=from_date, to_date=to_date, families=families,
                         stage=stage, bounds=bounds)
     raise ValueError(f"unsupported league {league!r}")
+
+
+class RecoveryPlanError(ValueError):
+    """A targeted-recovery plan was refused. Message is sanitized."""
+
+
+def plan_lineup_continuation(
+    *,
+    date_range: str,
+    binding: RecoveryBinding,
+    bounds: Bounds,
+) -> RequestPlan:
+    """Plan the bounded NBA lineup-continuation recovery.
+
+    Shape: one parent per TARGET GAME, and 1..``max_continuation_pages``
+    continuation requests per parent. This is deliberately NOT the month plan's
+    ``per_game`` lineups contingent -- that reserves exactly one request per game,
+    which is precisely the bound that left 40 games truncated. The first page is
+    already preserved in the source corpus and is never re-requested, so every
+    request this plan reserves is a continuation.
+
+    For the March 2026 recovery the arithmetic is
+    ``40 targets x 8 pages = 320`` semantic requests and, at ``max_retries=1``,
+    ``320 x 2 = 640`` attempts.
+
+    Fails closed rather than producing an unbounded or mis-scoped plan.
+    """
+
+    if binding.purpose != "lineup_continuation_recovery":
+        raise RecoveryPlanError(
+            f"unsupported recovery purpose {binding.purpose!r}")
+    if binding.target_count <= 0:
+        raise RecoveryPlanError(
+            "a recovery plan needs at least one target game; nothing to recover")
+    if not binding.target_digest.strip():
+        raise RecoveryPlanError("a recovery plan requires a target-set digest")
+    if not binding.source_database_fingerprint.strip():
+        raise RecoveryPlanError(
+            "a recovery plan requires the source database fingerprint it is bound to")
+    if not (binding.source_manifest_hash.strip() and binding.source_plan_hash.strip()):
+        raise RecoveryPlanError(
+            "a recovery plan requires the source manifest and plan hashes")
+    if binding.source_date_range != date_range:
+        raise RecoveryPlanError(
+            "recovery date_range must equal the source range it extends")
+    if bounds.max_pages is None:
+        raise RecoveryPlanError(
+            "a recovery plan requires an explicit max_pages continuation bound")
+    if bounds.max_pages > MAX_CONTINUATION_PAGES:
+        raise RecoveryPlanError(
+            f"max_pages {bounds.max_pages} exceeds the authorized "
+            f"{MAX_CONTINUATION_PAGES} continuation pages per target game")
+    if bounds.max_pages != binding.max_continuation_pages:
+        raise RecoveryPlanError(
+            "bounds.max_pages and the recovery binding disagree on the "
+            "continuation page limit")
+    if bounds.max_games is not None and bounds.max_games != binding.target_count:
+        raise RecoveryPlanError(
+            "bounds.max_games must equal the recovery target count")
+
+    contingent = Contingent(
+        kind=CONTINUATION_KIND, family="lineups",
+        per_parent_min=1, per_parent_max=bounds.max_pages,
+        parent_min=binding.target_count, parent_max=binding.target_count,
+        note=("continuation pages per target game; the preserved first page is "
+              "never re-requested"),
+    )
+    return RequestPlan(
+        provider="balldontlie", league="nba", stage=RECOVERY_STAGE,
+        date_range=date_range,
+        # Exactly one family. A recovery that could touch another endpoint would
+        # not be a recovery.
+        families=("lineups",),
+        fixed_units=(), contingents=(contingent,), bounds=bounds,
+        cost_policy_version=build_balldontlie_policy().version,
+        credits_applicable=False,
+        recovery=binding,
+    )

@@ -23,7 +23,7 @@ each execution.
 | Official team / game / player matching mechanics | proven offline, one game per league |
 | **MLB June-2026 month execution** | **executed, independently reviewed** |
 | **NBA March-2026 month execution** | **executed, independently reviewed** |
-| NBA `lineups` family | **not accepted** — 40/239 games partial (ignored provider cursor) |
+| NBA `lineups` family | **not accepted** — 40/239 games partial (ignored provider cursor); **targeted recovery prepared offline, NOT executed** |
 | NBA `results` family | **repaired offline, independently reviewed and accepted** — 239/239 typed results (`F1_NBA_2026_03_RESULTS_REPAIR.md`, `NBA_RESULTS_REPAIR_INDEPENDENT_REVIEW.md`) |
 | NBA usable PIT labels | **0/239** — blocked by canonical matching, not by results |
 | Combined F1 coverage/depth review | **not begun** |
@@ -433,6 +433,24 @@ task; none of them is authorized by this document.
 6. **Combined F1 coverage/depth review.** — **not begun**
 7. **Only then** decide whether F1 passes and whether F2 may be *planned*.
 
+### Lineup-continuation recovery: the remaining sequence
+
+Strictly sequential, and **no step below is authorized by this document**:
+
+1. Commit and independently validate the continuation implementation and
+   manifest. *(implementation and manifest committed; independent validation
+   still outstanding)*
+2. Fresh BALLDONTLIE provider audit, on the day of the run.
+3. Explicitly authorized lineup-continuation **live execution only**.
+4. Independent continuation execution review.
+5. Offline merge of the reviewed continuation evidence into a **protected copy**
+   of the March corpus.
+6. Independent merge review.
+7. Repair the three canonical matching defects.
+8. Run matching and measure coverage.
+9. Combined F1 review.
+10. Only then decide whether F1 passes and whether F2 may be planned.
+
 Preconditions for any live step: clean tree, the committed manifest hash matches,
 the scratch database is new or an authorized resumable checkpoint match, the
 request cap is the manifest's, and the user has authorized that specific step.
@@ -446,19 +464,54 @@ Nothing here is authorized by this document.
   checkpoint unchanged) and independently reviewed and **accepted** 2026-08-06.
   See `F1_NBA_2026_03_RESULTS_REPAIR.md` and
   `NBA_RESULTS_REPAIR_INDEPENDENT_REVIEW.md`. Nothing outstanding.
-* **NBA lineups — targeted live. NOT executed.** 40 of 239 `/v1/lineups` responses advertised a
-  `next_cursor` that the single bounded per-game request discarded, so those games
-  hold partial lineups. Recovery needs the continuation pages (≤ 8 per game, ≤ 320
-  requests), a `cursor` parameter on `fetch_lineups`, a **new** manifest (the
-  `lineups` contingent is `per_parent_max=1`, so pagination changes the plan hash)
-  and a **new** checkpoint. The executed March manifest, checkpoint and database
-  must not be edited.
+* **NBA lineups — targeted live. PREPARED OFFLINE, NOT executed.** 40 of 239
+  `/v1/lineups` responses advertised a `next_cursor` that the single bounded
+  per-game request discarded, so those games hold partial lineups.
+
+  Everything that can be built without the provider now exists: `fetch_lineups`
+  takes a `cursor`, the planner expresses a continuation shape, and
+  `pilots/f1/nba_lineups_2026_03_continuation.manifest.json` is committed.
+  `sports_quant nba-lineup-continuation` validates it against the protected
+  corpus offline and makes no request.
+
+  | | |
+  | --- | --- |
+  | manifest hash | `a8979cd1feb8a723…` |
+  | plan hash | `3c0ec01ce7ca6c1a…` |
+  | source manifest / plan | `901cb9de…` / `e29ef60c…` |
+  | source database fingerprint | `b5b475a4…` |
+  | targets | **40** of 239 selected games (199 already complete) |
+  | target-set digest | `03d3df93…` |
+  | bound | ≤ 8 continuation pages per target |
+  | semantic maximum | **320** requests |
+  | retry-inclusive hard cap | **640** attempts |
+  | rate | 60/min (tier max 600/min), `max_retries=1` |
+  | recovery database / checkpoint | `data\f1_nba_lineups_2026_03_recovery.db` / `…recovery.ckpt` |
+
+  **No cursor value is committed.** The manifest binds to the source corpus
+  fingerprint, the target count and the target-set digest; the cursors themselves
+  are re-derived from the protected database at execution time and the run
+  refuses if the digest has moved. The executed March manifest, checkpoint and
+  database are never written to — the recovery uses entirely new artifacts, and a
+  later, separately authorized offline merge applies reviewed continuation
+  evidence to a protected copy of the March corpus.
+
+  Still required before any of it runs: a fresh BALLDONTLIE provider audit and
+  explicit authorization for that specific step.
 
 ## Regenerating the manifests
 
 ```
 python pilots/f1/generate_manifests.py
+python pilots/f1/generate_lineup_continuation_manifest.py
 ```
+
+The continuation manifest is derived from the **protected March evidence**
+(read-only), so regenerating it requires the local git-ignored corpus. Its
+identity moves if the source corpus fingerprint, the target set, the target
+count, the page bound, the retry count, the rate or the recovery paths change —
+which is exactly what stops a reviewed recovery from silently executing against
+different evidence.
 
 `generate_manifests.py` holds every semantic input and is the single source of
 truth. Regeneration is byte-identical and CI asserts it. Changing any semantic

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -832,6 +833,137 @@ def _report_venues(result: VenueIngestResult, out: Printer, *, as_json: bool) ->
         result.status, result.status.upper()
     )
     out(f"[{label2}] {result.status}")
+
+
+def run_nba_lineup_continuation(
+    *,
+    manifest_path: Path,
+    source_db: Path,
+    recovery_db: Optional[Path] = None,
+    checkpoint: Optional[Path] = None,
+    execute: bool = False,
+    resume: bool = False,
+    as_json: bool = False,
+    out: Printer = print,
+) -> int:
+    """Derive and validate the bounded NBA lineup-continuation recovery.
+
+    OFFLINE by default. It loads the committed recovery manifest, re-derives the
+    target set from the protected source corpus (read-only), and checks the
+    derivation against the manifest's binding -- target count, target digest,
+    selected-game count and source fingerprint. No provider client is built and
+    no settings are loaded on this path.
+
+    ``--execute`` performs the live continuation and is a SEPARATELY AUTHORIZED
+    step: it additionally requires the process-scoped F1B authorization, exactly
+    like every other live provider run in this repository.
+    """
+
+    from .ingest.lineup_continuation import (
+        LineupContinuationError,
+        derive_targets,
+        render_survey,
+    )
+    from .ingest.manifest import ManifestError, load_and_validate
+
+    try:
+        manifest = load_and_validate(Path(manifest_path), expected_league="nba",
+                                     expected_provider="balldontlie")
+    except ManifestError as exc:
+        return _lineup_refusal(f"manifest rejected: {exc}", as_json, out)
+
+    binding = (manifest.plan_body or {}).get("recovery")
+    if not isinstance(binding, dict):
+        return _lineup_refusal(
+            "manifest carries no recovery binding; this is not a continuation "
+            "recovery manifest", as_json, out)
+    if manifest.families != ("lineups",):
+        return _lineup_refusal(
+            f"recovery manifest must declare exactly ('lineups',), got "
+            f"{manifest.families}", as_json, out)
+
+    try:
+        survey = derive_targets(
+            Path(source_db),
+            expected_targets=int(binding["target_count"]),
+            expected_digest=str(binding["target_digest"]),
+            expected_selected_games=int(binding["source_selected_games"]),
+        )
+    except (LineupContinuationError, KeyError, TypeError, ValueError) as exc:
+        return _lineup_refusal(str(exc), as_json, out)
+
+    # Bind to the source corpus itself, not merely to its target set.
+    from .ingest.scratch_db import ScratchDbError, classify_scratch_db
+
+    try:
+        classification = classify_scratch_db(Path(source_db), resume=True,
+                                             expected_fingerprint=None)
+    except ScratchDbError as exc:
+        return _lineup_refusal(str(exc), as_json, out)
+    if (classification.fingerprint or "") != binding["source_database_fingerprint"]:
+        return _lineup_refusal(
+            "source database fingerprint does not match the manifest; the corpus "
+            "has changed since this recovery was reviewed", as_json, out)
+
+    payload = {
+        "command": "nba-lineup-continuation",
+        "mode": "execute" if execute else "offline_validation",
+        "manifest_hash": manifest.manifest_hash(),
+        "plan_hash": manifest.computed_plan_hash(),
+        "source_database_fingerprint": classification.fingerprint,
+        "selected_games": survey.selected_games,
+        "already_complete_games": survey.complete_games,
+        "target_count": survey.target_count,
+        "target_digest": survey.target_digest(),
+        "max_continuation_pages": binding["max_continuation_pages"],
+        "semantic_requests_max": manifest.estimated_requests_max,
+        "request_cap": manifest.request_cap,
+        "configured_rate_per_min": manifest.configured_rate_per_min,
+        "provider_rate_limit_per_min": manifest.provider_rate_limit_per_min,
+        "network_occurred": False,
+        "executed": False,
+    }
+
+    if not execute:
+        if as_json:
+            out(json.dumps(payload, sort_keys=True))
+        else:
+            render_survey(survey, out)
+            out(f"  binding:   manifest={payload['manifest_hash'][:16]}… "
+                f"plan={payload['plan_hash'][:16]}… "
+                f"cap={payload['request_cap']} (semantic max "
+                f"{payload['semantic_requests_max']})")
+            out("  offline validation only; --execute is separately authorized")
+        return 0
+
+    # ---- live execution boundary (not exercised by this preparation task) --- #
+    if os.environ.get("MONEYMAKER_F1B_AUTHORIZED") != "1":
+        return _lineup_refusal(
+            "live lineup continuation is not authorized; a separate reviewed "
+            "authorization plus MONEYMAKER_F1B_AUTHORIZED=1 is required",
+            as_json, out)
+    if recovery_db is None or checkpoint is None:
+        return _lineup_refusal(
+            "--execute requires an explicit --recovery-db and --checkpoint",
+            as_json, out)
+    for protected in (Path(source_db),):
+        if Path(recovery_db).resolve() == protected.resolve():
+            return _lineup_refusal(
+                "refusing to write the recovery into the protected source corpus",
+                as_json, out)
+    return _lineup_refusal(
+        "live continuation execution is prepared but intentionally not wired to a "
+        "default client here; it must be launched by the separately authorized "
+        "execution step", as_json, out)
+
+
+def _lineup_refusal(reason: str, as_json: bool, out: Printer) -> int:
+    if as_json:
+        out(json.dumps({"command": "nba-lineup-continuation", "refused": True,
+                        "reason": reason}, sort_keys=True))
+    else:
+        out(f"[FAILED ] {reason}")
+    return EXIT_USAGE
 
 
 def run_repair_nba_results(
@@ -1840,6 +1972,31 @@ def main(argv: Optional[list[str]] = None) -> int:
     repair.add_argument("--json", dest="as_json", action="store_true",
                         help="Machine-readable output")
 
+    # Targeted NBA lineup-continuation recovery. OFFLINE by default: it derives
+    # and validates the target set from the protected source corpus and makes no
+    # provider request. Live continuation is a separately authorized step and
+    # needs BOTH --execute and the process-scoped F1B authorization.
+    lineupc = sub.add_parser(
+        "nba-lineup-continuation",
+        help=("Derive/validate the bounded NBA lineup-continuation recovery "
+              "(offline by default; --execute is separately authorized)"),
+    )
+    lineupc.add_argument("--manifest", dest="manifest_path", type=Path, required=True,
+                         metavar="PATH", help="The committed recovery manifest")
+    lineupc.add_argument("--source-db", dest="source_db", type=Path, required=True,
+                         metavar="PATH",
+                         help="Protected March corpus (opened read-only)")
+    lineupc.add_argument("--recovery-db", dest="recovery_db", type=Path, default=None,
+                         metavar="PATH", help="Recovery database (execution only)")
+    lineupc.add_argument("--checkpoint", dest="checkpoint", type=Path, default=None,
+                         metavar="PATH", help="Recovery checkpoint (execution only)")
+    lineupc.add_argument("--execute", action="store_true",
+                         help="Perform the live continuation (separately authorized)")
+    lineupc.add_argument("--resume", action="store_true",
+                         help="Resume an interrupted continuation")
+    lineupc.add_argument("--json", dest="as_json", action="store_true",
+                         help="Machine-readable output")
+
     hoopr = sub.add_parser(
         "import-hoopr", help="Import a hoopR play-by-play Parquet file OFFLINE (no network, no R)"
     )
@@ -1968,6 +2125,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         except ReadOnlyStartupError as exc:
             print(str(exc))
             return 2
+
+    if args.command == "nba-lineup-continuation":
+        return run_nba_lineup_continuation(
+            manifest_path=args.manifest_path,
+            source_db=args.source_db,
+            recovery_db=args.recovery_db,
+            checkpoint=args.checkpoint,
+            execute=args.execute,
+            resume=args.resume,
+            as_json=args.as_json,
+        )
 
     if args.command == "repair-nba-results-from-raw":
         return run_repair_nba_results(
