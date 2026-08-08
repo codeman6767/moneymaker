@@ -595,6 +595,14 @@ pacing sleeps, still fails closed with no undeclared escape.
 - **An offline merge into the March corpus may be separately authorized.** It is
   not authorized by this review and did not occur here.
 
+> **UPDATE (2026-08-08) — that merge has since been separately authorized and
+> applied**, to a protected copy only: `data/f1_nba_2026_03_lineups_merged.db`.
+> See `F1_NBA_2026_03_LINEUP_MERGE.md`. All 40 merge-eligible games were merged
+> (22 revision snapshots, 294 player rows, 32 recovered observations), the
+> original March corpus and this recovery evidence are byte-identical, and no
+> provider request was made. **The merge is not yet independently reviewed and the
+> NBA lineup family is not finally accepted.** PIT labels remain 0/239.
+
 Standing status, unchanged by this review:
 
 - **No merge occurred in this task**, and the recovery evidence has not been

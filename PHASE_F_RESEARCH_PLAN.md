@@ -257,8 +257,29 @@ nothing below is authorized by this milestone:
 > configured 60/min, never the tier maximum, and the maximum count in any rolling
 > 60-second window was 40.
 >
-> **A separately authorized offline merge into a protected copy of the March
-> corpus is the next step and has NOT been performed.**
+> **OFFLINE MERGE APPLIED (2026-08-08) to a protected copy — not yet reviewed.**
+> `F1_NBA_2026_03_LINEUP_MERGE.md`. The reviewed continuation evidence was merged
+> into `data/f1_nba_2026_03_lineups_merged.db`; the original corpus, checkpoint
+> and recovery evidence are byte-identical and no provider request was made.
+>
+> `lineup_snapshots` and `lineup_players` are hard append-only (BEFORE
+> UPDATE/DELETE -> RAISE(ABORT)), so a page-one snapshot cannot gain members in
+> place. The schema models observation-time revisions instead, so the merge
+> appends one revision per affected `(game, team)` carrying page one plus its
+> additions: **22 snapshots, 294 player rows, delivering the 32 recovered
+> observations** (478 -> 500 snapshots, 5,125 -> 5,419 player rows). The naive
+> "+32 rows" identity is unachievable under this schema and was replaced by a
+> derived and asserted one.
+>
+> Merged distribution reproduces the review exactly (19@25, 13@26, 6@27, 1@28,
+> 1@29); all 239 games show exactly two team snapshots and ten starters; the 199
+> untouched games are unchanged; `is_confirmed` stays false. Idempotency,
+> five-point atomic rollback, and determinism across three fresh destinations all
+> hold. **PIT labels remain 0/239 in both the source and the merged copy** — the
+> lineup merge alone cannot bypass canonical matching.
+>
+> **The merge is NOT independently reviewed. The NBA lineup family is NOT finally
+> accepted. An independent merge review is the next step.**
 >
 > **The combined F1 coverage/depth review has NOT begun. F1 remains incomplete and
 > F2 remains unauthorized.** Canonical matching remains blocked by three separately

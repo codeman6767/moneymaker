@@ -449,7 +449,9 @@ Strictly sequential, and **no step below is authorized by this document**:
    `NBA_LINEUP_CONTINUATION_EXECUTION_REVIEW.md` (**accepted**; 40/40 games
    merge-eligible; two reporting defects repaired)
 5. Offline merge of the reviewed continuation evidence into a **protected copy**
-   of the March corpus. — **may now be separately authorized; not yet done**
+   of the March corpus. — **done** 2026-08-08, `F1_NBA_2026_03_LINEUP_MERGE.md`
+   (22 revision snapshots, 294 player rows, 32 recovered observations; originals
+   byte-identical). **Not yet independently reviewed.**
 6. Independent merge review.
 7. Repair the three canonical matching defects.
 8. Run matching and measure coverage.
@@ -469,7 +471,8 @@ Nothing here is authorized by this document.
   checkpoint unchanged) and independently reviewed and **accepted** 2026-08-06.
   See `F1_NBA_2026_03_RESULTS_REPAIR.md` and
   `NBA_RESULTS_REPAIR_INDEPENDENT_REVIEW.md`. Nothing outstanding.
-* **NBA lineups — targeted live. EXECUTED and REVIEWED; merge outstanding.**
+* **NBA lineups — targeted live. EXECUTED, REVIEWED and MERGED to a protected
+  copy; merge review outstanding.**
   40 of 239 `/v1/lineups` responses advertised a `next_cursor` that the single
   bounded per-game request discarded, so those games held partial lineups.
 
@@ -477,9 +480,17 @@ Nothing here is authorized by this document.
   reviewed and **accepted** — `NBA_LINEUP_CONTINUATION_EXECUTION_REVIEW.md`.
   40/40 cursor chains terminated normally at the provider, 40 requests, zero
   retries/429s/failures, 32 continuation lineup rows recovered, all 42 protected
-  artifacts unchanged. **40/40 games are merge-eligible.** The offline merge into
-  a protected copy of the March corpus may now be separately authorized and has
-  **not** been performed.
+  artifacts unchanged. **40/40 games were merge-eligible.**
+
+  The offline merge was applied on 2026-08-08 to
+  `data/f1_nba_2026_03_lineups_merged.db` — see `F1_NBA_2026_03_LINEUP_MERGE.md`.
+  Because `lineup_snapshots`/`lineup_players` are hard append-only, the merge
+  appends one observation-time **revision** per affected `(game, team)` carrying
+  page one plus its additions: 22 snapshots and 294 player rows, delivering the 32
+  recovered observations. All 239 games now show exactly two team snapshots and
+  ten starters; the 199 untouched games are unchanged; the original corpus,
+  checkpoint and recovery evidence are byte-identical. **The merge is not yet
+  independently reviewed and the lineup family is not finally accepted.**
 
   The recovered volume is small because all 40 targets had exactly 25 rows on
   page one — a full page at `per_page=25`, which is precisely why the provider

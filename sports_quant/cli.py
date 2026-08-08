@@ -1156,6 +1156,208 @@ def _lineup_refusal(reason: str, as_json: bool, out: Printer) -> int:
     return EXIT_USAGE
 
 
+def _merge_refusal(reason: str, as_json: bool, out: Printer) -> int:
+    if as_json:
+        out(json.dumps({"command": "merge-nba-lineup-continuation", "refused": True,
+                        "reason": reason}, sort_keys=True))
+    else:
+        out(f"[FAILED ] {reason}")
+    return EXIT_USAGE
+
+
+def run_merge_nba_lineup_continuation(
+    *,
+    source_db: Path,
+    recovery_db: Path,
+    destination_db: Path,
+    manifest_path: Path,
+    checkpoint: Optional[Path] = None,
+    expected_source_fingerprint: Optional[str] = None,
+    expected_targets: int = 40,
+    expected_target_digest: Optional[str] = None,
+    offline_ack: bool = False,
+    create_destination: bool = False,
+    dry_run: bool = True,
+    as_json: bool = False,
+    out: Printer = print,
+) -> int:
+    """Merge reviewed lineup-continuation evidence into a PROTECTED COPY, offline.
+
+    Never writes to the source March corpus or the recovery database: both are
+    opened read-only and every destination path is checked against them first.
+    No provider client is built, no settings are loaded and no request is made --
+    the merge reads only evidence that is already on disk.
+    """
+
+    import sqlite3
+
+    from .db.schema import CURRENT_SCHEMA_VERSION
+    from .ingest.lineup_merge import (
+        MERGE_COMMAND,
+        MERGE_CONTRACT_VERSION,
+        LineupMergeError,
+        apply_merge,
+        plan_merge,
+        render_report,
+        target_digest,
+    )
+    from .ingest.manifest import ManifestError, load_and_validate
+
+    if not offline_ack:
+        return _merge_refusal(
+            "the offline merge requires an explicit --offline acknowledgement", as_json, out)
+
+    source_path, recovery_path = Path(source_db), Path(recovery_db)
+    dest_path = Path(destination_db)
+    for label, protected in (("source", source_path), ("recovery", recovery_path)):
+        if not protected.exists():
+            return _merge_refusal(f"{label} database not found: {protected}", as_json, out)
+        if _same_file_as(dest_path, protected):
+            return _merge_refusal(
+                f"destination aliases the protected {label} database; the merge writes only "
+                "to a separate copy", as_json, out)
+    if _same_file_as(source_path, recovery_path):
+        return _merge_refusal("source and recovery are the same file", as_json, out)
+    if dest_path.is_symlink():
+        return _merge_refusal(f"destination is a symlink: {dest_path}", as_json, out)
+    for guarded in (checkpoint,):
+        if guarded is not None and _same_file_as(dest_path, Path(guarded)):
+            return _merge_refusal("destination aliases a checkpoint", as_json, out)
+
+    # Destination PRECONDITIONS are pure path checks with no side effects, so they
+    # are decided before the manifest is read: an operator pointing at the wrong
+    # destination should hear about that, not about the manifest.
+    if dest_path.exists() and create_destination:
+        return _merge_refusal(
+            f"destination already exists; refusing to recreate it: {dest_path}", as_json, out)
+    if not dest_path.exists() and not create_destination:
+        return _merge_refusal(
+            f"destination does not exist; pass --create-destination to snapshot it from "
+            f"the source corpus: {dest_path}", as_json, out)
+
+    try:
+        manifest = load_and_validate(Path(manifest_path), expected_league="nba",
+                                     expected_provider="balldontlie")
+    except ManifestError as exc:
+        return _merge_refusal(f"manifest rejected: {exc}", as_json, out)
+    binding = (manifest.plan_body or {}).get("recovery")
+    if not isinstance(binding, dict):
+        return _merge_refusal(
+            "manifest carries no recovery binding; this is not a continuation manifest",
+            as_json, out)
+    if expected_target_digest is None:
+        expected_target_digest = str(binding.get("target_digest") or "") or None
+    if expected_targets != int(binding.get("target_count", expected_targets)):
+        return _merge_refusal(
+            f"--expect-targets {expected_targets} disagrees with the manifest binding "
+            f"{binding.get('target_count')}", as_json, out)
+
+    if not dest_path.exists():
+        # WAL-safe logical snapshot: the online-backup API, never a raw file copy.
+        src_conn = sqlite3.connect(f"file:{source_path}?mode=ro", uri=True)
+        dst_conn = sqlite3.connect(str(dest_path))
+        try:
+            with dst_conn:
+                src_conn.backup(dst_conn)
+        finally:
+            src_conn.close()
+            dst_conn.close()
+
+    source = sqlite3.connect(f"file:{source_path}?mode=ro", uri=True)
+    recovery = sqlite3.connect(f"file:{recovery_path}?mode=ro", uri=True)
+    destination = sqlite3.connect(str(dest_path))
+    for conn in (source, recovery, destination):
+        conn.row_factory = sqlite3.Row
+    destination.execute("PRAGMA foreign_keys = ON")
+    try:
+        for label, conn in (("source", source), ("recovery", recovery),
+                            ("destination", destination)):
+            version = conn.execute("SELECT MAX(version) FROM schema_versions").fetchone()[0]
+            if int(version or 0) != CURRENT_SCHEMA_VERSION:
+                return _merge_refusal(
+                    f"{label} is schema v{version}; expected v{CURRENT_SCHEMA_VERSION}",
+                    as_json, out)
+
+        # The same CONTENT digest the recovery was bound to, not a file-byte hash.
+        from .ingest.scratch_db import ScratchDbError, classify_scratch_db
+
+        def _content_fingerprint(path: Path) -> str:
+            try:
+                return classify_scratch_db(path, resume=True,
+                                           expected_fingerprint=None).fingerprint or ""
+            except ScratchDbError:
+                return ""
+
+        actual_fp = _content_fingerprint(source_path)
+        if expected_source_fingerprint and actual_fp != expected_source_fingerprint:
+            return _merge_refusal(
+                f"source fingerprint {actual_fp} does not match the reviewed "
+                f"{expected_source_fingerprint}", as_json, out)
+
+        # Re-derive the reviewed target set with the SAME production derivation the
+        # recovery was bound to, so the merge cannot accept a set the review never saw.
+        from .ingest.lineup_continuation import LineupContinuationError, derive_targets
+
+        try:
+            survey = derive_targets(
+                source_path,
+                expected_targets=int(binding["target_count"]),
+                expected_digest=str(binding["target_digest"]),
+                expected_selected_games=int(binding["source_selected_games"]),
+            )
+        except (LineupContinuationError, KeyError, TypeError, ValueError) as exc:
+            return _merge_refusal(f"target derivation rejected: {exc}", as_json, out)
+        derived = {t.provider_game_id for t in survey.targets}
+
+        try:
+            plan = plan_merge(source=source, recovery=recovery, destination=destination,
+                              expected_targets=expected_targets,
+                              expected_digest_targets=None)
+        except LineupMergeError as exc:
+            return _merge_refusal(str(exc), as_json, out)
+        merged_set = {o.provider_game_id for o in plan.outcomes}
+        if merged_set != derived:
+            return _merge_refusal(
+                f"recovery covers {len(merged_set)} game(s) that differ from the reviewed "
+                f"target set ({len(derived)}); refusing to merge outside the reviewed set",
+                as_json, out)
+
+        provenance = {
+            "merge_contract_version": MERGE_CONTRACT_VERSION,
+            "source_fingerprint": actual_fp,
+            "recovery_fingerprint": _content_fingerprint(recovery_path),
+            "manifest_hash": manifest.manifest_hash(),
+            "plan_hash": manifest.computed_plan_hash(),
+            "target_count": plan.targets,
+            "target_digest": target_digest(o.provider_game_id for o in plan.outcomes),
+            "page_one_evidence": sum(1 for _o in plan.outcomes),
+            "continuation_evidence": sum(1 for _o in plan.outcomes),
+            "recovered_observations": plan.recovered_observations,
+            "semantic_digest": plan.digest(),
+            "code_version": MERGE_COMMAND,
+        }
+
+        if dry_run:
+            report = apply_merge(destination=destination, recovery=recovery, plan=plan,
+                                 provenance=provenance, dry_run=True)
+        else:
+            with destination:                     # one transaction; rollback on any error
+                report = apply_merge(destination=destination, recovery=recovery, plan=plan,
+                                     provenance=provenance, dry_run=False)
+    finally:
+        source.close()
+        recovery.close()
+        destination.close()
+
+    body = {"command": MERGE_COMMAND, "refused": False, "destination": str(dest_path),
+            **report.body(), **{f"binding_{k}": v for k, v in provenance.items()}}
+    if as_json:
+        out(json.dumps(body, sort_keys=True))
+    else:
+        render_report(report, plan, out)
+    return 0
+
+
 def run_repair_nba_results(
     *,
     database_path: Path,
@@ -2187,6 +2389,39 @@ def main(argv: Optional[list[str]] = None) -> int:
     lineupc.add_argument("--json", dest="as_json", action="store_true",
                          help="Machine-readable output")
 
+    # Offline merge of REVIEWED continuation evidence into a protected COPY. It
+    # never opens the source corpus or the recovery database writable and makes
+    # no provider request; --offline must be given explicitly.
+    lmerge = sub.add_parser(
+        "merge-nba-lineup-continuation",
+        help=("Merge reviewed NBA lineup-continuation evidence into a protected copy "
+              "of the March corpus (offline; dry-run by default)"),
+    )
+    lmerge.add_argument("--source-db", dest="source_db", type=Path, required=True,
+                        metavar="PATH", help="Protected March corpus (opened read-only)")
+    lmerge.add_argument("--recovery-db", dest="recovery_db", type=Path, required=True,
+                        metavar="PATH", help="Reviewed recovery database (opened read-only)")
+    lmerge.add_argument("--destination-db", dest="destination_db", type=Path, required=True,
+                        metavar="PATH", help="Protected merged copy (the ONLY write target)")
+    lmerge.add_argument("--manifest", dest="manifest_path", type=Path, required=True,
+                        metavar="PATH", help="The committed continuation manifest")
+    lmerge.add_argument("--checkpoint", dest="checkpoint", type=Path, default=None,
+                        metavar="PATH", help="Recovery checkpoint (guarded against aliasing)")
+    lmerge.add_argument("--expect-source-fingerprint", dest="expected_source_fingerprint",
+                        default=None, metavar="SHA256")
+    lmerge.add_argument("--expect-targets", dest="expected_targets", type=int, default=40,
+                        metavar="N")
+    lmerge.add_argument("--expect-target-digest", dest="expected_target_digest",
+                        default=None, metavar="SHA256")
+    lmerge.add_argument("--offline", dest="offline_ack", action="store_true",
+                        help="Explicit offline acknowledgement (required)")
+    lmerge.add_argument("--create-destination", action="store_true",
+                        help="Snapshot the destination from the source via the backup API")
+    lmerge.add_argument("--dry-run", action="store_true",
+                        help="Plan and report without writing anything")
+    lmerge.add_argument("--json", dest="as_json", action="store_true",
+                        help="Machine-readable output")
+
     hoopr = sub.add_parser(
         "import-hoopr", help="Import a hoopR play-by-play Parquet file OFFLINE (no network, no R)"
     )
@@ -2324,6 +2559,22 @@ def main(argv: Optional[list[str]] = None) -> int:
             checkpoint=args.checkpoint,
             execute=args.execute,
             resume=args.resume,
+            as_json=args.as_json,
+        )
+
+    if args.command == "merge-nba-lineup-continuation":
+        return run_merge_nba_lineup_continuation(
+            source_db=args.source_db,
+            recovery_db=args.recovery_db,
+            destination_db=args.destination_db,
+            manifest_path=args.manifest_path,
+            checkpoint=args.checkpoint,
+            expected_source_fingerprint=args.expected_source_fingerprint,
+            expected_targets=args.expected_targets,
+            expected_target_digest=args.expected_target_digest,
+            offline_ack=args.offline_ack,
+            create_destination=args.create_destination,
+            dry_run=args.dry_run,
             as_json=args.as_json,
         )
 

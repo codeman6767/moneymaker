@@ -45,10 +45,15 @@ canonical-matching defects were not repaired, and F2 was not begun.
 > exactly those whose page one held 25 rows — a full page at `per_page=25` — which
 > is why the discarded cursor mattered for them and for none of the other 199.
 >
-> The `lineups` family nevertheless **remains formally unaccepted here**: the
-> recovered rows live only in a separate recovery database and **no merge into the
-> March corpus has been performed or authorized**. Point-in-time labels remain
-> **0/239**.
+> **UPDATE (2026-08-08) — the recovered evidence has since been merged offline
+> into a PROTECTED COPY**, `data/f1_nba_2026_03_lineups_merged.db`, leaving this
+> corpus byte-identical. See `F1_NBA_2026_03_LINEUP_MERGE.md`. In that copy all
+> 239 games carry complete lineups (two team snapshots, ten starters each).
+>
+> The `lineups` family nevertheless **remains formally unaccepted**: the merge is
+> **not yet independently reviewed**, the merged rows exist only in the separate
+> protected copy, and **this March corpus is unchanged**. Point-in-time labels
+> remain **0/239** in both databases because canonical matching has not run.
 
 ---
 
