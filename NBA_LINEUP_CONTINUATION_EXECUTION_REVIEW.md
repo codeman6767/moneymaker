@@ -600,8 +600,11 @@ pacing sleeps, still fails closed with no undeclared escape.
 > See `F1_NBA_2026_03_LINEUP_MERGE.md`. All 40 merge-eligible games were merged
 > (22 revision snapshots, 294 player rows, 32 recovered observations), the
 > original March corpus and this recovery evidence are byte-identical, and no
-> provider request was made. **The merge is not yet independently reviewed and the
-> NBA lineup family is not finally accepted.** PIT labels remain 0/239.
+> provider request was made. **That merge has since been independently reviewed and
+> ACCEPTED WITH LIMITATION** (`NBA_LINEUP_MERGE_INDEPENDENT_REVIEW.md`): the NBA
+> lineup family is accepted for this F1 month provider-depth slice, but historical
+> pregame lineup availability is ZERO for this month because the corpus was
+> backfilled in August 2026 for March games. PIT labels remain 0/239.
 
 Standing status, unchanged by this review:
 

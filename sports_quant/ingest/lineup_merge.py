@@ -360,21 +360,32 @@ def plan_merge(
     }
     # Destination PAGE-ONE snapshot membership, keyed by (game, team).
     #
-    # Deliberately the EARLIEST observation for each anchor, never the latest: a
-    # revision this merge already appended must not become the base of a second
-    # one. Anchoring on the original page-one observation makes the planned
-    # membership a pure function of the two source corpora, so re-planning after a
-    # merge yields byte-identical content, ``append_transition`` collapses it, and
-    # the run is idempotent. Taking the latest instead would stack the continuation
-    # rows on top of themselves on every replay.
+    # Identified by PROVENANCE: the snapshot whose ``raw_response_id`` is the
+    # page-one response for that game. Not the latest observation (a revision this
+    # merge already appended would become the base of the next one and the
+    # continuation rows would stack on every replay), and not merely the earliest
+    # either -- "earliest" is only accidentally page one. Any other observation
+    # recorded at the same anchor before page one would silently become the base
+    # and the real page-one members would drop out of the merged lineup.
+    #
+    # Binding to the response makes the planned membership a pure function of the
+    # two source corpora: independent of destination history, insertion order and
+    # any prior merge. Re-planning after a merge therefore yields byte-identical
+    # content, ``append_transition`` collapses it, and the run is idempotent.
+    page_one_response = {gid: ev[0] for gid, ev in page_one.items()}
     dest_snap: dict[tuple[str, str], tuple[str, list[sqlite3.Row]]] = {}
     for row in destination.execute(
-        "SELECT lineup_id, provider_game_id, provider_team_id, observed_at "
-        "FROM lineup_snapshots ORDER BY observed_at, lineup_id"
+        "SELECT lineup_id, provider_game_id, provider_team_id, raw_response_id "
+        "FROM lineup_snapshots ORDER BY lineup_id"
     ):
-        key = (str(row["provider_game_id"]), str(row["provider_team_id"]))
+        gid_of_row = str(row["provider_game_id"])
+        if str(row["raw_response_id"]) != page_one_response.get(gid_of_row):
+            continue                                # not the page-one observation
+        key = (gid_of_row, str(row["provider_team_id"]))
         if key in dest_snap:
-            continue                                # keep the earliest observation
+            raise LineupMergeError(
+                f"game {key[0]} team {key[1]}: two snapshots claim the same page-one "
+                "response; the page-one observation is ambiguous")
         members = list(destination.execute(
             "SELECT batting_order, provider_player_id, position, is_starter "
             "FROM lineup_players WHERE lineup_id = ? ORDER BY batting_order",
@@ -458,7 +469,8 @@ def plan_merge(
             key = (gid, team_id)
             if key not in dest_snap:
                 raise LineupMergeError(
-                    f"game {gid}: destination has no page-one snapshot for team {team_id}")
+                    f"game {gid}: the destination has no snapshot produced by the page-one "
+                    f"response for team {team_id}; refusing to guess a revision base")
             _lineup_id, members = dest_snap[key]
             players = [
                 MergePlayer(provider_player_id=str(m["provider_player_id"]),

@@ -5,7 +5,8 @@ a **protected copy** of the March corpus. The original March corpus, its
 checkpoint, the recovery database and the recovery checkpoint were never opened
 writable and are byte-identical afterwards.
 
-**No provider request was made. This merge is NOT yet independently reviewed.**
+**No provider request was made.** This merge has since been independently reviewed
+and **ACCEPTED WITH LIMITATION** — `NBA_LINEUP_MERGE_INDEPENDENT_REVIEW.md`.
 
 Applied at `HEAD a03b9a6`.
 
@@ -342,6 +343,24 @@ creation, apply to a temporary copy, idempotent second apply, three conflict
 refusals, atomic rollback, PIT emptiness, protected-artefact immutability, the
 zero-network sentinel (14/14 probes blocked) and schema v17.
 
+> **UPDATE (2026-08-08) — the merge has been INDEPENDENTLY REVIEWED and ACCEPTED
+> WITH LIMITATION.** See `NBA_LINEUP_MERGE_INDEPENDENT_REVIEW.md`. The review
+> reconstructed the 22/294/32 identity from raw SQL without the production
+> planner, reproduced the merged copy three times, and confirmed idempotency,
+> eight-point atomic rollback, safe concurrency and path protection.
+>
+> One blocker-class defect was repaired: the revision base was chosen by
+> observation order ("earliest"), so any earlier observation at an affected anchor
+> would silently replace the real page-one members. It now binds to page-one
+> PROVENANCE. The merged database was unaffected and is byte-identical.
+>
+> **Historical PIT limitation.** The whole March corpus was backfilled in August
+> 2026 (page one 2026-08-04, continuation 2026-08-06) for games played in March.
+> At every March pregame cutoff `latest_as_of` returns NOTHING for lineups in both
+> the source and the merged copy. The merge adds **retrospective provider-depth
+> completeness only** and does not — and cannot — improve historical pregame
+> feature availability, which was and remains zero. No leakage is introduced.
+
 ---
 
 ## Status
@@ -351,9 +370,13 @@ zero-network sentinel (14/14 probes blocked) and schema v17.
 - The **recovery evidence remains unchanged**.
 - Forty previously partial lineups are now represented completely in the protected
   merged copy under the reviewed provider cursor evidence.
-- **This merge is NOT yet independently reviewed.**
-- **The NBA lineup family must not be called finally accepted until an independent
-  merge review is complete.**
+- **This merge has been independently reviewed and ACCEPTED WITH LIMITATION** —
+  `NBA_LINEUP_MERGE_INDEPENDENT_REVIEW.md`.
+- **The NBA lineup family is accepted for this F1 month provider-depth slice**,
+  subject to the historical PIT limitation below.
+- **Historical pregame lineup availability is ZERO for this month, before and
+  after the merge** — the corpus was backfilled in August 2026 for March games.
+  These lineups are retrospective provider depth, not historical pregame features.
 - **PIT labels remain 0/239.**
 - **Three canonical-matching defects remain open.**
 - **The combined F1 review has not begun.**

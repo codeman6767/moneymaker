@@ -23,8 +23,10 @@ each execution.
 | Official team / game / player matching mechanics | proven offline, one game per league |
 | **MLB June-2026 month execution** | **executed, independently reviewed** |
 | **NBA March-2026 month execution** | **executed, independently reviewed** |
-| NBA `lineups` family | **not accepted** — 40/239 games partial (ignored provider cursor) |
-| NBA lineup-continuation recovery | **prepared, independently reviewed and accepted; NOT executed** (`NBA_LINEUP_CONTINUATION_PREPARATION_REVIEW.md`) |
+| NBA `lineups` family | **accepted for this F1 month provider-depth slice** — 239/239 games complete in the protected merged copy, subject to the historical PIT limitation below |
+| NBA lineup-continuation recovery | **executed once, independently reviewed and accepted** (`NBA_LINEUP_CONTINUATION_EXECUTION_REVIEW.md`) |
+| NBA lineup protected-copy merge | **applied, independently reviewed and accepted** (`F1_NBA_2026_03_LINEUP_MERGE.md`, `NBA_LINEUP_MERGE_INDEPENDENT_REVIEW.md`) |
+| NBA historical pregame lineup availability | **zero, before and after the merge** — the whole March corpus was backfilled in August 2026, so no lineup is visible at any March pregame cutoff. The merge adds retrospective provider depth, **not** historical PIT features. |
 | NBA `results` family | **repaired offline, independently reviewed and accepted** — 239/239 typed results (`F1_NBA_2026_03_RESULTS_REPAIR.md`, `NBA_RESULTS_REPAIR_INDEPENDENT_REVIEW.md`) |
 | NBA usable PIT labels | **0/239** — blocked by canonical matching, not by results |
 | Combined F1 coverage/depth review | **not begun** |
@@ -487,10 +489,19 @@ Nothing here is authorized by this document.
   Because `lineup_snapshots`/`lineup_players` are hard append-only, the merge
   appends one observation-time **revision** per affected `(game, team)` carrying
   page one plus its additions: 22 snapshots and 294 player rows, delivering the 32
-  recovered observations. All 239 games now show exactly two team snapshots and
-  ten starters; the 199 untouched games are unchanged; the original corpus,
-  checkpoint and recovery evidence are byte-identical. **The merge is not yet
-  independently reviewed and the lineup family is not finally accepted.**
+  recovered observations. All 239 games now show exactly two **logical** team
+  lineups and ten starters (500 raw snapshot rows over 478 anchors — raw rows and
+  logical lineups are different quantities); the 199 untouched games are
+  unchanged; the original corpus, checkpoint and recovery evidence are
+  byte-identical.
+
+  **Independently reviewed and ACCEPTED WITH LIMITATION (2026-08-08)** —
+  `NBA_LINEUP_MERGE_INDEPENDENT_REVIEW.md`. The review repaired one blocker-class
+  defect (the revision base was picked by observation order rather than page-one
+  provenance) without changing the merged database, and established the limitation
+  below: **historical pregame lineup availability for this month is zero, before
+  and after the merge**, because the corpus was backfilled in August 2026 for
+  March games. The merge is retrospective provider depth, not a PIT feature gain.
 
   The recovered volume is small because all 40 targets had exactly 25 rows on
   page one — a full page at `per_page=25`, which is precisely why the provider

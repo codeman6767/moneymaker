@@ -50,10 +50,16 @@ canonical-matching defects were not repaired, and F2 was not begun.
 > corpus byte-identical. See `F1_NBA_2026_03_LINEUP_MERGE.md`. In that copy all
 > 239 games carry complete lineups (two team snapshots, ten starters each).
 >
-> The `lineups` family nevertheless **remains formally unaccepted**: the merge is
-> **not yet independently reviewed**, the merged rows exist only in the separate
-> protected copy, and **this March corpus is unchanged**. Point-in-time labels
-> remain **0/239** in both databases because canonical matching has not run.
+> That merge has since been **independently reviewed and ACCEPTED WITH LIMITATION**
+> (`NBA_LINEUP_MERGE_INDEPENDENT_REVIEW.md`). The `lineups` family is now accepted
+> for this F1 month **provider-depth** slice. **This March corpus is still
+> unchanged** — the completed lineups exist only in the protected merged copy.
+>
+> **Historical PIT availability is a separate matter and is ZERO for this month:**
+> page one was observed 2026-08-04 and the continuation 2026-08-06, for games
+> played in March 2026, so no lineup is visible at any March pregame cutoff in
+> either database. Point-in-time labels remain **0/239** because canonical matching
+> has not run.
 
 ---
 
@@ -806,7 +812,13 @@ provenance, into the March scratch database. Expected: 239 inserted, 0 correctio
 responses, 0 provider requests, checkpoint byte-identical. See
 `F1_NBA_2026_03_RESULTS_REPAIR.md`.
 
-### Targeted live repair — lineups only (PREPARED OFFLINE 2026-08-06; NOT executed)
+### Targeted live repair — lineups only (EXECUTED 2026-08-06; reviewed and merged)
+
+> **Superseded by events.** The section below describes the plan as it stood before
+> execution. The recovery ran once on 2026-08-06, was independently accepted, and
+> was merged into a protected copy on 2026-08-08 (merge independently accepted with
+> a historical-PIT limitation). See `NBA_LINEUP_CONTINUATION_EXECUTION_REVIEW.md`,
+> `F1_NBA_2026_03_LINEUP_MERGE.md` and `NBA_LINEUP_MERGE_INDEPENDENT_REVIEW.md`.
 
 > Everything buildable without the provider now exists: `fetch_lineups` accepts a
 > cursor, the planner expresses a bounded continuation contingent (40 targets ×

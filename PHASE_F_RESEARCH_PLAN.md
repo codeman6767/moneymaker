@@ -278,8 +278,24 @@ nothing below is authorized by this milestone:
 > hold. **PIT labels remain 0/239 in both the source and the merged copy** — the
 > lineup merge alone cannot bypass canonical matching.
 >
-> **The merge is NOT independently reviewed. The NBA lineup family is NOT finally
-> accepted. An independent merge review is the next step.**
+> **INDEPENDENTLY REVIEWED (2026-08-08) — ACCEPTED WITH LIMITATION.**
+> `NBA_LINEUP_MERGE_INDEPENDENT_REVIEW.md`. The review rebuilt the 22/294/32
+> identity from raw SQL without the production planner, reproduced the merged copy
+> three times, and confirmed idempotency, eight-point atomic rollback, safe
+> concurrency and path protection. One blocker-class defect was repaired: the
+> revision base was selected by observation order, so any earlier observation at an
+> affected anchor would silently displace the real page-one members. It now binds
+> to page-one PROVENANCE; the merged database was unaffected and is byte-identical.
+>
+> **The NBA lineup family is accepted for this F1 month PROVIDER-DEPTH slice.**
+>
+> **Historical PIT limitation — do not conflate the two.** The entire March corpus
+> was backfilled in August 2026 (page one 2026-08-04, continuation 2026-08-06) for
+> games played in March. At every March pregame cutoff `latest_as_of` returns
+> NOTHING for lineups in both the source and the merged copy. Historical pregame
+> lineup availability for this month is **zero before and after the merge**; the
+> merge adds retrospective provider depth only and introduces no leakage. These
+> lineups must not be used as historical pregame features.
 >
 > **The combined F1 coverage/depth review has NOT begun. F1 remains incomplete and
 > F2 remains unauthorized.** Canonical matching remains blocked by three separately
