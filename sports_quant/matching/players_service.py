@@ -155,6 +155,7 @@ class MatchPlayersService:
         # collision, not a discovery -- two Will Smiths must stay two people. The
         # bootstrap's own provider-scoped alias makes this reachable, so the check
         # lives here rather than being left to chance.
+        same_provider_collision = False
         if (
             res.is_matched
             and res.tier != TIER_EXACT_PROVIDER_ID
@@ -163,13 +164,42 @@ class MatchPlayersService:
                 provider, provider_player_id, res.entity_id)
         ):
             res = self._collision(provider, provider_player_id, res, season_year)
+            same_provider_collision = True
+        elif (
+            res.status == AMBIGUOUS
+            and res.candidates
+            and self._all_candidates_claimed(provider, provider_player_id, res)
+        ):
+            # Three or more official ids sharing a name: the resolver sees several
+            # candidates and refuses, which is right in general. But when EVERY
+            # candidate is already owned by a different id of the same provider,
+            # the ambiguity is the same-name collision again, just with more than
+            # one prior claimant -- not evidence that this id is one of them.
+            same_provider_collision = True
 
         if not res.is_matched:
             # An AMBIGUOUS result is a refusal, never a licence to create a second
             # player: two existing candidates mean the evidence is insufficient, so
             # bootstrap is only ever attempted when NOTHING resolved.
+            #
+            # The one exception is a SAME-PROVIDER id collision, and only because
+            # of what the official designation means: one stable official id is one
+            # person BY CONSTRUCTION, so two official ids sharing a name are two
+            # people, not one ambiguous person. Refusing the second id here is what
+            # made the outcome depend on traversal order -- whoever ran first
+            # bootstrapped and took the name, and the other was left unresolved, so
+            # reversing the order reversed which identity existed. Letting the
+            # second id bootstrap its OWN canonical player makes the final state a
+            # function of the evidence rather than of the order.
+            #
+            # This does not widen bootstrap for anyone else:
+            # ``_bootstrap_official_player`` still refuses unless the provider is
+            # the league's designated official source, so a nonofficial or unknown
+            # provider hitting the same collision falls through to the ordinary
+            # ambiguous refusal below and creates nothing.
             bootstrap = None
-            if res.status != AMBIGUOUS and not res.scope_conflict:
+            if (res.status != AMBIGUOUS or same_provider_collision) \
+                    and not res.scope_conflict:
                 bootstrap = self._bootstrap_official_player(
                     provider, provider_player_id, league_id, identity, raw_id, result)
             if bootstrap is None:
@@ -217,6 +247,23 @@ class MatchPlayersService:
             (provider, player_id, provider_player_id),
         ).fetchone()
         return row is not None
+
+    def _all_candidates_claimed(
+        self, provider: str, provider_player_id: str, res: Resolution
+    ) -> bool:
+        """Whether EVERY candidate is owned by another id of the same provider.
+
+        Deliberately all, not any: one unclaimed candidate means there is a real
+        canonical player this id might legitimately be, and that stays ambiguous.
+        """
+
+        entity_ids = [c.entity_id for c in res.candidates if c.entity_id is not None]
+        if not entity_ids:
+            return False
+        return all(
+            self._claimed_by_another_provider_id(provider, provider_player_id, entity_id)
+            for entity_id in entity_ids
+        )
 
     def _collision(
         self, provider: str, provider_player_id: str, res: Resolution,

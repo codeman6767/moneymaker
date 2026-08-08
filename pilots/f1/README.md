@@ -29,6 +29,8 @@ each execution.
 | NBA historical pregame lineup availability | **zero, before and after the merge** — the whole March corpus was backfilled in August 2026, so no lineup is visible at any March pregame cutoff. The merge adds retrospective provider depth, **not** historical PIT features. |
 | NBA `results` family | **repaired offline, independently reviewed and accepted** — 239/239 typed results (`F1_NBA_2026_03_RESULTS_REPAIR.md`, `NBA_RESULTS_REPAIR_INDEPENDENT_REVIEW.md`) |
 | NBA usable PIT labels | **0/239** — blocked by canonical matching, not by results |
+| Three canonical-matching defects | **repaired offline, NOT independently reviewed** (`F1_CANONICAL_MATCHING_REPAIRS.md`) |
+| Production matching over the F1 corpora | **not run** — no identity coverage measured |
 | Combined F1 coverage/depth review | **not begun** |
 | F1 | **incomplete** |
 | F2 | **unauthorized** |

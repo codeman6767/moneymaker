@@ -289,6 +289,17 @@ nothing below is authorized by this milestone:
 >
 > **The NBA lineup family is accepted for this F1 month PROVIDER-DEPTH slice.**
 >
+> **MATCHER DEFECTS REPAIRED (2026-08-08), NOT YET REVIEWED.** The three known
+> canonical-matching blockers are repaired offline -- official same-name identities
+> are now order-independent, accepted exact-provider team replays no longer grow
+> decision history, and accepted canonical mappings resolve downstream through the
+> provider reference and its own backing accepted decision, knowledge-time gated on
+> `decided_at`. No schema change: the repository stays at v17, and no observation
+> table was backfilled because all of them are append-only.
+> See `F1_CANONICAL_MATCHING_REPAIRS.md`. **These repairs are not independently
+> reviewed, production matching over the F1 corpora has NOT run, and identity
+> coverage has NOT been measured.**
+>
 > **Historical PIT limitation — do not conflate the two.** The entire March corpus
 > was backfilled in August 2026 (page one 2026-08-04, continuation 2026-08-06) for
 > games played in March. At every March pregame cutoff `latest_as_of` returns

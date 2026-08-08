@@ -19,6 +19,7 @@ import json
 import sqlite3
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from typing import Any, Optional, Sequence
 
 from ..db.models import Game, Venue
@@ -150,6 +151,14 @@ def _season_phase(game_type: Optional[str]) -> str:
     if token in _PRESEASON_TYPES or token.lower() in _PRESEASON_TYPES:
         return "preseason"
     return "regular"
+
+
+class _LinkState(Enum):
+    """State of an existing provider link behind an ``exact_provider_id`` hit."""
+
+    ABSENT = "absent"                 # nothing linked yet -- ordinary first match
+    VALID_REPLAY = "valid_replay"     # same canonical target, valid backing decision
+    BROKEN = "broken"                 # linked but the provenance does not hold up
 
 
 class MatchGamesService:
@@ -348,6 +357,32 @@ class MatchGamesService:
             raw_name=identity.full_name if identity is not None else None,
             season_year=int(season_year) if season_year is not None else None,
         )
+        # An `exact_provider_id` hit means the reference ALREADY carries a canonical
+        # link, so this run learned nothing new. Re-recording an accepted decision
+        # for it grew the audit log by two rows per game on every replay. When the
+        # existing link is intact -- same canonical team, backed by its own valid
+        # accepted decision -- this is a semantic replay: nothing is written and it
+        # is counted as a replay rather than reported as a fresh match.
+        #
+        # The rule is narrow on purpose. It applies ONLY to this already-linked
+        # exact-id path; every other accepted decision is still recorded, so a new
+        # observation, changed identity evidence, a different canonical target or a
+        # changed matcher version all remain auditable. A link that fails the
+        # integrity check is NOT treated as a replay: it falls through and is
+        # reported, never quietly repaired.
+        if res.is_matched and res.tier == "exact_provider_id" and not self._dry_run:
+            state = self._existing_team_link_state(provider, provider_team_id, res)
+            if state is _LinkState.VALID_REPLAY:
+                result.counters.decisions_replayed += 1
+                return res
+            if state is _LinkState.BROKEN:
+                self._dq_issue(
+                    result, severity="blocking", rule_code="DQ-MATCH-017", entity_type="team",
+                    entity_id=provider_team_id, provider=provider,
+                    description=("provider team link is not backed by a valid accepted "
+                                 "decision for the linked canonical team"),
+                )
+
         decision_id = self._record_decision(
             entity_type="team", source_provider=provider, source_ref=provider_team_id,
             resolution=res, result=result,
@@ -367,6 +402,36 @@ class MatchGamesService:
                 description="exact provider team link resolves into the wrong league",
             )
         return res
+
+    def _existing_team_link_state(
+        self, provider: str, provider_team_id: str, res: Resolution
+    ) -> "_LinkState":
+        """Classify the already-present link behind an ``exact_provider_id`` hit.
+
+        ``VALID_REPLAY`` only when the stored reference points at the same
+        canonical team the resolver returned AND its recorded
+        ``match_decision_id`` is an accepted team decision for that same team.
+        Anything else -- no reference, no decision id, a decision that is missing,
+        not accepted, for another entity type, or pointing at a different team --
+        is ``BROKEN`` and must be reported rather than replayed.
+        """
+
+        ref = self._refs.get("team", provider, provider_team_id)
+        if ref is None or ref.canonical_id is None:
+            return _LinkState.ABSENT
+        if ref.canonical_id != res.entity_id:
+            return _LinkState.BROKEN
+        decision_id = ref.match_decision_id
+        if decision_id is None:
+            return _LinkState.BROKEN
+        decision = self._match.get(decision_id)
+        if decision is None:
+            return _LinkState.BROKEN
+        if (decision.outcome != "accepted"
+                or decision.entity_type != "team"
+                or decision.matched_entity_id != ref.canonical_id):
+            return _LinkState.BROKEN
+        return _LinkState.VALID_REPLAY
 
     def _resolve_venue(
         self, provider: str, sched: sqlite3.Row, result: MatchGamesResult

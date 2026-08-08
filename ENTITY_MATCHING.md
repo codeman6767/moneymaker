@@ -425,8 +425,11 @@ bootstrap from the designated official provider. They establish **no** coverage
 figure. Identity coverage across an ordinary month -- and therefore any judgement
 about the 99% acceptance gate -- requires the bounded season-month pilots, whose
 manifests, request-cap derivation, coverage-report contract and execution protocol
-live in `pilots/f1/README.md`. Those pilots are **prepared and not executed**; F1
-is **incomplete** and F2 is **unauthorized**.
+live in `pilots/f1/README.md`. Those pilots have since **executed** and been independently reviewed, but no
+coverage figure follows from them until matching runs: the three known matcher
+defects were repaired offline (`F1_CANONICAL_MATCHING_REPAIRS.md`, **not yet
+independently reviewed**) and **production matching over the month corpora has
+not been run**. F1 is **incomplete** and F2 is **unauthorized**.
 
 ### 3.4.5 Decision-history idempotency
 
@@ -449,12 +452,16 @@ replay. The rule is deliberately narrow:
 Three counters make the outcome visible rather than implicit:
 `decisions_recorded`, `decisions_replayed`, `decisions_changed`.
 
-**Known residual, not hidden.** Re-running `match-games` over an already-matched
-game still appends two *accepted* `exact_provider_id` team re-affirmations per
-run (measured: +2 on the second pass and +2 on the third, in both leagues). They
-create no canonical entity, no link and no duplicate alias. Deduplicating
-accepted decisions touches link provenance and is deliberately left out of this
-change; the counters above report the growth rather than concealing it.
+**That residual is now repaired** (`F1_CANONICAL_MATCHING_REPAIRS.md`). An
+`exact_provider_id` hit means the reference already carries the link, so the run
+learned nothing. When the existing link is intact -- same canonical team, backed
+by its own accepted `team` decision for that team -- it is a semantic replay:
+nothing is written and `decisions_replayed` reports it. The rule is narrow and is
+NOT a global accepted-decision dedupe: it applies only to that already-linked
+exact-id path, so a new observation, changed identity evidence, a different
+canonical target or a changed matcher version all still append. A link whose
+backing decision is missing or does not justify it raises `DQ-MATCH-017` and is
+never silently repaired. Nothing is deleted or rewritten.
 
 ---
 

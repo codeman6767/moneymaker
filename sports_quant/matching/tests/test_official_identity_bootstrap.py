@@ -25,7 +25,6 @@ from sports_quant.db.repositories.players import SqlitePlayerAliasRepository
 from sports_quant.db.repositories.references import SqliteProviderReferenceRepository
 from sports_quant.matching.model import (
     SCORE_OFFICIAL_PROVIDER_BOOTSTRAP,
-    TIER_EXACT_PROVIDER_ID,
     TIER_OFFICIAL_PROVIDER_BOOTSTRAP,
 )
 from sports_quant.matching.players_service import MatchPlayersService
@@ -189,9 +188,18 @@ def test_wrong_league_alias_does_not_resolve(conn: sqlite3.Connection) -> None:
                         "WHERE provider_team_id='141'").fetchone()[0] is None
 
 
-def test_exact_provider_id_becomes_the_replay_path_after_linking(
+def test_exact_provider_id_replay_records_no_new_decision(
     conn: sqlite3.Connection,
 ) -> None:
+    """After linking, a rerun resolves by exact provider id and writes nothing.
+
+    This previously asserted that the rerun APPENDED two accepted
+    ``exact_provider_id`` re-affirmations -- the decision-history growth recorded
+    as a known residual in ENTITY_MATCHING.md 3.4.5. That growth is now repaired:
+    an already-linked reference whose backing accepted decision still holds is a
+    semantic replay, so the audit log stays exactly as the first run left it.
+    """
+
     _mlb_two_teams(conn)
     seed_schedule(conn, provider=MLB, provider_game_id="822788",
                   home_provider_team_id="141", away_provider_team_id="139",
@@ -204,11 +212,19 @@ def test_exact_provider_id_becomes_the_replay_path_after_linking(
     _identity_team(conn, provider=MLB, provider_team_id="139", league_id="lg_mlb",
                    full_name="Tampa Bay Rays")
     _match_games(conn, from_date="2026-07-24", to_date="2026-07-24")
-    _match_games(conn, from_date="2026-07-24", to_date="2026-07-24")
-    methods = [r[0] for r in conn.execute(
-        "SELECT method FROM entity_match_decisions WHERE entity_type='team' "
+    first = [r[0] for r in conn.execute(
+        "SELECT match_id FROM entity_match_decisions WHERE entity_type='team' "
         "ORDER BY decided_at, match_id")]
-    assert methods[-2:] == [TIER_EXACT_PROVIDER_ID, TIER_EXACT_PROVIDER_ID]
+    second = _match_games(conn, from_date="2026-07-24", to_date="2026-07-24")
+    after = [r[0] for r in conn.execute(
+        "SELECT match_id FROM entity_match_decisions WHERE entity_type='team' "
+        "ORDER BY decided_at, match_id")]
+    assert after == first, "the replay appended team decisions"
+    assert second.counters.decisions_replayed >= 2
+    # The link itself is still the exact-provider-id path, just not re-recorded.
+    assert conn.execute(
+        "SELECT COUNT(*) FROM provider_team_references WHERE team_id IS NOT NULL"
+    ).fetchone()[0] == 2
     assert conn.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 1
 
 
