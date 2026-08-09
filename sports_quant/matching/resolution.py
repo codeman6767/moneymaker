@@ -46,7 +46,11 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Iterable, Optional
+
+from ..db.schema import from_iso
+from ..pit.models import Cutoff
 
 #: Reference table and canonical column for each resolvable kind.
 _KINDS = {
@@ -58,6 +62,31 @@ _KINDS = {
 
 class CanonicalResolutionError(ValueError):
     """An unsupported entity kind was requested."""
+
+
+def _instant(stored: str) -> datetime:
+    """A stored corpus timestamp as an aware UTC instant."""
+
+    return from_iso(stored)
+
+
+def _cutoff_instant(as_of: str) -> datetime:
+    """Parse a caller-supplied cutoff into an aware UTC instant.
+
+    Ordering is CHRONOLOGICAL, never lexical. Comparing the stored strings looked
+    right for the corpus canonical form and was wrong everywhere else: an
+    equivalent instant written ``...+00:00`` sorts before the same ``...Z`` value,
+    a whole-second cutoff sorts *after* a sub-second decision on the same second
+    (``'Z' > '.'``), and a malformed cutoff such as ``'not-a-timestamp'`` sorts
+    after every real timestamp and therefore RESOLVED the mapping instead of
+    failing closed.
+
+    :class:`Cutoff` is the repository's single cutoff contract, so this shares one
+    semantic ordering with :meth:`sports_quant.pit.asof.AsOfReader.matched_entity`.
+    Naive and unparseable values raise rather than being guessed at.
+    """
+
+    return Cutoff.parse(as_of).datetime
 
 
 @dataclass(frozen=True)
@@ -108,8 +137,9 @@ def resolve_canonical(
         # Unmatched, or a link with no provenance: not an identity.
         return None
     decision = conn.execute(
-        "SELECT match_id, entity_type, outcome, matched_entity_id, decided_at "
-        "FROM entity_match_decisions WHERE match_id = ?", (decision_id,),
+        "SELECT match_id, entity_type, outcome, matched_entity_id, decided_at, "
+        "source_provider, source_ref FROM entity_match_decisions WHERE match_id = ?",
+        (decision_id,),
     ).fetchone()
     if decision is None:
         return None
@@ -119,8 +149,15 @@ def resolve_canonical(
         # The link's own decision does not justify it: fail closed rather than
         # trusting the convenience column.
         return None
+    if (str(decision["source_provider"]) != provider
+            or str(decision["source_ref"]) != str(provider_entity_id)):
+        # A matching canonical target is NOT sufficient. The decision must have
+        # adjudicated THIS provider reference; one recorded for a different
+        # provider or a different provider id may name the same canonical entity
+        # by coincidence without ever having judged this one.
+        return None
     decided_at = str(decision["decided_at"])
-    if as_of is not None and decided_at > as_of:
+    if as_of is not None and _instant(decided_at) > _cutoff_instant(as_of):
         # Known only after the cutoff: invisible at that point in time.
         return None
     return CanonicalLink(

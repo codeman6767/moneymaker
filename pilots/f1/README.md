@@ -29,7 +29,7 @@ each execution.
 | NBA historical pregame lineup availability | **zero, before and after the merge** — the whole March corpus was backfilled in August 2026, so no lineup is visible at any March pregame cutoff. The merge adds retrospective provider depth, **not** historical PIT features. |
 | NBA `results` family | **repaired offline, independently reviewed and accepted** — 239/239 typed results (`F1_NBA_2026_03_RESULTS_REPAIR.md`, `NBA_RESULTS_REPAIR_INDEPENDENT_REVIEW.md`) |
 | NBA usable PIT labels | **0/239** — blocked by canonical matching, not by results |
-| Three canonical-matching defects | **repaired offline, NOT independently reviewed** (`F1_CANONICAL_MATCHING_REPAIRS.md`) |
+| Three canonical-matching defects | **repaired and independently reviewed — ACCEPTED WITH REPAIRS** (`F1_CANONICAL_MATCHING_REPAIRS.md`, `F1_CANONICAL_MATCHING_REPAIRS_INDEPENDENT_REVIEW.md`; three further defects found and repaired by the review) |
 | Production matching over the F1 corpora | **not run** — no identity coverage measured |
 | Combined F1 coverage/depth review | **not begun** |
 | F1 | **incomplete** |
@@ -455,11 +455,16 @@ Strictly sequential, and **no step below is authorized by this document**:
 5. Offline merge of the reviewed continuation evidence into a **protected copy**
    of the March corpus. — **done** 2026-08-08, `F1_NBA_2026_03_LINEUP_MERGE.md`
    (22 revision snapshots, 294 player rows, 32 recovered observations; originals
-   byte-identical). **Not yet independently reviewed.**
-6. Independent merge review.
-7. Repair the three canonical matching defects.
-8. Run matching and measure coverage.
-9. Combined F1 review.
+   byte-identical)
+6. Independent merge review. — **done**, `NBA_LINEUP_MERGE_INDEPENDENT_REVIEW.md`
+   (**ACCEPTED WITH LIMITATION**: provider-depth accepted; historical pregame
+   lineup availability is zero for this month, before and after the merge)
+7. Repair the three canonical matching defects. — **done**
+   `F1_CANONICAL_MATCHING_REPAIRS.md`, independently reviewed and **ACCEPTED WITH
+   REPAIRS** (`F1_CANONICAL_MATCHING_REPAIRS_INDEPENDENT_REVIEW.md`; three further
+   defects found and repaired)
+8. Run matching and measure coverage. — **not run; separately authorized**
+9. Combined F1 review. — **not begun**
 10. Only then decide whether F1 passes and whether F2 may be planned.
 
 Preconditions for any live step: clean tree, the committed manifest hash matches,
@@ -475,8 +480,8 @@ Nothing here is authorized by this document.
   checkpoint unchanged) and independently reviewed and **accepted** 2026-08-06.
   See `F1_NBA_2026_03_RESULTS_REPAIR.md` and
   `NBA_RESULTS_REPAIR_INDEPENDENT_REVIEW.md`. Nothing outstanding.
-* **NBA lineups — targeted live. EXECUTED, REVIEWED and MERGED to a protected
-  copy; merge review outstanding.**
+* **NBA lineups — targeted live. EXECUTED, REVIEWED, MERGED to a protected copy,
+  and the merge independently ACCEPTED WITH LIMITATION.**
   40 of 239 `/v1/lineups` responses advertised a `next_cursor` that the single
   bounded per-game request discarded, so those games held partial lineups.
 

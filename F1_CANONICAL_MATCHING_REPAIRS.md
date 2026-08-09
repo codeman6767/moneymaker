@@ -5,8 +5,13 @@ acceptance. Zero provider requests. Production matching was **not** run over the
 F1 MLB June or NBA March corpora, and no execution, recovery, merged, checkpoint
 or evidence database was modified.
 
-**These repairs are not independently reviewed.** Identity coverage has not been
-measured.
+**UPDATE (2026-08-08): these repairs have been independently reviewed —
+ACCEPTED WITH REPAIRS** (`F1_CANONICAL_MATCHING_REPAIRS_INDEPENDENT_REVIEW.md`).
+The review found and repaired three further defects: a broken team link grew
+audit history on every rerun, `resolve_canonical` did not bind a decision to its
+own source reference, and the point-in-time gate compared timestamps lexically
+(a malformed cutoff resolved instead of failing closed). Identity coverage has
+still not been measured and production matching has still not run.
 
 ---
 

@@ -382,6 +382,14 @@ class MatchGamesService:
                     description=("provider team link is not backed by a valid accepted "
                                  "decision for the linked canonical team"),
                 )
+                # Report and stop. Falling through to `_record_decision` would append
+                # another ACCEPTED team match for a link already known to be broken,
+                # and every rerun over the same unchanged corruption appended another
+                # one -- unbounded meaningless audit growth, with the DQ row
+                # deduplicating while the accepted decision did not. The blocking DQ
+                # is durable, the corrupt reference is neither repaired nor treated
+                # as a valid replay, and reruns converge.
+                return res
 
         decision_id = self._record_decision(
             entity_type="team", source_provider=provider, source_ref=provider_team_id,
@@ -430,6 +438,12 @@ class MatchGamesService:
         if (decision.outcome != "accepted"
                 or decision.entity_type != "team"
                 or decision.matched_entity_id != ref.canonical_id):
+            return _LinkState.BROKEN
+        # The decision must have adjudicated THIS reference. A decision recorded
+        # for another provider or another provider team id may name the same
+        # canonical team by coincidence without ever having judged this one.
+        if (decision.source_provider != provider
+                or decision.source_ref != provider_team_id):
             return _LinkState.BROKEN
         return _LinkState.VALID_REPLAY
 
