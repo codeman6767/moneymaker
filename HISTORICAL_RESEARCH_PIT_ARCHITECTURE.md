@@ -13,6 +13,34 @@ LABEL_ONLY here and remain authoritative for the separation guarantees.
 **Verdict: ARCHITECTURE READY FOR INDEPENDENT REVIEW**, with four enumerated open
 gates (§13) the F1-R pilot must close.
 
+> **REVIEWED 2026-08-10 — ACCEPTED WITH REPAIRS.**
+> `HISTORICAL_RESEARCH_PIT_ARCHITECTURE_INDEPENDENT_REVIEW.md` is **authoritative
+> where it differs from this document**. Six repairs:
+> 1. **"Formally proven" was false** for correction-sensitive fields. Lane R splits
+>    into **core** (immutable facts — proven) and **extended** (correction-sensitive
+>    box-score detail — bounded by assumption + sensitivity, flagged, never called
+>    transaction-time-exact PIT). Pitcher/batter/player/advanced rolling stats are
+>    **extended**, not core.
+> 2. **Static identity is per entity type.** Game and team ids accepted (id equality
+>    only, never name); player **person** accepted but **team affiliation is NOT
+>    static** and moves to Lane L.
+> 3. **Training population defined**, with cancellation/postponement bias declared.
+> 4. **Anchoring was circular.** `T_cut` now derives from the snapshot's
+>    **contemporaneous `commence_time`**, with bounded iteration and explicit
+>    rejection; the retrospective final start is only a search hint.
+> 5. **Weather is weaker than assumed.** Previous Runs is **day-granular** and
+>    publication delay is **undocumented**; use the conservative `_previous_day1`
+>    (24 h lead) rule. Weather is **excluded from the 5-season core**.
+> 6. **Provenance conflict resolved:** retrospective economic *simulation* is
+>    permitted as research evidence; *profitability claims* still require
+>    strict-forward/live evidence.
+>
+> Also: credit budget **recomputed ~38% lower** from real schedules; evidence grades
+> **E0–E3** added; **`availability_confidence` removed** (eligibility is binary);
+> Odds API **Terms verified** (silent on storage/research; commercial use permitted
+> where the data is not the product). New gates **G5** (provider-id stability —
+> the only gate blocking implementation) and **G6** (terms review before launch).
+
 ---
 
 ## 1. Problem statement
@@ -62,6 +90,14 @@ The governing rule is *not* "Moneymaker downloaded it before `T_cut`". It is:
 > Every input to the feature is a function of events completed before `T_cut`, or
 > of an immutable identity, or of a source snapshot whose own timestamp is
 > `<= T_cut`.
+
+**Strength of that guarantee differs by field (review repair 1).** It is *proven*
+for immutable facts (win/loss, final score, date, home/away, rest, venue) — **Lane-R
+core**. For correction-sensitive box-score detail it is only *bounded by documented
+assumption and sensitivity analysis*, because a post-cutoff correction is
+undetectable in a single-version corpus — **Lane-R extended**. Extended results may
+never be described as transaction-time-exact PIT, and the two must be reported as
+separate feature-set variants.
 
 Permits: predictive-model training, calibration methodology, relative feature
 value, and — where a genuine market snapshot exists — economic backtest.
@@ -210,9 +246,11 @@ instant, so cost scales with distinct start times, not with games):
 | One month proof (MLB + NBA) | ~710 | **~7,100** |
 | One MLB season (~15 start-times/day × ~186 d) | ~2,790 | ~27,900 |
 | One NBA season (~8 × ~170 d) | ~1,360 | ~13,600 |
-| One combined season | ~4,150 | **~41,500** |
-| Three seasons | ~12,450 | **~124,500** |
-| Five seasons | ~20,750 | **~207,500** |
+| One combined season | ~4,150 | ~~41,500~~ → **25,780 (measured)** |
+| Three seasons | ~12,450 | ~~124,500~~ → **77,340 (measured)** |
+| Five seasons | ~20,750 | ~~207,500~~ → **128,900 (measured)** |
+
+**Superseded by measurement.** The review recomputed these from the real schedules by flooring each game's `T-60` to the 5-minute grid and counting distinct buckets: NBA 5.0/day and MLB 9.3/day, giving 8,500 + 17,280 = **25,780 credits per combined season** and **4,480 for a one-month pilot**. The estimates above were ~38% too high.
 
 Estimates, not quotes — derived from the documented 10× rule and typical schedule
 density. The per-event endpoint would be far costlier and is not the plan. Five

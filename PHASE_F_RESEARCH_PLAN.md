@@ -55,6 +55,16 @@
 > F2 backfill and modeling. Four open gates remain (architecture doc §13), the largest
 > being that correction risk is bounded by assumption rather than measurement —
 > neither corpus contains any correction history.
+>
+> **REVIEWED 2026-08-10 — ACCEPTED WITH REPAIRS**
+> (`HISTORICAL_RESEARCH_PIT_ARCHITECTURE_INDEPENDENT_REVIEW.md`, authoritative where
+> it differs). Lane R now splits into **core** (immutable facts, proven) and
+> **extended** (correction-sensitive detail, bounded by assumption and flagged);
+> static identity is decided per entity type; target anchoring uses the snapshot's
+> contemporaneous `commence_time`; weather uses a conservative 24-hour-lead run and
+> is excluded from the 5-season core; and retrospective economic *simulation* is
+> permitted as research while *profitability claims* still require forward evidence.
+> **G5 (provider-id stability) is the only gate blocking implementation.**
 
 **Status:** F0 planning complete **and independently reviewed** (see §R). **F1A
 (request/credit safety controls) is complete and independently reviewed.** **The
@@ -313,7 +323,10 @@ nothing below is authorized by this milestone:
 > configured 60/min, never the tier maximum, and the maximum count in any rolling
 > 60-second window was 40.
 >
-> **OFFLINE MERGE APPLIED (2026-08-08) to a protected copy — not yet reviewed.**
+> **[HISTORICAL SNAPSHOT — SUPERSEDED]** *(read as of 2026-08-08; the merge has
+> since been independently reviewed and ACCEPTED WITH LIMITATION —
+> `NBA_LINEUP_MERGE_INDEPENDENT_REVIEW.md`.)*
+> **OFFLINE MERGE APPLIED (2026-08-08) to a protected copy.**
 > `F1_NBA_2026_03_LINEUP_MERGE.md`. The reviewed continuation evidence was merged
 > into `data/f1_nba_2026_03_lineups_merged.db`; the original corpus, checkpoint
 > and recovery evidence are byte-identical and no provider request was made.
@@ -434,8 +447,17 @@ nothing below is authorized by this milestone:
 > but is no longer the immediately preceding audit for the manifest that will
 > actually run.
 >
-> **The MLB month pilot has NOT executed.** F1 remains incomplete and F2 remains
-> unauthorized.
+> **[HISTORICAL SNAPSHOT — SUPERSEDED]** The MLB June-2026 month pilot **has since
+> executed and been independently reviewed** (`F1_MLB_2026_06_EXECUTION_REVIEW.md`;
+> the 400-game corpus is `data/f1_mlb_2026_06_scratch.db`). The paragraph above
+> describes the pre-execution state and is retained as a record, not as current
+> status or as authorization for a further run.
+>
+> **Current status:** F1 remains incomplete and F2 remains unauthorized — now for
+> the architectural reason established in `F1_HISTORICAL_PIT_FEASIBILITY_REVIEW.md`
+> and addressed by `HISTORICAL_RESEARCH_PIT_ARCHITECTURE.md` (reviewed: ACCEPTED
+> WITH REPAIRS). Implementation, F1-R, F2, production matching and model training
+> all remain unauthorized.
 
 **Next planned phase boundary (not started):** the remaining F1 work — canonical
 entity matching over the pilot corpora plus coverage/depth measurement — which must be

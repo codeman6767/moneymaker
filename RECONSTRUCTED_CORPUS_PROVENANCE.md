@@ -110,7 +110,16 @@ time and is never backdated. Reconstructed availability lives only in
 | Relative feature-value / methodology research | yes | yes (with sensitivity) | no |
 | Out-of-sample / live-replay performance | yes | **no** | no |
 | Deployment calibration | yes | **no** | no |
+| Retrospective economic simulation | yes | **yes, grade-bounded** | no |
 | Profitability claim | yes (mature) | **no** | no |
+
+**Reconciliation (2026-08-10, authoritative).** A Lane-R / `reconstructed_research`
+**retrospective economic simulation IS permitted as research evidence** — it may
+estimate and compare EV, rank strategies and inform go/no-go, always carrying its
+evidence grade (E0–E3) and G1 variant. What remains prohibited is a **profitability
+claim**: any assertion of realized or expected edge offered as a basis for staking
+real money. That still requires `strict_forward_pit` / live-shadow evidence. The
+prohibition in this table is therefore narrowed to claims, not to simulation.
 
 ---
 
