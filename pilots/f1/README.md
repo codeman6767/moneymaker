@@ -32,6 +32,7 @@ each execution.
 | Three canonical-matching defects | **repaired and independently reviewed — ACCEPTED WITH REPAIRS** (`F1_CANONICAL_MATCHING_REPAIRS.md`, `F1_CANONICAL_MATCHING_REPAIRS_INDEPENDENT_REVIEW.md`; three further defects found and repaired by the review) |
 | Production matching over the F1 corpora | **not run** — no identity coverage measured |
 | **Historical PIT feasibility** | **⛔ ARCHITECTURAL BLOCKER** — `F1_HISTORICAL_PIT_FEASIBILITY_REVIEW.md`. 239/239 NBA and 400/400 MLB games were first observed AFTER their scheduled start, so `_feature_cutoff` fails closed for every game; bounded matching succeeds and the dataset still yields 0 rows. **Production F1 matching must not be run as an acceptance run, and F2 backfill/modeling must not begin, until the architecture is resolved.** |
+| Replacement PIT architecture | **proposed, design only, NOT authorized** — `HISTORICAL_RESEARCH_PIT_ARCHITECTURE.md` (Lane R / Lane L; ready for independent review). F1 keeps its provider-depth value; a bounded **F1-R** reconstruction pilot must pass before a redefined F2. |
 | Combined F1 coverage/depth review | **not begun** |
 | F1 | **incomplete** |
 | F2 | **unauthorized** |

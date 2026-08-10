@@ -1,0 +1,478 @@
+# Historical research point-in-time architecture (design only)
+
+**Status: DESIGN ONLY — not implemented, not authorized.** No code, schema or
+corpus changes accompany this document. Schema remains **v17**.
+
+Replacement contract for historical model research after the blocker established
+in `F1_HISTORICAL_PIT_FEASIBILITY_REVIEW.md` (`dc090af`). It extends
+`RECONSTRUCTED_CORPUS_PROVENANCE.md`, which already anticipated this problem and
+defined the three provenance classes; that document's `strict_forward_pit` /
+`reconstructed_research` / `label_only_retrospective` map onto Lane L / Lane R /
+LABEL_ONLY here and remain authoritative for the separation guarantees.
+
+**Verdict: ARCHITECTURE READY FOR INDEPENDENT REVIEW**, with four enumerated open
+gates (§13) the F1-R pilot must close.
+
+---
+
+## 1. Problem statement
+
+Measured, not assumed:
+
+* 239/239 NBA March and 400/400 MLB June games had their first schedule
+  observation **after** the game's scheduled start.
+* `observed_at` everywhere is system acquisition time; `decided_at` is matcher
+  wall-clock.
+* Bounded matching succeeded completely (15/15 NBA, 24/24 MLB) and
+  `build_historical_dataset` still returned **0 rows** — every exclusion the
+  `_feature_cutoff` schedule gate, none from identity or labels.
+
+The strict builder is correct. It refuses to pretend retrospectively downloaded
+data was historically known. What it cannot do is support retrospective research,
+because it demands that *Moneymaker itself* held the evidence before the cutoff.
+
+The replacement must permit defensible retrospective research **without**
+manufacturing availability, and **without** requiring that Moneymaker had been
+running for years.
+
+## 2. The four-clock model
+
+One timestamp per meaning. Never overload.
+
+| Clock | Question | Where it lives today | Change |
+|---|---|---|---|
+| **`ingested_at` / audit** | when did Moneymaker acquire or process this? | `observed_at`, `received_at`, `decided_at`, `created_at` | **unchanged, never backdated** |
+| **fact / event time** | when did the event occur or the fact become true? | `scheduled_start`, `game_date_local`, result content | unchanged |
+| **`effective_at` / availability** | earliest time a research process may defensibly use this | **does not exist** | new, Lane-R only, derived from documented rules |
+| **decision cutoff `T_cut`** | the simulated betting decision instant (initially T−60) | dataset builder | unchanged concept, new derivation for Lane R |
+
+`observed_at` and `decided_at` keep their current meanings exactly. Availability
+lives only in a separate field, and is derived from a versioned documented rule —
+never guessed, never written into `observed_at`.
+
+## 3. Two research lanes
+
+### Lane R — Retrospective Core
+
+Built after the fact, admitting only inputs **formally proven to contain no
+information whose semantic availability is after `T_cut`**.
+
+The governing rule is *not* "Moneymaker downloaded it before `T_cut`". It is:
+
+> Every input to the feature is a function of events completed before `T_cut`, or
+> of an immutable identity, or of a source snapshot whose own timestamp is
+> `<= T_cut`.
+
+Permits: predictive-model training, calibration methodology, relative feature
+value, and — where a genuine market snapshot exists — economic backtest.
+
+### Lane L — Live / Enhanced
+
+Mutable near-game state that cannot be reconstructed without a genuine versioned
+snapshot: injuries, lineups, scratches, probable/confirmed pitchers, bullpen
+availability, late transactions, live weather forecast where no archive exists.
+
+Lane L is **forward-collected only**. Its availability evidence is intrinsic —
+the row was received before the cutoff by construction, exactly today's strict
+contract. Lane-L availability is never backfilled from final state.
+
+The lanes are physically separated per `RECONSTRUCTED_CORPUS_PROVENANCE.md` §3:
+separate corpora, no silent union, manifest records the lane. **The existing
+strict builder is not weakened** — Lane R gets its own builder.
+
+## 4. Availability-evidence taxonomy
+
+| Class | Definition | Retrospective? |
+|---|---|---|
+| **STATIC_IDENTITY** | immutable provider-id ↔ canonical-entity relation | **yes**, under §5 |
+| **EVENT_DERIVED** | statistic computed solely from events completed before `T_cut` | **yes**, under §7 |
+| **VERSIONED_HISTORICAL** | source supplies real timestamped snapshots/quotes | **yes**, timestamp is the evidence |
+| **FORWARD_ONLY** | no trustworthy retrospective availability evidence | **no** — Lane L |
+| **LABEL_ONLY** | known only after the event; permitted solely as target `y` | label only |
+
+## 5. Static identity contract
+
+A stable official provider ID may map to a canonical entity even though the
+matcher ran later, **iff all hold**:
+
+1. the provider is the league's **designated official** source for that entity
+   type (`OFFICIAL_PROVIDER_BY_LEAGUE`);
+2. the stable ID appears **directly in the historical source row** being used;
+3. the crosswalk uses **no outcome- or future-sensitive information** — stable ID
+   equality only, never name similarity, never a later roster/statistic;
+4. no ambiguous provider-ID collision exists for that ID;
+5. provenance records the **real** curation time honestly.
+
+Justification: "MLB `gamePk` 822728 is this game" is a timeless proposition that
+cannot encode the outcome. Admitting it retrospectively leaks nothing.
+
+**In Lane R, static crosswalks are not time-gated** — a timeless fact has no
+knowledge-time. In Lane L they remain gated exactly as today.
+
+`decided_at` stays **audit time** and is not reused as effective identity time. A
+static crosswalk needs a distinct class marker, not a backdated decision. This is
+a genuine relaxation and must be independently reviewed on its own merits — it is
+explicitly **not** justified by coverage, and by itself it does **not** unblock
+F1 (the schedule gate is independent of identity).
+
+## 6. Target-game anchoring
+
+The Lane-R replacement for "Moneymaker saw the schedule before tip-off" is a
+**genuine historical market snapshot**:
+
+A game enters the Lane-R backtest set iff:
+
+* a historical sportsbook/exchange market existed for the exact event;
+* the **snapshot timestamp is `<= T_cut`**;
+* the quote event maps unambiguously to the official game (via §5);
+* the scheduled start is represented consistently between quote and schedule;
+* the event had **not already started** at quote time.
+
+This proves the matchup existed and was tradeable at the simulated cutoff — much
+stronger evidence than local acquisition time, and it is the *market's* own
+timestamp, not ours.
+
+**Applies to Lane R only. The Lane-L schedule gate is unchanged.**
+
+Where no market snapshot exists, the game may still be **training-eligible**
+(§10) if its features are EVENT_DERIVED/STATIC_IDENTITY and the label is settled,
+but it is **not** economic-backtest eligible. These gates never collapse.
+
+## 7. Event-derived feature contract
+
+The core route to a deep historical corpus without waiting years.
+
+Rules:
+
+1. Enumerate source games **strictly before** `T_cut` for the entity.
+2. Each source game must be **final**.
+3. Apply an explicit **availability lag** `L` after source-game completion before
+   its statistics may be used (§8).
+4. **Derive rolling statistics ourselves from per-game rows.** Never consume a
+   season-to-date aggregate returned by an endpoint — such an aggregate may
+   silently include the target game or later games. This is a hard prohibition.
+5. Never include any target-game statistic.
+6. The input set must be **formally bounded** and recorded in the manifest.
+
+Eligible: rolling win/loss, run/point differential, offensive/defensive rates,
+pace/possessions, opponent-adjusted metrics, Elo, rest days, days since previous
+game, schedule density, home/away, prior-game boxscore and play-derived
+aggregates, pitcher/batter and player rolling statistics.
+
+## 8. Corrections and hindsight — the honest gap
+
+**Measured:** in both retrospective corpora, every game has **exactly one** result
+version (NBA 239 rows / 239 anchors; MLB 400 / 400; zero anchors with multiple
+versions). A retrospective fetch captured only the **current, possibly already
+corrected** value.
+
+Therefore: **the value a prior game's statistics held at an earlier `T_cut` cannot
+be reconstructed from this corpus.** If a prior game's record was corrected after
+the target's cutoff, using today's corrected value is genuine hindsight leakage,
+and the corpus contains no evidence to detect or undo it.
+
+Policy (conservative, and explicitly a limitation rather than a solution):
+
+* Apply an availability lag `L` after source-game completion (proposal: **L = 24 h**
+  for MLB/NBA box scores) before a source game's statistics are usable, absorbing
+  the common same-night stat-correction window.
+* Run a **mandatory sensitivity analysis** across `L ∈ {0, 6 h, 24 h, 72 h}` and
+  report how conclusions move. A result that only survives at `L = 0` is not a
+  result.
+* **Forward Lane-L collection must measure the real correction rate and latency
+  distribution.** Until then the residual is bounded by assumption, not by
+  evidence — this must be stated in every claim built on Lane R.
+* Where a family's correction behaviour proves material and unmeasurable, exclude
+  it from Lane R rather than model around it.
+
+## 9. Source findings (official documentation; **no provider API request was made**)
+
+### The Odds API — historical odds **(verified)**
+* Endpoints: `/v4/historical/sports/{sport}/odds`,
+  `/v4/historical/sports/{sport}/events/{eventId}/odds`,
+  `/v4/historical/sports/{sport}/events`.
+* Depth: **from 2020-06-06**. Snapshots **10-minute** intervals before
+  2022-09-18, **5-minute** from then on.
+* `date` returns **the closest snapshot at or earlier than** the requested
+  timestamp — precisely the `<= T_cut` semantic §6 needs.
+* Cost: historical is **10× normal**, `10 × markets × regions` per request.
+* `h2h` (moneyline) available throughout the archive.
+* Caveat: before 2022-09-18 only **decimal** odds were captured; American odds are
+  derived and may carry rounding error.
+* No stated retention/licensing restriction on the page reviewed.
+
+**Estimated request/credit budget** (h2h only, one region, one snapshot per
+distinct game-start-time per day; the snapshot endpoint returns all events at that
+instant, so cost scales with distinct start times, not with games):
+
+| Scope | Est. requests | Est. credits (×10) |
+|---|---|---|
+| One month proof (MLB + NBA) | ~710 | **~7,100** |
+| One MLB season (~15 start-times/day × ~186 d) | ~2,790 | ~27,900 |
+| One NBA season (~8 × ~170 d) | ~1,360 | ~13,600 |
+| One combined season | ~4,150 | **~41,500** |
+| Three seasons | ~12,450 | **~124,500** |
+| Five seasons | ~20,750 | **~207,500** |
+
+Estimates, not quotes — derived from the documented 10× rule and typical schedule
+density. The per-event endpoint would be far costlier and is not the plan. Five
+seasons back from 2026 (2021–2025) sits entirely inside the 2020-06-06 archive.
+
+### Kalshi — historical **(partially verified)**
+* Dedicated historical tier:
+  `/trade-api/v2/historical/markets/{ticker}/candlesticks`.
+* `period_interval` ∈ **1 / 60 / 1440 minutes** — 1-minute granularity is ample
+  for T−60 anchoring.
+* Fields: `yes_bid`, `yes_ask`, `price {open, high, low, close}`, `volume`,
+  `open_interest`.
+* **Top-of-book and last-trade only — historical orderbook depth is NOT
+  reconstructable.** Depth-dependent execution modelling is out of scope.
+* **UNVERIFIED:** retention depth, exact timestamp semantics, rate limits,
+  authentication for historical reads, and from what date single-game MLB/NBA
+  markets exist. **Open gate G2.**
+
+### Open-Meteo — historical weather **(verified, with a critical distinction)**
+* **Historical Forecast API stitches the first hours of successive runs** into a
+  continuous timeline. That is near-nowcast quality — it is **NOT** the forecast
+  as it stood 60 minutes before a game, and using it as a pregame feature would be
+  close to using observed weather. **Prohibited as a pregame feature.**
+* A genuine archived pregame forecast requires:
+  * **Previous Runs API** — fixed lead-time offsets (1–7 days), from **Jan 2024**
+    (GFS from **Mar 2021**, JMA from 2018); or
+  * **Single Runs API** — full horizon for a specific initialization via `run=`,
+    ECMWF IFS HRES from **Mar 2024**, others from Apr 2026.
+* Variables available: temperature, wind speed/direction/gusts, precipitation,
+  visibility.
+* Consequence: defensible pregame weather is available roughly **2021+ (GFS)** or
+  **2024+ (ECMWF)** — shallower than the odds archive. Weather is therefore an
+  **optional** Lane-R family with an explicit missingness flag on older seasons,
+  never imputed.
+
+### Sportradar / SportsDataIO — alternatives **(not evaluated in depth)**
+Pricing and change-log/versioning guarantees are not publicly documented and
+require sales contact. **Recommendation: do not engage now.** Only reconsider if a
+core-model experiment demonstrates that a FORWARD_ONLY family is likely worth the
+cost. Default is to minimize new paid providers.
+
+## 10. Three eligibility gates — never collapsed
+
+| Gate | Requires |
+|---|---|
+| **Training** | label settled; every feature STATIC_IDENTITY / EVENT_DERIVED / VERSIONED_HISTORICAL with `effective_at <= T_cut`; no target-game statistics |
+| **Calibration / validation** | training requirements **plus** a fixed chronological split (no shuffling, no future folds) |
+| **Economic backtest** | calibration requirements **plus** a genuine market snapshot at `<= T_cut` (§6), and prices that are not closing prices |
+
+A game may be training-eligible but backtest-ineligible. That asymmetry is
+expected and must be reported, not hidden by dropping rows.
+
+## 11. Proposed schema semantics (design only — no migration authorized)
+
+Minimum additions, in **separate** columns/tables so they can never be confused
+with `observed_at`, extending `RECONSTRUCTED_CORPUS_PROVENANCE.md` §2:
+
+* `provenance_class` — `strict_forward_pit | reconstructed_research | label_only_retrospective`
+* `effective_at` — the derived availability instant (Lane R only)
+* `availability_basis` — `static_identity | event_derived | versioned_snapshot`
+* `availability_source` — pointer to the documenting evidence
+* `availability_confidence` — ordinal, with documented criteria
+* `source_event_completed_at` — for EVENT_DERIVED, the bounding completion instant
+* `availability_rule_id` + `reconstruction_policy_version`
+
+Do **not** add anything derivable reproducibly from these. Do **not** mutate
+historical `observed_at`. Do **not** overload `decided_at`. Any migration is a
+separate, independently reviewed change — a schema bump to v18 would be required
+and must not be bundled with a builder.
+
+## 12. Reader / API architecture
+
+Two readers sharing one leakage contract, differing only in admissible evidence:
+
+* `StrictForwardReader` — today's `AsOfReader`, unchanged. Evidence:
+  `observed_at`/`decided_at` only.
+* `RetrospectiveResearchReader` — admits `effective_at` from the taxonomy above.
+
+Requirements:
+
+* **No `ignore_pit=True`-style bypass anywhere.** Lane selection is a distinct
+  type, not a flag, so an unsafe read is a different object rather than an
+  argument.
+* A Lane-R reader must be unable to return a FORWARD_ONLY family at all.
+* Feature manifests record **lane, availability basis, cutoff, source version,
+  correction policy and sensitivity results**.
+* `provider_*_references` remain forbidden direct PIT inputs in both lanes.
+
+## 13. Open gates
+
+* **G1 — correction risk is bounded by assumption, not measurement.** No
+  correction history exists in either corpus (§8). Forward collection must
+  quantify it.
+* **G2 — Kalshi historical retention/timestamps/market inception unverified.**
+* **G3 — weather archive depth (2021 GFS / 2024 ECMWF) is shallower than the odds
+  archive**; older seasons carry explicit weather missingness.
+* **G4 — pre-2022-09-18 odds are decimal-derived**, with possible rounding error
+  in American prices.
+
+None blocks the core Lane-R design (identity + event-derived + odds anchoring +
+labels). All must be closed or explicitly accepted by the F1-R pilot.
+
+## 14. Revised F1 and F2
+
+**F1 keeps its value, with its scope stated honestly.** The month pilots proved
+provider depth, pagination, normalization, corrections, matching mechanics,
+endpoint completeness and request budgeting. They were never capable of proving
+historical feature availability and must not be asked to.
+
+**F1-R (new, bounded, not executed here):** a retrospective-reconstruction pilot
+over a short bounded period proving, end to end: Lane-R target anchoring from real
+market snapshots; static identity; event-derived construction from prior games
+only; archived-forecast availability; **zero future leakage**; reproducibility;
+and the §8 sensitivity analysis.
+
+**F2 redefined:** build the historical **Lane-R core corpus** — minimum three
+seasons, target five — **only after F1-R passes**. F2 is no longer "backfill every
+rich family"; families without retrospective availability evidence are out of
+scope by construction.
+
+**Forward Lane-L collection should begin as soon as the architecture is
+implemented**, in parallel and non-blocking, to accumulate true pregame schedules,
+injuries, lineups, probable pitchers, forecasts and market state — and to measure
+the G1 correction rate.
+
+## 15. Model roadmap
+
+1. **Core model** — Lane-R features only. This is the required baseline and
+   remains champion until beaten.
+2. **Enhanced model** — Lane-L features added later, and only adopted if they show
+   **incremental out-of-sample value**. More features are not assumed better.
+
+## 16. Sequencing (phases, not dates)
+
+1. architecture independently reviewed and accepted
+2. F1-R bounded reconstruction pilot
+3. Lane-R historical corpus (3→5 seasons)
+4. feature engineering against the contract
+5. baseline training
+6. calibration
+7. economic backtest (market-anchored subset only)
+8. recommendation engine / UI
+9. live shadow + enhanced-feature evaluation
+
+**Historical core modeling does not require waiting years.** Steps 2–7 run on
+retrospective Lane-R data available now. Forward collection runs in parallel and
+gates only the *enhanced* model and profitability claims.
+
+## 17. Prohibited shortcuts
+
+* backdating `observed_at`, `decided_at` or review timestamps
+* treating stitched/observed weather as a pregame forecast
+* using endpoint season-to-date aggregates that may include the target game
+* closing prices as features
+* any future injury, lineup, roster or scratch information
+* later canonical curation treated as mutable pregame evidence
+* collapsing training and economic-backtest eligibility
+* unioning Lane R and Lane L corpora silently
+* imputing a missing family instead of flagging explicit missingness
+* any `ignore_pit` escape hatch
+
+## 18. Decision matrix
+
+Earliest defensible availability is relative to the target game's `T_cut`.
+
+### MLB
+
+| Feature family | Lane | Evidence type | Earliest defensible availability | Retrospective usable? | New provider? | Notes |
+|---|---|---|---|---|---|---|
+| Target schedule (anchor) | R | VERSIONED_HISTORICAL | odds snapshot `<= T_cut` | **yes** | no | replaces local schedule gate; Odds API from 2020-06-06 |
+| Static game/team/player identity | R | STATIC_IDENTITY | timeless | **yes** | no | stable `gamePk` / official ids only |
+| Prior results | R | EVENT_DERIVED | source completion + L | **yes** | no | labels of prior games |
+| Team rolling stats | R | EVENT_DERIVED | source completion + L | **yes** | no | self-derived, never season aggregates |
+| Pitcher rolling stats | R | EVENT_DERIVED | source completion + L | **yes** | no | same |
+| Batter rolling stats | R | EVENT_DERIVED | source completion + L | **yes** | no | same |
+| Rest / schedule density | R | EVENT_DERIVED | from prior schedule | **yes** | no | pure calendar arithmetic |
+| Rosters | L | FORWARD_ONLY | collection time | **no** | no | current state only |
+| Probable pitchers | L | FORWARD_ONLY | collection time | **no** | maybe later | historical probables not reconstructable |
+| Lineups | L | FORWARD_ONLY | collection time | **no** | maybe later | |
+| Bullpen usage | R (partial) | EVENT_DERIVED | prior-game appearances + L | **partly** | no | prior usage only; same-day availability is Lane L |
+| Weather forecast | R (optional) | VERSIONED_HISTORICAL | archived run `<= T_cut` | **partly** | no | GFS 2021+/ECMWF 2024+; stitched archive prohibited |
+| Sportsbook moneyline | R | VERSIONED_HISTORICAL | snapshot `<= T_cut` | **yes** | no | 2020-06-06+, 5–10 min |
+| Kalshi market | R | VERSIONED_HISTORICAL | candlestick `<= T_cut` | **likely** | no | 1-min candles; depth **not** reconstructable; G2 |
+| Final result | — | LABEL_ONLY | after game | label only | no | never a feature |
+
+### NBA
+
+| Feature family | Lane | Evidence type | Earliest defensible availability | Retrospective usable? | New provider? | Notes |
+|---|---|---|---|---|---|---|
+| Target schedule (anchor) | R | VERSIONED_HISTORICAL | odds snapshot `<= T_cut` | **yes** | no | as MLB |
+| Static game/team/player identity | R | STATIC_IDENTITY | timeless | **yes** | no | BALLDONTLIE stable ids |
+| Prior results | R | EVENT_DERIVED | source completion + L | **yes** | no | |
+| Team rolling stats | R | EVENT_DERIVED | source completion + L | **yes** | no | self-derived |
+| Player rolling stats | R | EVENT_DERIVED | source completion + L | **yes** | no | |
+| Advanced rolling stats | R | EVENT_DERIVED | source completion + L | **yes** | no | from prior games only |
+| Plays-derived stats | R | EVENT_DERIVED | source completion + L | **yes** | no | 114,738 plays already validated |
+| Rest / schedule density | R | EVENT_DERIVED | prior schedule | **yes** | no | back-to-backs explicit |
+| Lineups / starters | **L** | FORWARD_ONLY | collection time | **no** | option B later | the merged March lineups are **August-observed**; never pregame features |
+| Injuries | L | FORWARD_ONLY | collection time | **no** | option B later | |
+| Rosters / active players | L | FORWARD_ONLY | collection time | **no** | no | |
+| Sportsbook moneyline | R | VERSIONED_HISTORICAL | snapshot `<= T_cut` | **yes** | no | |
+| Kalshi market | R | VERSIONED_HISTORICAL | candlestick `<= T_cut` | **likely** | no | G2 |
+| Final result | — | LABEL_ONLY | after game | label only | no | |
+
+**NBA rich pregame state resolves to (A) Lane-L forward-only**, with (B) a
+versioned historical provider as a later option **only** if a core-model
+experiment shows the family is likely worth the cost. The protected merged March
+lineup corpus keeps its provider-depth value and is **never** a pregame feature.
+
+## 19. Scientific standard — how this design satisfies it
+
+| Requirement | Mechanism |
+|---|---|
+| No target outcome leakage | LABEL_ONLY isolation; label surface split preserved |
+| No same-game final stats in features | EVENT_DERIVED §7 rule 5 |
+| No closing prices as features | snapshot must be `<= T_cut`; closing prices prohibited (§17) |
+| No future injury/lineup information | those families are FORWARD_ONLY |
+| No postgame weather as forecast | stitched/observed archive prohibited; only Previous/Single Runs |
+| No later curation as mutable evidence | static identity limited to immutable ids; everything else gated |
+| No fabricated timestamps | `effective_at` derived from documented rules; `observed_at` untouched |
+| Chronological splits | calibration gate §10 |
+| Reproducible eligibility | manifest records lane, basis, cutoff, versions, policy |
+| Explicit missingness | families flagged missing, never imputed |
+
+## 20. Validation
+
+Design/documentation only; **zero source files changed**.
+
+```
+git diff --check                     clean
+ruff check .                         All checks passed
+mypy . --no-incremental              Success: no issues found in 310 source files
+pytest -q                            2386 passed, 2 skipped, 0 failed (494 s)
+schema init x2 / v16->v17 x2         v17, 17 migration rows, integrity ok, idempotent
+protected artefacts                  7/7 byte-identical
+documentation consistency            no stale "not yet independently reviewed" claims;
+                                     blocker preserved alongside the replacement
+staged / forbidden-artifact audit    4 files, all documentation; no db, ckpt, raw
+                                     response, log, wheel, env or graphify output
+provider API requests                NONE (official documentation was read only)
+```
+
+---
+
+## Verdict
+
+**ARCHITECTURE READY FOR INDEPENDENT REVIEW.**
+
+The Lane-R / Lane-L split solves the blocker without fabricating availability. The
+core retrospective corpus — static identity, event-derived features, market-anchored
+targets and settled labels — rests on verified provider evidence (Odds API historical
+from 2020-06-06 with `<= T_cut` snapshot semantics) and on the repository's own
+measured behaviour. Historical core modeling can therefore proceed **now**, without
+waiting years, while forward Lane-L collection accumulates in parallel.
+
+Four open gates (§13) remain and must be closed or explicitly accepted by the F1-R
+pilot. The largest is **G1**: correction risk is currently bounded by a conservative
+lag and sensitivity analysis rather than by measurement, because neither corpus
+contains any correction history.
+
+Nothing here is authorized for implementation. No provider request was made, no
+protected corpus was touched, no timestamp was backdated, and production matching
+and F2 backfill remain unauthorized.

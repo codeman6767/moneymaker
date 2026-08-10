@@ -2,7 +2,10 @@
 
 **Status: DESIGN ONLY.** Nothing here is implemented. No reconstructed rows, no
 migration, and no change to the strict E1/E2 point-in-time (PIT) dataset builder
-are produced by F1A. Schema remains **v16**. This document specifies the
+are produced by F1A. Schema remains **v17** (this line read v16 when written; the
+repository has since migrated and no reconstructed row exists yet). This document is
+extended by `HISTORICAL_RESEARCH_PIT_ARCHITECTURE.md`, whose Lane R / Lane L /
+LABEL_ONLY classes map onto the three provenance classes below. It specifies the
 provenance model a *future*, separately-reviewed subphase (F2) must satisfy
 before any reconstructed data exists. It exists so the distinction between strict
 PIT data and reconstructed research data can never blur.

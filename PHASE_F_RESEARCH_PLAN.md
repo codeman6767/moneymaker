@@ -26,6 +26,35 @@
 > pagination, correction handling and matching mechanics are all validated. What
 > retrospective data cannot supply is pregame features. Resolving the architecture
 > (see the review's options A–D) is the prerequisite for any further F1/F2 step.
+>
+> **REPLACEMENT ARCHITECTURE PROPOSED (2026-08-10, design only, NOT authorized):**
+> `HISTORICAL_RESEARCH_PIT_ARCHITECTURE.md` — verdict **ARCHITECTURE READY FOR
+> INDEPENDENT REVIEW**. It replaces the blocked F1/F2 assumptions with:
+>
+> * a **four-clock model** (`ingested_at` / fact time / `effective_at` / decision
+>   cutoff); `observed_at` and `decided_at` keep their meanings and are never backdated;
+> * **Lane R** (retrospective core: static identity, event-derived features,
+>   market-anchored targets, settled labels) and **Lane L** (forward-only mutable
+>   pregame state), physically separated per `RECONSTRUCTED_CORPUS_PROVENANCE.md`;
+> * **market-snapshot target anchoring** replacing the local-acquisition schedule
+>   gate for Lane R only (The Odds API historical, verified: archive from 2020-06-06,
+>   5-10 minute snapshots, `date` returns the closest snapshot at or before the
+>   requested instant);
+> * **three separate eligibility gates** — training, calibration, economic backtest —
+>   that never collapse.
+>
+> **Revised F1/F2.** F1 keeps its proven value (provider depth, pagination,
+> normalization, corrections, matching mechanics, request budgets) and is no longer
+> asked to prove historical feature availability it never captured. A new bounded
+> **F1-R reconstruction pilot** must pass first. **F2 is redefined** as building the
+> Lane-R core corpus (minimum three seasons, target five), not backfilling every rich
+> family: lineups, injuries, rosters and probable pitchers are **forward-only** and
+> are excluded from retrospective features.
+>
+> **Still not authorized:** implementation, production F1 matching, F1-R execution,
+> F2 backfill and modeling. Four open gates remain (architecture doc §13), the largest
+> being that correction risk is bounded by assumption rather than measurement —
+> neither corpus contains any correction history.
 
 **Status:** F0 planning complete **and independently reviewed** (see §R). **F1A
 (request/credit safety controls) is complete and independently reviewed.** **The
