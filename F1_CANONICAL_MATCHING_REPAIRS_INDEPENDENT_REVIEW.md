@@ -250,7 +250,10 @@ suite above, which CI also runs.
 - **NBA PIT labels remain 0/239** in the unchanged protected corpus.
 - **Historical March NBA lineups remain unavailable at March pregame cutoffs**;
   nothing here weakened a point-in-time rule to gain coverage.
-- **Next step:** a separately authorized production matching run on protected
-  copies/corpora under the established matching protocol.
+- **Next step is NO LONGER a production matching run.** `F1_HISTORICAL_PIT_FEASIBILITY_REVIEW.md` (2026-08-10) proves the historical
+  dataset yields 0 rows regardless of matching quality, because 100% of games in
+  both corpora fail the pregame-schedule gate. The matcher repairs remain correct
+  and useful; they simply are not the binding constraint. Resolve the PIT
+  architecture before authorizing any acceptance run.
 - **The combined F1 review has not begun. F1 remains incomplete. F2 remains
   unauthorized.**

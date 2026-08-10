@@ -1,5 +1,32 @@
 # Phase F — Research & Recommendation Plan (authoritative)
 
+> ## ⛔ ARCHITECTURAL BLOCKER (2026-08-10) — read before authorizing anything
+>
+> `F1_HISTORICAL_PIT_FEASIBILITY_REVIEW.md` proves, from both real corpora, that
+> **retrospective API backfill cannot produce historical pregame rows** under the
+> present contract:
+>
+> * **239/239 NBA and 400/400 MLB games** had their earliest schedule observation
+>   AFTER the scheduled start, so `_feature_cutoff` fails closed for every game.
+> * Bounded matching on backup copies succeeded completely (15/15 NBA, 24/24 MLB
+>   canonical games with accepted decisions) and `build_historical_dataset` still
+>   returned **0 rows** — **every** exclusion was the schedule gate, not identity.
+> * `decided_at` is matcher wall-clock time, so a March game matched today is
+>   invisible at any March cutoff — a second, independent failure.
+>
+> Consequently:
+>
+> * **Do NOT run production F1 matching as an acceptance run.** It cannot move the
+>   dataset off zero.
+> * **Do NOT begin F2 backfill or modeling** on this basis.
+> * The **≥99% PIT identity/label gate is unattainable from retrospective backfill**
+>   and must be rescoped before it can be used as an acceptance criterion.
+>
+> The provider-depth work is **not** invalidated: ingestion, normalization,
+> pagination, correction handling and matching mechanics are all validated. What
+> retrospective data cannot supply is pregame features. Resolving the architecture
+> (see the review's options A–D) is the prerequisite for any further F1/F2 step.
+
 **Status:** F0 planning complete **and independently reviewed** (see §R). **F1A
 (request/credit safety controls) is complete and independently reviewed.** **The
 F1B *skeleton* pilots for MLB and NBA have now EXECUTED successfully and have been
