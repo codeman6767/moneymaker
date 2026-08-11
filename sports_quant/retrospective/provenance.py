@@ -28,7 +28,7 @@ from __future__ import annotations
 import enum
 import hashlib
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Final, Mapping
 
 from streaming.event_envelope import canonical_json
 
@@ -288,7 +288,18 @@ def canonical_detail_json(payload: Mapping[str, Any]) -> str:
             for index, item in enumerate(value):
                 check(item, f"{path}[{index}]")
             return
-        if value is None or isinstance(value, (bool, int, float, enum.Enum)):
+        if value is None or isinstance(value, (bool, int, enum.Enum)):
+            return
+        if isinstance(value, float):
+            # NaN/Infinity are not JSON. ``canonical_json`` would emit the bare
+            # tokens ``NaN``/``Infinity``, which a strict RFC-8259 parser rejects
+            # -- so the stored detail, and the digest over it, would not be
+            # readable by anything but Python.
+            if value != value or value in (float("inf"), float("-inf")):
+                raise RetrospectiveProvenanceError(
+                    f"finding detail {path} is {value!r}, which is not representable "
+                    "in JSON; provenance must be readable outside this process"
+                )
             return
         if isinstance(value, str):
             # A long free-text blob is how a raw body gets in by accident.
@@ -297,6 +308,7 @@ def canonical_detail_json(payload: Mapping[str, Any]) -> str:
                     f"finding detail {path} is {len(value)} characters; findings carry "
                     "stable codes and digests, never provider bodies"
                 )
+            _refuse_secret_shaped(value, path)
             return
         raise RetrospectiveProvenanceError(
             f"finding detail {path} has unsupported type {type(value).__name__}"
@@ -309,6 +321,42 @@ def canonical_detail_json(payload: Mapping[str, Any]) -> str:
 #: Long enough for a code, a digest or a short structured note; far too short
 #: for a provider payload.
 _MAX_DETAIL_STRING = 200
+
+#: Shapes that must never reach a provenance record. The review found that a
+#: short credential slipped straight through the length bound: an API key is
+#: ~40 characters, well under the blob threshold. These are conservative
+#: prefixes/markers rather than entropy heuristics, so a false positive is a
+#: sentence telling the caller to store a digest instead -- never a silent pass.
+_SECRET_MARKERS: Final[tuple[str, ...]] = (
+    "sk_live_", "sk_test_", "pk_live_", "rk_live_",
+    "bearer ", "basic ", "authorization:", "x-api-key",
+    "api_key=", "apikey=", "access_token=", "token=", "password=", "secret=",
+    "aws_secret", "aws_access_key", "private_key", "-----begin",
+    "eyj",  # a base64url-encoded JWT header always starts {"alg...
+)
+
+
+def _refuse_secret_shaped(value: str, path: str) -> None:
+    """Refuse a string that looks like a credential or a URL carrying one.
+
+    A finding is meant to hold a stable code plus a digest. Nothing about a
+    provenance record needs a token in it, so the safe default is to refuse
+    anything credential-shaped rather than to store it and hope.
+    """
+
+    lowered = value.lower()
+    for marker in _SECRET_MARKERS:
+        if marker in lowered:
+            raise RetrospectiveProvenanceError(
+                f"finding detail {path} contains a credential-shaped value "
+                f"({marker!r}); findings carry stable codes and digests. Store a "
+                "hash of the value if you need to correlate it."
+            )
+    if "://" in lowered and ("?" in lowered or "@" in lowered):
+        raise RetrospectiveProvenanceError(
+            f"finding detail {path} is a URL carrying a query string or userinfo; "
+            "these routinely embed credentials. Store a stable citation key instead."
+        )
 
 
 def detail_digest(payload: Mapping[str, Any]) -> str:

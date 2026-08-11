@@ -29,6 +29,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any, Optional
 
+from ...retrospective.evidence import require_source_evidence_table
 from ...retrospective.provenance import (
     AuditVerdict,
     AvailabilityBasis,
@@ -332,6 +333,30 @@ class SqliteRetrospectiveProvenanceRepository(Repository):
         duplicate unsanitized content into a table that gets read for reporting.
         """
 
+        parent = self.identity_audit(identity_audit_id)
+        if parent is None:
+            raise RepositoryError(
+                f"unknown identity audit {identity_audit_id!r}; a finding cannot "
+                "belong to an audit that does not exist"
+            )
+        # An ACCEPTED audit is a completed statement that the namespace is clean
+        # over its corpus. It may carry flags; it may not later be handed a
+        # finding asserting the opposite of its own verdict, because crosswalks
+        # already built from it would silently keep their authority.
+        contradicts = (
+            severity is FindingSeverity.BLOCKING
+            or classification in (FindingClassification.IDENTITY_COLLISION,
+                                  FindingClassification.NAMESPACE_UNVERIFIED)
+            or exclusion_scope is not ExclusionScope.NONE
+        )
+        if contradicts and parent.verdict == AuditVerdict.ACCEPTED.value:
+            raise ProvenanceConflictError(
+                f"identity audit {identity_audit_id!r} is ACCEPTED with "
+                f"{parent.collision_count} collisions; refusing to append a "
+                f"{classification.value}/{severity.value} finding that contradicts "
+                "it. Record a NEW audit over the corpus -- accepted evidence is "
+                "never rewritten."
+            )
         detail_payload = dict(detail or {})
         detail_text = canonical_detail_json(detail_payload)
         digest = detail_digest(detail_payload)
@@ -409,6 +434,23 @@ class SqliteRetrospectiveProvenanceRepository(Repository):
             raise RepositoryError(
                 f"identity audit {identity_audit_id!r} has verdict {audit.verdict!r}; "
                 "only an accepted audit clears a namespace for crosswalk use"
+            )
+        corpus = self.corpus_version(corpus_version_id)
+        if corpus is None:
+            raise RepositoryError(
+                f"unknown corpus version {corpus_version_id!r}; a crosswalk cannot "
+                "belong to a reconstruction that does not exist"
+            )
+        # The defect the independent review of f018 proved: without this, a clean
+        # ONE-MONTH audit could vouch for a five-season corpus. G5 §16 -- a
+        # narrower window's pass never transfers to a wider one.
+        if audit.source_corpus_digest != corpus.source_corpus_digest:
+            raise RepositoryError(
+                f"identity audit {identity_audit_id!r} examined source corpus "
+                f"{audit.source_corpus_digest!r}, but corpus version "
+                f"{corpus_version_id!r} is built over "
+                f"{corpus.source_corpus_digest!r}. An audit is only ever a statement "
+                "about the evidence it actually read; re-run it over this corpus."
             )
         if (audit.league_id, audit.provider, audit.namespace_generation,
                 audit.entity_type) != (namespace.league_id, namespace.provider,
@@ -552,6 +594,12 @@ class SqliteRetrospectiveProvenanceRepository(Repository):
             )
 
         rule_digest = self._resolve_rule_digest(availability_basis, availability_rule_id)
+        self._check_evidence_pointer(
+            eligibility, availability_basis,
+            source_evidence_table=source_evidence_table,
+            source_evidence_id=source_evidence_id,
+            availability_source=availability_source,
+        )
         self._check_basis_shape(
             availability_basis, crosswalk_id=crosswalk_id,
             source_event_completed_at=source_event_completed_at,
@@ -691,6 +739,55 @@ class SqliteRetrospectiveProvenanceRepository(Repository):
         # stored digest is re-verified on READ (``derive_availability_instant``),
         # which is where a later edit to the rule must fail closed.
         return lookup_rule(rule_id).digest
+
+    def _check_evidence_pointer(
+        self,
+        eligibility: EligibilityVerdict,
+        basis: Optional[AvailabilityBasis],
+        *,
+        source_evidence_table: Optional[str],
+        source_evidence_id: Optional[str],
+        availability_source: Optional[str],
+    ) -> None:
+        """Traceability, proven rather than asserted (f019 D3/D4).
+
+        An EXCLUDED row is exempt: "not admissible" is often precisely a statement
+        that the evidence does not exist, and demanding a pointer to absent
+        evidence would force a fabricated one.
+        """
+
+        if source_evidence_table is not None:
+            id_column = require_source_evidence_table(source_evidence_table)
+            if source_evidence_id is not None:
+                # The table name came from a fixed allowlist, never from a caller
+                # string, so interpolating it here cannot be an injection.
+                row = self._fetch_one(
+                    f"SELECT 1 FROM {source_evidence_table} "  # noqa: S608
+                    f"WHERE {id_column} = ?",
+                    (source_evidence_id,),
+                )
+                if row is None:
+                    raise RepositoryError(
+                        f"source evidence {source_evidence_table}.{id_column} = "
+                        f"{source_evidence_id!r} does not exist; a provenance pointer "
+                        "that resolves to nothing is not provenance"
+                    )
+        if eligibility is not EligibilityVerdict.ELIGIBLE:
+            return
+        if basis is not AvailabilityBasis.STATIC_IDENTITY and source_evidence_id is None:
+            raise RepositoryError(
+                "an eligible reconstructed input must cite preserved source evidence; "
+                "a completion timestamp or a provider snapshot stamp is evidence about "
+                "AVAILABILITY, not proof that the source data exists"
+            )
+        if basis in (AvailabilityBasis.EVENT_DERIVED,
+                     AvailabilityBasis.VERSIONED_SNAPSHOT) and not (
+                availability_source or "").strip():
+            raise RepositoryError(
+                f"an eligible {basis.value} input must name the evidence documenting "
+                "its availability claim; a stated lag or a snapshot cadence without a "
+                "documented basis is an unsupported assertion"
+            )
 
     @staticmethod
     def _check_basis_shape(

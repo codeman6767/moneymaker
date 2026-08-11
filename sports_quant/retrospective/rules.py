@@ -36,7 +36,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Final, Mapping
 
-from ..db.schema import from_iso, to_iso
 from .provenance import RetrospectiveProvenanceError, semantic_digest
 
 __all__ = [
@@ -105,6 +104,13 @@ class AvailabilityRule:
 
     def availability_instant(self, source_event_completed_at: str) -> datetime:
         """Derive -- never store -- the instant this fact became knowable."""
+
+        # Imported lazily. ``sports_quant.db.schema`` cannot be imported at module
+        # scope here: it initializes the whole ``sports_quant.db`` package, whose
+        # repositories import this one back, so `import sports_quant.retrospective`
+        # as a process's FIRST import raised ImportError. Every existing test
+        # masked it by importing ``sports_quant.db`` first.
+        from ..db.schema import from_iso
 
         return from_iso(source_event_completed_at) + timedelta(seconds=self.lag_seconds)
 
@@ -183,6 +189,8 @@ def derive_availability_instant(
     source of truth that goes stale the moment the rule changes, and it is
     exactly the column a future bug would quietly backdate.
     """
+
+    from ..db.schema import to_iso  # lazy: see AvailabilityRule.availability_instant
 
     rule = verify_rule_digest(rule_id, rule_digest)
     return to_iso(rule.availability_instant(source_event_completed_at))

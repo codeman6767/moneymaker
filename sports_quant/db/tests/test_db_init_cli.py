@@ -57,7 +57,8 @@ def test_first_run_creates_migrates_and_seeds(db_path: Path) -> None:
     assert "applied migration 016 d016_kalshi_matching" in output
     assert "applied migration 017 e017_provider_identity" in output
     assert "applied migration 018 f018_retrospective_provenance" in output
-    assert "Schema version: 18" in output
+    assert "applied migration 019 f019_retrospective_provenance_repairs" in output
+    assert "Schema version: 19" in output
     assert "MLB: 30 teams (30 new)" in output
     assert "NBA: 30 teams (30 new)" in output
 

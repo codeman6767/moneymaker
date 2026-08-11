@@ -1,10 +1,23 @@
-# Retrospective PIT provenance foundation — schema v18 (f018)
+# Retrospective PIT provenance foundation — schema v18 (f018), repaired to v19 (f019)
 
 Implementation of the schema and repository foundation authorized by the
 independently reviewed retrospective PIT architecture at `f881916`.
 
-**Not yet independently reviewed.** This document describes what was built and
-why; it is not an acceptance. The reader, the identity-audit engine, historical
+**Reviewed 2026-08-11 — ACCEPTED WITH REPAIRS; the foundation is now schema v19.**
+`RETROSPECTIVE_PIT_SCHEMA_V18_INDEPENDENT_REVIEW.md` is **authoritative where it
+differs from this document**. Eight defects were proven and repaired via migration
+`f019`; `f018` is preserved byte-for-byte. In particular, two claims made below were
+too strong at v18 and are corrected by that review:
+
+* a static crosswalk could cite an ACCEPTED audit taken over a **different source
+  corpus**, so §4's "keyed on the exact source digest, so a clean one-month audit
+  cannot be presented as covering a five-season window" held for the *audit lookup*
+  but **not** for the crosswalk that consumed it;
+* an ELIGIBLE reconstructed input needed **no source-evidence pointer at all**, and
+  `source_evidence_table` accepted any string — so §4's "traceable without
+  duplicating the evidence" was aspirational rather than enforced.
+
+This document otherwise describes what was built and why; it is not an acceptance. The reader, the identity-audit engine, historical
 market anchoring, F1-R, F2, production matching and model training all remain
 unimplemented and unauthorized.
 
@@ -317,6 +330,16 @@ affect any preserved evidence, all of which is already at v17 and still matches.
 declaring 17: changing it would change the committed manifest's hash, which is
 recorded in the preserved checkpoint. The affected test fixture overrides the
 version locally, for the same reason it already overrides target counts.
+
+## 10b. CI history (do not erase)
+
+The first push of this foundation (`31f78e2`) **failed CI run #91**: the
+wheel-smoke job pins the migration count and schema version inline in
+`.github/workflows/ci.yml`, and the pre-commit scan for hard-coded `17`s covered
+Python files only, so four assertions were missed. `4d4ae13` corrected them —
+CI-only, no product change — and CI #92 was green on both jobs. The independent
+review's repairs bumped the same assertions again to 19, verified locally against a
+real built wheel and a clean non-editable install **before** pushing.
 
 ## 11. What remains unimplemented
 

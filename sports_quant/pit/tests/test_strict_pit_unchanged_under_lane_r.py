@@ -54,7 +54,7 @@ from sports_quant.retrospective import (
 
 from .conftest import CUTOFF, T1, Ctx, seed_lineup
 
-F018_TABLES = (
+LANE_R_TABLES = (
     "reconstruction_corpus_versions",
     "identity_audit_records",
     "identity_audit_findings",
@@ -86,7 +86,7 @@ def test_registry_still_exactly_covers_the_live_schema(db_path: Path) -> None:
     assert len(registered_tables()) == len(set(registered_tables()))
 
 
-@pytest.mark.parametrize("table", F018_TABLES)
+@pytest.mark.parametrize("table", LANE_R_TABLES)
 def test_v18_provenance_tables_are_unsupported_joins(table: str) -> None:
     """Lane-R provenance is not reachable from a Lane-L dataset row."""
 
@@ -102,14 +102,14 @@ def test_v18_provenance_tables_are_unsupported_joins(table: str) -> None:
 def test_no_v18_table_became_asof_or_immutable() -> None:
     """A v18 table classified as as-of would be a new feature-facing surface."""
 
-    for table in F018_TABLES:
+    for table in LANE_R_TABLES:
         assert classify(table).classification not in (
             TableClass.ASOF_FILTERED, TableClass.IMMUTABLE, TableClass.SEASON_SCOPED)
 
 
-def test_schema_is_at_v18(db_path: Path) -> None:
+def test_schema_is_at_the_current_version(db_path: Path) -> None:
     result = initialize_database(db_path)
-    assert result.schema_version == CURRENT_SCHEMA_VERSION == 18
+    assert result.schema_version == CURRENT_SCHEMA_VERSION == 19
 
 
 # --------------------------------------------------------------------------- #
@@ -168,7 +168,7 @@ def test_reader_does_not_touch_any_v18_table(db_path: Path) -> None:
                               entity_type="team")
         conn.set_trace_callback(None)
     executed = " ".join(statements).lower()
-    for table in F018_TABLES:
+    for table in LANE_R_TABLES:
         assert table not in executed, f"AsOfReader touched {table}"
 
 
@@ -246,6 +246,8 @@ def test_recording_lane_r_provenance_does_not_change_the_strict_answer(
             cutoff_policy_id="pregame_lock", cutoff_policy_version="1",
             source_corpus_digest="src", target_set_digest="tgt",
             g1_variant=G1Variant.G1_B_CORE)
+        evidence = str(conn.execute(
+            "SELECT raw_response_id FROM raw_responses LIMIT 1").fetchone()[0])
         repo.certify_input(
             corpus_version_id=corpus.corpus_version_id,
             namespace=ProviderNamespace(league, "mlb_statsapi", EntityType.TEAM, "v1"),
@@ -255,6 +257,8 @@ def test_recording_lane_r_provenance_does_not_change_the_strict_answer(
             eligibility=EligibilityVerdict.ELIGIBLE,
             availability_basis=AvailabilityBasis.EVENT_DERIVED,
             availability_rule_id="prior_event_completion_conservative_v1",
+            availability_source="official_box_score_publication_lag_v1",
+            source_evidence_table="raw_responses", source_evidence_id=evidence,
             source_event_completed_at="2026-07-08T03:00:00.000000Z")
     after = strict_answer()
     assert before is None and after is None

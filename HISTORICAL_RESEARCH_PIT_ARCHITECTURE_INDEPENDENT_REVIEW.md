@@ -578,6 +578,22 @@ is byte-identical to its v17 source.
 odds/market anchoring. Still unauthorized: **F1-R**, **F2**, production matching,
 and model training. G1/G2/G3/G4/G6 are unchanged.
 
+**REVIEWED 2026-08-11 — ACCEPTED WITH REPAIRS; the foundation is now schema v19.**
+`RETROSPECTIVE_PIT_SCHEMA_V18_INDEPENDENT_REVIEW.md`. Eight defects proven (each
+reproduced through the repository API *and* direct SQL), two material to the G5
+contract: a static crosswalk could cite an ACCEPTED audit taken over a **different
+source corpus** (a one-month audit vouching for five seasons — the exact transfer
+G5 §16 forbids), and an ACCEPTED audit could later acquire a **blocking
+identity_collision** finding while crosswalks built from it survived. Also repaired:
+eligible inputs needed no source-evidence pointer; `source_evidence_table` accepted
+any string; timestamps were shape-only (month 99, Feb 30, lower-case `z`, offsets
+all stored); cross-league supersession was repository-only; credential-shaped and
+non-JSON values passed the finding screen; and the package was import-order
+dependent. Repairs ship as migration **`f019`** — `f018` is preserved byte-for-byte
+as applied evidence and was **not** edited. Strict PIT re-proved behaviourally:
+`AsOfReader` and `_feature_cutoff` unchanged, Lane-R tables still `unsupported`
+joins, late-observed lineups still invisible.
+
 Confirmations: no implementation occurred; **no provider data/API request** was
 made; protected evidence **7/7 byte-identical**; schema **v17**; F1-R, F2,
 production matching and model training all remain **unauthorized**.

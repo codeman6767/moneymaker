@@ -96,6 +96,36 @@ def _accepted_audit(
     return repo.record_identity_audit(**params)
 
 
+def _raw_evidence(conn: sqlite3.Connection) -> str:
+    """A real ``raw_responses`` row to satisfy the f019 traceability rule.
+
+    Added by the independent review: before f019 an ELIGIBLE reconstructed input
+    could be certified with no source-evidence pointer at all, so these fixtures
+    never needed one.
+    """
+
+    from sports_quant.db.repositories.ingestion_runs import SqliteIngestionRunRepository
+    from sports_quant.db.repositories.raw_responses import (
+        SqliteRawResponseRepository,
+        response_content_hash,
+    )
+
+    existing = conn.execute(
+        "SELECT raw_response_id FROM raw_responses LIMIT 1").fetchone()
+    if existing is not None:
+        return str(existing[0])
+    run = SqliteIngestionRunRepository(conn).start(
+        command="repo-test", provider="test", operation="seed", args_json="{}",
+        started_monotonic_ns=0, tool_version="t")
+    raw = SqliteRawResponseRepository(conn).store(
+        run_id=run.run_id, provider="test", endpoint="/seed", request_params_json="{}",
+        http_status=200, response_headers_json="{}", requested_at=COMPLETED,
+        received_at=COMPLETED, elapsed_ns=1, body="{}",
+        content_hash=response_content_hash(
+            provider="test", endpoint="/seed", request_params={}, body="{}"))
+    return raw.raw_response_id
+
+
 def _first_team(conn: sqlite3.Connection, league_id: str) -> str:
     return str(conn.execute(
         "SELECT team_id FROM teams WHERE league_id = ? ORDER BY team_id LIMIT 1",
@@ -558,9 +588,10 @@ def test_static_identity_requires_a_passed_audit_transitively(
 
 def test_event_derived_requires_completion_rule_and_policy(
     repo: SqliteRetrospectiveProvenanceRepository, nba_team_ns: ProviderNamespace,
-    nba_league_id: str,
+    nba_league_id: str, conn: sqlite3.Connection,
 ) -> None:
     corpus = _corpus(repo, nba_league_id)
+    rid = _raw_evidence(conn)
     base = dict(
         corpus_version_id=corpus.corpus_version_id, namespace=nba_team_ns,
         provider_game_id="g1", feature_family="team_rolling_core",
@@ -568,6 +599,8 @@ def test_event_derived_requires_completion_rule_and_policy(
         reconstruction_policy_version="rp-1",
         eligibility=EligibilityVerdict.ELIGIBLE,
         availability_basis=AvailabilityBasis.EVENT_DERIVED,
+        availability_source="official_box_score_publication_lag_v1",
+        source_evidence_table="raw_responses", source_evidence_id=rid,
     )
     cert = repo.certify_input(
         **base, availability_rule_id="prior_event_completion_conservative_v1",
@@ -587,7 +620,7 @@ def test_event_derived_requires_completion_rule_and_policy(
 
 def test_event_derived_does_not_materialize_effective_at(
     repo: SqliteRetrospectiveProvenanceRepository, nba_team_ns: ProviderNamespace,
-    nba_league_id: str,
+    nba_league_id: str, conn: sqlite3.Connection,
 ) -> None:
     """Availability is derived on read, never stored."""
 
@@ -600,6 +633,8 @@ def test_event_derived_does_not_materialize_effective_at(
         eligibility=EligibilityVerdict.ELIGIBLE,
         availability_basis=AvailabilityBasis.EVENT_DERIVED,
         availability_rule_id="prior_event_completion_conservative_v1",
+        availability_source="official_box_score_publication_lag_v1",
+        source_evidence_table="raw_responses", source_evidence_id=_raw_evidence(conn),
         source_event_completed_at=COMPLETED)
     assert not hasattr(cert, "effective_at")
     derived = derive_availability_instant(
@@ -611,7 +646,7 @@ def test_event_derived_does_not_materialize_effective_at(
 
 def test_versioned_snapshot_requires_the_provider_stamp(
     repo: SqliteRetrospectiveProvenanceRepository, nba_team_ns: ProviderNamespace,
-    nba_league_id: str,
+    nba_league_id: str, conn: sqlite3.Connection,
 ) -> None:
     corpus = _corpus(repo, nba_league_id)
     cert = repo.certify_input(
@@ -621,9 +656,12 @@ def test_versioned_snapshot_requires_the_provider_stamp(
         reconstruction_policy_version="rp-1",
         eligibility=EligibilityVerdict.ELIGIBLE,
         availability_basis=AvailabilityBasis.VERSIONED_SNAPSHOT,
+        source_evidence_table="raw_responses", source_evidence_id=_raw_evidence(conn),
         source_snapshot_at=SNAPSHOT, availability_source="open_meteo_previous_runs")
     assert cert.source_snapshot_at == SNAPSHOT
 
+    # Evidence and availability source supplied, so the ONLY thing missing is the
+    # provider's snapshot stamp -- which is what this case is about.
     with pytest.raises(RepositoryError, match="must record the provider"):
         repo.certify_input(
             corpus_version_id=corpus.corpus_version_id, namespace=nba_team_ns,
@@ -631,6 +669,9 @@ def test_versioned_snapshot_requires_the_provider_stamp(
             provenance_class=ProvenanceClass.RECONSTRUCTED_RESEARCH,
             reconstruction_policy_version="rp-1",
             eligibility=EligibilityVerdict.ELIGIBLE,
+            availability_source="open_meteo_previous_runs",
+            source_evidence_table="raw_responses",
+            source_evidence_id=_raw_evidence(conn),
             availability_basis=AvailabilityBasis.VERSIONED_SNAPSHOT)
 
 
@@ -670,8 +711,9 @@ def test_missing_rule_version_is_rejected(
 
 def test_wrong_corpus_version_is_rejected(
     repo: SqliteRetrospectiveProvenanceRepository, nba_team_ns: ProviderNamespace,
-    nba_league_id: str,
+    nba_league_id: str, conn: sqlite3.Connection,
 ) -> None:
+    rid = _raw_evidence(conn)
     with pytest.raises(sqlite3.IntegrityError, match="match its corpus version"):
         repo.certify_input(
             corpus_version_id="rcv_does_not_exist", namespace=nba_team_ns,
@@ -681,6 +723,8 @@ def test_wrong_corpus_version_is_rejected(
             eligibility=EligibilityVerdict.ELIGIBLE,
             availability_basis=AvailabilityBasis.EVENT_DERIVED,
             availability_rule_id="prior_event_completion_conservative_v1",
+            availability_source="official_box_score_publication_lag_v1",
+            source_evidence_table="raw_responses", source_evidence_id=rid,
             source_event_completed_at=COMPLETED)
 
 

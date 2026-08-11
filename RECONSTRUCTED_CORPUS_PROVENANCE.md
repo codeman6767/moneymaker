@@ -147,6 +147,15 @@ Before any reconstructed corpus is built or used:
    provenance FOUNDATION only and **has not been independently reviewed**. No
    reader, no identity-audit engine and no market anchoring were built, and F1-R,
    F2, production matching and model training all remain unauthorized.
+7. **(2026-08-11)** That foundation was independently reviewed
+   (`RETROSPECTIVE_PIT_SCHEMA_V18_INDEPENDENT_REVIEW.md`): **ACCEPTED WITH REPAIRS**,
+   now at schema **v19** via migration `f019`. The two material findings both
+   concerned this document's own guarantees -- a crosswalk could be cleared by an
+   audit of a *different* source corpus, and an accepted audit could later be
+   contradicted by a blocking collision finding. Both now fail closed at the
+   database. An eligible reconstructed input must additionally cite preserved source
+   evidence from a fixed allowlist; excluded rows remain exempt, because "not
+   admissible" is often precisely a statement that the evidence does not exist.
 
 Until all four pass, only `strict_forward_pit` (forward collection) may support
 evaluation, and no profitability claim may be made from reconstructed data.

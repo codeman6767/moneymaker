@@ -60,28 +60,30 @@ def _upto(path: Path, version: int) -> None:
 # --------------------------------------------------------------------------- #
 # §23 initialization and migration
 # --------------------------------------------------------------------------- #
-def test_fresh_database_initializes_at_v18(db_path: Path) -> None:
+def test_fresh_database_initializes_at_the_current_version(db_path: Path) -> None:
     result = initialize_database(db_path)
-    assert result.schema_version == 18 == CURRENT_SCHEMA_VERSION
-    assert result.migrations_applied == 18
+    assert result.schema_version == CURRENT_SCHEMA_VERSION == 19
+    assert result.migrations_applied == CURRENT_SCHEMA_VERSION
 
 
 def test_repeated_initialization_is_a_noop(db_path: Path) -> None:
     initialize_database(db_path)
     again = initialize_database(db_path)
-    assert again.schema_version == 18
+    assert again.schema_version == CURRENT_SCHEMA_VERSION
     assert again.migrations_applied == 0
     assert again.was_already_current
 
 
-def test_migration_history_has_exactly_18_entries(conn: sqlite3.Connection) -> None:
+def test_migration_history_is_complete_and_ordered(conn: sqlite3.Connection) -> None:
     rows = conn.execute(
         "SELECT version, name FROM schema_versions ORDER BY version").fetchall()
-    assert [int(r["version"]) for r in rows] == list(range(1, 19))
-    assert rows[-1]["name"].startswith("f018")
+    assert [int(r["version"]) for r in rows] == list(
+        range(1, CURRENT_SCHEMA_VERSION + 1))
+    assert rows[17]["name"].startswith("f018")
+    assert rows[18]["name"].startswith("f019")
 
 
-def test_v17_database_migrates_to_v18_without_touching_existing_data(
+def test_v17_database_migrates_forward_without_touching_existing_data(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "legacy.db"
@@ -99,7 +101,7 @@ def test_v17_database_migrates_to_v18_without_touching_existing_data(
     initialize_database(path)
 
     with Database(path).connection() as conn:
-        assert Database(path).schema_version(conn) == 18
+        assert Database(path).schema_version(conn) == CURRENT_SCHEMA_VERSION
         after = {
             table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]  # noqa: S608
             for table in before
@@ -114,14 +116,31 @@ def test_v17_database_migrates_to_v18_without_touching_existing_data(
         assert all(_table_exists(conn, t) for t in F018_TABLES)
 
 
-def test_v17_to_v18_migration_is_idempotent(tmp_path: Path) -> None:
+def test_v17_forward_migration_is_idempotent(tmp_path: Path) -> None:
     path = tmp_path / "legacy.db"
     _upto(path, 17)
     first = initialize_database(path)
     second = initialize_database(path)
-    assert first.migrations_applied == 1
+    assert first.migrations_applied == CURRENT_SCHEMA_VERSION - 17
     assert second.migrations_applied == 0
-    assert second.schema_version == 18
+    assert second.schema_version == CURRENT_SCHEMA_VERSION
+
+
+def test_v18_database_migrates_to_v19(tmp_path: Path) -> None:
+    """The review's repair path: an existing v18 corpus upgrades in one step."""
+
+    path = tmp_path / "v18.db"
+    _upto(path, 18)
+    with Database(path).connection() as conn:
+        assert Database(path).schema_version(conn) == 18
+        before = conn.execute("SELECT COUNT(*) FROM teams").fetchone()[0]
+    result = initialize_database(path)
+    assert result.migrations_applied == 1
+    assert result.schema_version == 19
+    with Database(path).connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM teams").fetchone()[0] == before
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
 def test_integrity_and_foreign_keys_are_clean(conn: sqlite3.Connection) -> None:
@@ -132,7 +151,7 @@ def test_integrity_and_foreign_keys_are_clean(conn: sqlite3.Connection) -> None:
 def test_supported_versions_still_admit_preserved_pilot_manifests() -> None:
     # The F1/F1B pilot checkpoints record the hash of a manifest declaring the
     # version current when they ran. Dropping 16 or 17 would orphan them.
-    assert {16, 17, 18} <= SUPPORTED_SCHEMA_VERSIONS
+    assert {16, 17, 18, 19} <= SUPPORTED_SCHEMA_VERSIONS
 
 
 # --------------------------------------------------------------------------- #
@@ -380,6 +399,31 @@ def test_invalid_g1_variant_refused(conn: sqlite3.Connection, nba_league_id: str
         )
 
 
+def _raw_response_id(conn: sqlite3.Connection) -> str:
+    """A real ``raw_responses`` row, so f019's evidence-pointer rule is satisfied."""
+
+    from sports_quant.db.repositories.ingestion_runs import SqliteIngestionRunRepository
+    from sports_quant.db.repositories.raw_responses import (
+        SqliteRawResponseRepository,
+        response_content_hash,
+    )
+
+    existing = conn.execute(
+        "SELECT raw_response_id FROM raw_responses LIMIT 1").fetchone()
+    if existing is not None:
+        return str(existing[0])
+    run = SqliteIngestionRunRepository(conn).start(
+        command="schema-test", provider="test", operation="seed", args_json="{}",
+        started_monotonic_ns=0, tool_version="t")
+    raw = SqliteRawResponseRepository(conn).store(
+        run_id=run.run_id, provider="test", endpoint="/seed", request_params_json="{}",
+        http_status=200, response_headers_json="{}", requested_at=ISO,
+        received_at=ISO, elapsed_ns=1, body="{}",
+        content_hash=response_content_hash(
+            provider="test", endpoint="/seed", request_params={}, body="{}"))
+    return raw.raw_response_id
+
+
 def _insert_input(
     conn: sqlite3.Connection, league_id: str, corpus_id: str, **overrides: object
 ) -> None:
@@ -395,10 +439,10 @@ def _insert_input(
         "availability_basis": "event_derived",
         "availability_rule_id": "r1",
         "availability_rule_digest": "rd1",
-        "availability_source": None,
         "reconstruction_policy_version": "rp1",
-        "source_evidence_table": None,
-        "source_evidence_id": None,
+        "availability_source": "review_fixture_documented_basis",
+        "source_evidence_table": "raw_responses",
+        "source_evidence_id": _raw_response_id(conn),
         "source_event_completed_at": ISO,
         "source_snapshot_at": None,
         "crosswalk_id": None,
@@ -483,7 +527,8 @@ def test_label_only_is_structurally_distinguishable_from_a_predictive_input(
         conn, nba_league_id, cid, provenance_class="label_only_retrospective",
         availability_basis=None, availability_rule_id=None,
         availability_rule_digest=None, source_event_completed_at=None,
-        feature_family="final_score", semantic_digest="label1",
+        availability_source=None, feature_family="final_score",
+        semantic_digest="label1",
     )
     with pytest.raises(sqlite3.IntegrityError):
         _insert_input(
@@ -586,14 +631,16 @@ def test_finding_namespace_must_match_its_audit(
     conn: sqlite3.Connection, nba_league_id: str, mlb_league_id: str
 ) -> None:
     audit = _insert_audit(conn, nba_league_id)
+    # Deliberately a BENIGN finding: a blocking one would be rejected first by the
+    # f019 contradiction rule, and this test is about the namespace binding.
     with pytest.raises(sqlite3.IntegrityError, match="must match its audit"):
         conn.execute(
             "INSERT INTO identity_audit_findings "
             "(finding_id, identity_audit_id, league_id, provider, "
             " namespace_generation, entity_type, provider_id, severity, finding_code, "
             " classification, exclusion_scope, detail_json, detail_digest, created_at) "
-            "VALUES ('idf_1', ?, ?, 'balldontlie', 'v1', 'team', '1', 'blocking', "
-            "'C1', 'identity_collision', 'entity', '{}', 'dd', ?)",
+            "VALUES ('idf_1', ?, ?, 'balldontlie', 'v1', 'team', '1', 'info', "
+            "'M1', 'legitimate_mutation', 'none', '{}', 'dd', ?)",
             (audit, mlb_league_id, ISO),
         )
 
@@ -728,7 +775,8 @@ def test_supersession_target_must_already_exist(
     updated, so a back-edge can never appear.
     """
 
-    with pytest.raises(sqlite3.IntegrityError, match="does not exist"):
+    with pytest.raises(sqlite3.IntegrityError,
+                       match="does not exist|same league"):
         conn.execute(
             "INSERT INTO reconstruction_corpus_versions "
             "(corpus_version_id, provenance_class, league_id, "
