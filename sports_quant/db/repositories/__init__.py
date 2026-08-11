@@ -83,6 +83,11 @@ from .references import (
     ProviderReferenceRepositoryProtocol,
     SqliteProviderReferenceRepository,
 )
+from .retrospective import (
+    AmbiguousProvenanceError,
+    ProvenanceConflictError,
+    SqliteRetrospectiveProvenanceRepository,
+)
 from .rosters import SqliteRosterRepository
 from .sportsbook import (
     SportsbookRepositoryProtocol,
@@ -104,6 +109,9 @@ from .venues import (
 )
 
 __all__ = [
+    "AmbiguousProvenanceError",
+    "ProvenanceConflictError",
+    "SqliteRetrospectiveProvenanceRepository",
     "AliasOutcome",
     "CandidateInput",
     "EqualTimeConflict",

@@ -99,6 +99,15 @@ WEATHER_SNAPSHOT_PREFIX: Final = "wx_"
 PROVIDER_TEAM_IDENTITY_PREFIX: Final = "pti_"
 PROVIDER_PLAYER_IDENTITY_PREFIX: Final = "ppi_"
 
+# Phase F (f018): retrospective research provenance. All surrogate -- a
+# reconstruction corpus is identified by its semantic digest, not by its id, so
+# deriving the id from the digest would only make two spellings of one identity.
+RECONSTRUCTION_CORPUS_PREFIX: Final = "rcv_"
+IDENTITY_AUDIT_PREFIX: Final = "ida_"
+IDENTITY_FINDING_PREFIX: Final = "idf_"
+STATIC_CROSSWALK_PREFIX: Final = "xwk_"
+RECONSTRUCTED_INPUT_PREFIX: Final = "rip_"
+
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
 
 
@@ -378,3 +387,24 @@ def new_provider_team_identity_id() -> str:
 
 def new_provider_player_identity_id() -> str:
     return prefixed_id(PROVIDER_PLAYER_IDENTITY_PREFIX)
+
+
+# Phase F (f018) retrospective provenance factories.
+def new_reconstruction_corpus_id() -> str:
+    return prefixed_id(RECONSTRUCTION_CORPUS_PREFIX)
+
+
+def new_identity_audit_id() -> str:
+    return prefixed_id(IDENTITY_AUDIT_PREFIX)
+
+
+def new_identity_finding_id() -> str:
+    return prefixed_id(IDENTITY_FINDING_PREFIX)
+
+
+def new_static_crosswalk_id() -> str:
+    return prefixed_id(STATIC_CROSSWALK_PREFIX)
+
+
+def new_reconstructed_input_id() -> str:
+    return prefixed_id(RECONSTRUCTED_INPUT_PREFIX)

@@ -178,15 +178,16 @@ SEASON_UNBOUNDED_END: Final = 9999
 SCHEMA_VERSION_TABLE: Final = "schema_versions"
 
 
-#: The schema version a freshly initialized database reaches (migration e017).
-CURRENT_SCHEMA_VERSION: Final = 17
-#: Versions the tooling accepts on an EXISTING database. e017 is purely additive
-#: -- it creates two new append-only tables and touches no existing row -- so a
-#: v16 corpus stays readable and a v16-authored pilot manifest stays valid and
-#: byte-identical. Keeping this a set rather than bumping a single equality is
-#: what avoids orphaning the preserved F1B pilot artifacts, whose checkpoints
-#: record the hash of a manifest declaring v16.
-SUPPORTED_SCHEMA_VERSIONS: Final = frozenset({16, CURRENT_SCHEMA_VERSION})
+#: The schema version a freshly initialized database reaches (migration f018).
+CURRENT_SCHEMA_VERSION: Final = 18
+#: Versions the tooling accepts on an EXISTING database. e017 and f018 are both
+#: purely additive -- each only creates new append-only tables and touches no
+#: existing row -- so a v16 or v17 corpus stays readable and a manifest authored
+#: at either version stays valid and byte-identical. Keeping this a set rather
+#: than bumping a single equality is what avoids orphaning the preserved F1/F1B
+#: pilot artifacts, whose checkpoints record the hash of a manifest declaring
+#: the version current when they ran.
+SUPPORTED_SCHEMA_VERSIONS: Final = frozenset({16, 17, CURRENT_SCHEMA_VERSION})
 #: Every table created by Phase A migrations, in dependency order.
 PHASE_A_TABLES: Final[tuple[str, ...]] = (
     "leagues",

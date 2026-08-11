@@ -33,6 +33,7 @@ import pytest
 
 from sports_quant.db.engine import Database
 from sports_quant.db.init import initialize_database
+from sports_quant.db.schema import CURRENT_SCHEMA_VERSION
 from sports_quant.http_policy import ReadOnlyHTTPPolicy, build_readonly_client
 from sports_quant.ingest.f1a import emit_plan
 from sports_quant.ingest.nba_ingestor import ingest_nba
@@ -81,7 +82,7 @@ def manifest(tmp_path: Path) -> Path:
     emit_plan(league="nba", from_date=FROM_DATE, to_date=TO_DATE,
               includes=("box", "quarters"), max_games=400, max_pages=8,
               max_records=1000, max_retries=1, rate_per_min=60,
-              expected_schema_version=17, manifest_out=out, out=lambda _s: None)
+              expected_schema_version=CURRENT_SCHEMA_VERSION, manifest_out=out, out=lambda _s: None)
     return out
 
 

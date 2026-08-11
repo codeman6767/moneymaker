@@ -59,17 +59,18 @@ def test_wheel_includes_matching_package(built_wheel: tuple[list[str], str]) -> 
         assert module in names, f"{module} missing from wheel"
 
 
-def test_wheel_includes_every_migration_through_e017(built_wheel: tuple[list[str], str]) -> None:
+def test_wheel_includes_every_migration_through_f018(built_wheel: tuple[list[str], str]) -> None:
     names, _ = built_wheel
     migrations = sorted(
         n.split("/")[-1] for n in names
         if "/db/migrations/" in n and n.endswith(".sql")
     )
-    assert len(migrations) == 17, migrations
+    assert len(migrations) == 18, migrations
     assert migrations[0] == "a001_core_entities.sql"
     # A representative intermediate migration and the latest one.
     assert "sports_quant/db/migrations/d009_provider_infra.sql" in names
-    assert migrations[-1] == "e017_provider_identity.sql"
+    assert "sports_quant/db/migrations/e017_provider_identity.sql" in names
+    assert migrations[-1] == "f018_retrospective_provenance.sql"
 
 
 def test_wheel_declares_console_entry_point(built_wheel: tuple[list[str], str]) -> None:

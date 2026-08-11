@@ -28,7 +28,7 @@ import pytest
 
 from sports_quant.db.engine import Database
 from sports_quant.db.init import initialize_database
-from sports_quant.db.schema import SUPPORTED_SCHEMA_VERSIONS
+from sports_quant.db.schema import CURRENT_SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS
 from sports_quant.http_policy import ReadOnlyHTTPPolicy, build_readonly_client
 from sports_quant.ingest.f1a import run_pilot_cli
 from sports_quant.ingest.manifest import canonical_json, load_and_validate, plan_hash
@@ -443,7 +443,7 @@ def test_both_month_manifests_exist_and_validate() -> None:
         assert manifest.executable is True
         assert manifest.unresolved_bounds == ()
         assert manifest.expected_schema_version in SUPPORTED_SCHEMA_VERSIONS
-        assert manifest.expected_schema_version == 17
+        assert manifest.expected_schema_version == 17  # declared by the pilot
         assert manifest.request_cap is not None and manifest.request_cap > 0
 
 
@@ -778,7 +778,7 @@ def test_identity_observations_are_recorded_during_the_month_run(
             "SELECT COUNT(*) FROM provider_player_identity_snapshots").fetchone()[0]
         version = conn.execute(
             "SELECT MAX(version) FROM schema_versions").fetchone()[0]
-    assert version == 17
+    assert version == CURRENT_SCHEMA_VERSION
     assert teams > 0 and players > 0
 
 

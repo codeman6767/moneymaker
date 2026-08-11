@@ -621,3 +621,155 @@ class ProviderPlayerIdentity:
     birth_date: Optional[str] = None
     position: Optional[str] = None
     provider_team_id: Optional[str] = None
+
+
+# --------------------------------------------------------------------------- #
+# Phase F (f018): retrospective research provenance
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class ReconstructionCorpusVersion:
+    """One reproducible retrospective reconstruction context (f018).
+
+    ``semantic_digest`` -- not ``corpus_version_id`` -- is the corpus identity:
+    it covers the source fingerprint, target set, policies and G1 variant, so two
+    builds from identical inputs collide and any changed input does not.
+
+    The four nullable digests are artefacts a later F1-R execution produces. They
+    are left absent rather than back-filled with a placeholder, because a
+    placeholder would enter the semantic digest and make two genuinely different
+    corpora look like the same one.
+    """
+
+    corpus_version_id: str
+    provenance_class: str
+    league_id: str
+    reconstruction_policy_version: str
+    cutoff_policy_id: str
+    cutoff_policy_version: str
+    source_corpus_digest: str
+    target_set_digest: str
+    g1_variant: str
+    semantic_digest: str
+    created_at: str
+    evidence_registry_digest: Optional[str] = None
+    static_identity_map_digest: Optional[str] = None
+    market_evidence_digest: Optional[str] = None
+    code_version: Optional[str] = None
+    supersedes_corpus_version_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class IdentityAuditRecord:
+    """The stored result of one corpus-scoped G5 identity audit (f018).
+
+    A statement about ``source_corpus_digest`` and nothing wider: a clean audit
+    over one month never transfers to a five-season window. ``created_at`` is
+    honest audit wall-clock and is never reused as an availability, effective or
+    decision time.
+    """
+
+    identity_audit_id: str
+    league_id: str
+    provider: str
+    namespace_generation: str
+    namespace_verified: bool
+    entity_type: str
+    source_corpus_digest: str
+    audit_policy_version: str
+    distinct_ids: int
+    total_observations: int
+    collision_count: int
+    flagged_count: int
+    verdict: str
+    semantic_digest: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class IdentityAuditFinding:
+    """One thing an identity audit observed (f018).
+
+    ``exclusion_scope`` is the observed blast radius, not a policy decision:
+    whether N entity exclusions should escalate to refusing the corpus stays in
+    versioned code. ``provider_id`` is None only for a namespace-level finding,
+    which is about the API generation rather than any particular id.
+    """
+
+    finding_id: str
+    identity_audit_id: str
+    league_id: str
+    provider: str
+    namespace_generation: str
+    entity_type: str
+    severity: str
+    finding_code: str
+    classification: str
+    exclusion_scope: str
+    detail_json: str
+    detail_digest: str
+    created_at: str
+    provider_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class StaticCrosswalkProvenance:
+    """A provider key bound to a canonical entity by a cleared audit (f018).
+
+    Carries no name, no team affiliation, no position, no roster state and no
+    outcome -- none of those is identity evidence. ``curated_at`` is audit time
+    only; it is never a backdated effective time and never a reused
+    ``decided_at``.
+    """
+
+    crosswalk_id: str
+    corpus_version_id: str
+    league_id: str
+    provider: str
+    namespace_generation: str
+    entity_type: str
+    provider_id: str
+    canonical_entity_id: str
+    identity_audit_id: str
+    identity_audit_digest: str
+    provenance_policy_version: str
+    semantic_digest: str
+    curated_at: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class ReconstructedInputProvenance:
+    """A certification that one input family is admissible for one target (f018).
+
+    Provenance only: no feature value is stored, because this lane has to be
+    reviewable before anything starts producing rows that depend on it.
+
+    There is no ``effective_at``. For EVENT_DERIVED, availability is derived as
+    ``source_event_completed_at`` advanced by the cited rule, whose implementation
+    digest is stored so a later code change cannot silently reinterpret an
+    accepted corpus. ``source_snapshot_at`` is stored for VERSIONED_SNAPSHOT
+    because the provider published it -- source evidence, not our derivation.
+    """
+
+    input_provenance_id: str
+    corpus_version_id: str
+    league_id: str
+    provider: str
+    namespace_generation: str
+    provider_game_id: str
+    feature_family: str
+    provenance_class: str
+    reconstruction_policy_version: str
+    eligibility: str
+    semantic_digest: str
+    created_at: str
+    availability_basis: Optional[str] = None
+    availability_rule_id: Optional[str] = None
+    availability_rule_digest: Optional[str] = None
+    availability_source: Optional[str] = None
+    source_evidence_table: Optional[str] = None
+    source_evidence_id: Optional[str] = None
+    source_event_completed_at: Optional[str] = None
+    source_snapshot_at: Optional[str] = None
+    crosswalk_id: Optional[str] = None
+    exclusion_code: Optional[str] = None

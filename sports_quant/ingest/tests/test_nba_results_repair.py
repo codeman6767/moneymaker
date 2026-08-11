@@ -26,6 +26,7 @@ import pytest
 
 from sports_quant.db.engine import Database
 from sports_quant.db.init import initialize_database
+from sports_quant.db.schema import CURRENT_SCHEMA_VERSION
 from sports_quant.http_policy import ReadOnlyHTTPPolicy, build_readonly_client
 from sports_quant.ingest.f1a import emit_plan
 from sports_quant.ingest.nba_ingestor import ingest_nba
@@ -130,7 +131,7 @@ def manifest(tmp_path: Path) -> Path:
     emit_plan(league="nba", from_date=FROM_DATE, to_date=TO_DATE,
               includes=("box", "quarters"), max_games=400, max_pages=8,
               max_records=1000, max_retries=1, rate_per_min=60,
-              expected_schema_version=17, manifest_out=out, out=lambda _s: None)
+              expected_schema_version=CURRENT_SCHEMA_VERSION, manifest_out=out, out=lambda _s: None)
     return out
 
 
@@ -478,7 +479,7 @@ def test_manifest_from_a_different_league_is_refused(tmp_path: Path) -> None:
     other = tmp_path / "mlb.manifest.json"
     emit_plan(league="mlb", from_date="2026-06-01", to_date="2026-06-30",
               includes=("results",), max_games=600, max_retries=1,
-              expected_schema_version=17, manifest_out=other, out=lambda _s: None)
+              expected_schema_version=CURRENT_SCHEMA_VERSION, manifest_out=other, out=lambda _s: None)
     with pytest.raises(ResultsRepairError, match="manifest rejected"):
         run_repair(db, other)
 
@@ -490,7 +491,7 @@ def test_database_outside_the_manifest_range_is_refused(tmp_path: Path) -> None:
     narrow = tmp_path / "narrow.manifest.json"
     emit_plan(league="nba", from_date="2026-03-10", to_date="2026-03-11",
               includes=("box",), max_games=400, max_pages=8, max_records=1000,
-              max_retries=1, rate_per_min=60, expected_schema_version=17,
+              max_retries=1, rate_per_min=60, expected_schema_version=CURRENT_SCHEMA_VERSION,
               manifest_out=narrow, out=lambda _s: None)
     with pytest.raises(ResultsRepairError, match="outside the manifest range"):
         repair_nba_results_from_raw(

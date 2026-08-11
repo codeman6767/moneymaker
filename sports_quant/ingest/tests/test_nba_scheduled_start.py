@@ -27,6 +27,7 @@ from sports_quant.db.repositories.raw_responses import (
     response_content_hash,
 )
 from sports_quant.db.repositories.references import SqliteProviderReferenceRepository
+from sports_quant.db.schema import CURRENT_SCHEMA_VERSION
 from sports_quant.ingest.nba_ingestor import (
     ScheduledStartKind,
     _normalize_game,
@@ -318,7 +319,7 @@ def test_no_socket_is_used_by_normalization(monkeypatch: pytest.MonkeyPatch) -> 
 def conn(tmp_path) -> Iterator[sqlite3.Connection]:
     db_path = tmp_path / "corpus.db"
     result = initialize_database(db_path)
-    assert result.schema_version == 17
+    assert result.schema_version == CURRENT_SCHEMA_VERSION
     with Database(db_path).connection() as connection:
         yield connection
 

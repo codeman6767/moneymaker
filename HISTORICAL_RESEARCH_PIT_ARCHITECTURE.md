@@ -1,7 +1,11 @@
 # Historical research point-in-time architecture (design only)
 
-**Status: DESIGN ONLY — not implemented, not authorized.** No code, schema or
-corpus changes accompany this document. Schema remains **v17**.
+**Status (2026-08-11): the provenance FOUNDATION is implemented at schema v18;
+everything else in this document remains design only.** Migration `f018` ships the
+storage contract (`RETROSPECTIVE_PIT_SCHEMA_V18_IMPLEMENTATION.md`) and has **not
+been independently reviewed**. No reader, no identity-audit engine, no market
+anchoring. **F1-R, F2, production matching and model training remain
+unauthorized.**
 
 Replacement contract for historical model research after the blocker established
 in `F1_HISTORICAL_PIT_FEASIBILITY_REVIEW.md` (`dc090af`). It extends
@@ -60,6 +64,22 @@ gates (§13) the F1-R pilot must close.
 > later evidence yields a new corpus version and never rewrites the old one.
 >
 > **No gate now blocks implementation.**
+>
+> **Schema v18 (2026-08-11): provenance FOUNDATION implemented, not yet reviewed.**
+> `RETROSPECTIVE_PIT_SCHEMA_V18_IMPLEMENTATION.md`. Migration `f018` adds five
+> append-only tables (reconstruction corpus versions, identity audit records,
+> identity audit findings, static crosswalk provenance, reconstructed input
+> provenance) plus the `sports_quant.retrospective` domain vocabulary, a
+> code-defined digest-bound availability-rule registry, and narrow repositories.
+> `availability_confidence` is not stored (removed by review) and `effective_at` is
+> derived, never materialized. Strict PIT is unchanged: the v18 tables are
+> `unsupported` joins, `AsOfReader` has no retrospective mode, and `_feature_cutoff`
+> is byte-identical to its v17 source.
+>
+> **This foundation has NOT been independently reviewed.** Still unimplemented:
+> `RetrospectiveResearchReader`, the identity-audit engine, and historical
+> odds/market anchoring. Still unauthorized: **F1-R**, **F2**, production matching,
+> and model training. G1/G2/G3/G4/G6 are unchanged.
 
 ---
 

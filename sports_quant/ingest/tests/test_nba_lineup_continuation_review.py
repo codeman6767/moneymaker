@@ -37,6 +37,7 @@ import pytest
 
 from sports_quant.db.engine import Database
 from sports_quant.db.init import initialize_database
+from sports_quant.db.schema import CURRENT_SCHEMA_VERSION
 from sports_quant.http_policy import ReadOnlyHTTPPolicy, build_readonly_client
 from sports_quant.ingest.lineup_continuation import (
     DQ_CHAIN_PROVENANCE,
@@ -401,6 +402,13 @@ def _recovery_manifest(tmp_path: Path, source: Path) -> Path:
     survey = module.derive_targets(source)
     module.EXPECTED_TARGETS = len(survey.targets)
     module.EXPECTED_SELECTED_GAMES = survey.selected_games
+    # Same reason, for the schema pin: the committed generator declares v17
+    # because the preserved March corpus IS v17 and its manifest hash is recorded
+    # in the preserved checkpoint. This fixture builds its corpus fresh, so it is
+    # at CURRENT_SCHEMA_VERSION, and the CLI's exact-match guard would correctly
+    # refuse a v17 manifest against it. Overriding here keeps the test about the
+    # CLI's behaviour rather than about the pin.
+    module.SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
     manifest, _info = module.build(
         source_manifest=root / "pilots/f1/nba_coverage_2026_03.manifest.json",
         source_database=source, recovery_db=r"data\rec.db",
@@ -486,7 +494,8 @@ def test_execute_runs_the_whole_production_path_under_a_mock_transport(
 
     con = sqlite3.connect(f"file:{(tmp_path / 'rec.db').as_posix()}?mode=ro", uri=True)
     assert con.execute("SELECT COUNT(*) FROM raw_responses").fetchone()[0] == 2
-    assert con.execute("SELECT MAX(version) FROM schema_versions").fetchone()[0] == 17
+    assert con.execute(
+        "SELECT MAX(version) FROM schema_versions").fetchone()[0] == CURRENT_SCHEMA_VERSION
     assert con.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     con.close()
 

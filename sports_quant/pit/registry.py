@@ -128,8 +128,10 @@ def _unsupported(table: str, justification: str) -> TableEntry:
     return TableEntry(table, TableClass.UNSUPPORTED, justification)
 
 
-# Every table shipped at schema v16 is classified exactly once. Ordering is
-# alphabetical and deterministic.
+# Every table shipped at schema v18 is classified exactly once. Ordering is
+# alphabetical and deterministic. The five f018 Lane-R provenance tables are
+# `unsupported`: retrospective provenance is a different lane, and the registry
+# failing closed on them is what keeps a Lane-L dataset builder from reaching it.
 _ENTRIES: tuple[TableEntry, ...] = (
     _asof("data_quality_issues", "issue_id",
           "DQ timeline; active-at-cutoff via detected_at<=cutoff AND (resolved_at IS NULL OR "
@@ -153,6 +155,15 @@ _ENTRIES: tuple[TableEntry, ...] = (
                "games.scheduled_start are denormalized MUTABLE current-state and must be read via "
                "game_status_history as-of; games.updated_at is mutable.",
                forbidden=frozenset({"status", "scheduled_start", "updated_at"})),
+    _unsupported("identity_audit_findings",
+                 "Lane-R (f018) identity-audit detail. Retrospective RESEARCH provenance, not a "
+                 "strict-forward feature: it records what a corpus-scoped G5 audit observed, at "
+                 "audit wall-clock, with no availability semantics of its own. Joining it into a "
+                 "Lane-L dataset row would import a conclusion reached long after the cutoff."),
+    _unsupported("identity_audit_records",
+                 "Lane-R (f018) identity-audit results, for the same reason as the findings table. "
+                 "An accepted audit clears a namespace for RECONSTRUCTION use; it says nothing "
+                 "about what was knowable at a forward decision time."),
     _unsupported("ingestion_runs", "Run bookkeeping; never a dataset join."),
     _asof("injury_snapshots", "injury_id",
           "Injury observations; filtered by observed_at (transaction time), NOT published_at "
@@ -211,6 +222,14 @@ _ENTRIES: tuple[TableEntry, ...] = (
                  "Provider-written team name observations (e017): a matching/RESOLVER input, not a "
                  "predictor, for the same reason as the player table above."),
     _unsupported("raw_responses", "Immutable provider payloads; provenance, not a feature join."),
+    _unsupported("reconstructed_input_provenance",
+                 "Lane-R (f018) input certifications. Deliberately unreachable from the strict "
+                 "AsOfReader path: this table is the OTHER lane, and the entire point of keeping "
+                 "the two apart is that a reconstructed-research eligibility verdict must never be "
+                 "mistaken for a transaction-time-exact one. It stores no feature values."),
+    _unsupported("reconstruction_corpus_versions",
+                 "Lane-R (f018) corpus identity. Manifest-level provenance describing a whole "
+                 "reconstruction; not a per-row fact and not a predictor."),
     _asof("roster_snapshots", "roster_id",
           "Roster observations, as-of; membership must additionally be constrained to the game's "
           "league season by the caller."),
@@ -234,6 +253,12 @@ _ENTRIES: tuple[TableEntry, ...] = (
     _asof("sportsbook_price_snapshots", "snapshot_id",
           "Price observations, as-of (feature: price as of cutoff). The closing-line query over "
           "this table is isolated in the evaluation_only module."),
+    _unsupported("static_crosswalk_provenance",
+                 "Lane-R (f018) provider->canonical static crosswalk. Same reasoning as "
+                 "team_aliases and the e017 identity tables: a RESOLVER input, never a predictor. "
+                 "It is retrospectively usable inside its own corpus under the reviewed "
+                 "timeless-identity rule, which is a statement about Lane R and confers nothing on "
+                 "a forward dataset row."),
     _unsupported("team_aliases",
                  "Provider->canonical team alias: a matching/RESOLVER input, not a predictor. Its "
                  "season window does NOT make it feature-safe; canonical identity comes only via "

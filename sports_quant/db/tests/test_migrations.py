@@ -39,6 +39,7 @@ EXPECTED_MIGRATIONS = (
     (15, "d015_sportsbook_matching"),
     (16, "d016_kalshi_matching"),
     (17, "e017_provider_identity"),
+    (18, "f018_retrospective_provenance"),
 )
 
 
@@ -288,7 +289,7 @@ def test_migration_003_rebuild_preserves_existing_history_rows(tmp_path: Path) -
     # Now apply the rest: 003 (and b004, which both rebuild game_status_history).
     result = database.migrate()
     assert [m.version for m in result.applied] == [
-        3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+        3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
 
     with database.connection() as conn:
         rows = conn.execute(
@@ -398,7 +399,7 @@ def test_migration_b006_rebuild_preserves_every_price_snapshot(tmp_path: Path) -
     # adds the Kalshi tables and touches nothing here).
     result = database.migrate()
     assert [m.version for m in result.applied] == [
-        6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+        6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
 
     with database.connection() as conn:
         after = conn.execute(

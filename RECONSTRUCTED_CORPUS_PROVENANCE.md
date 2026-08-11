@@ -142,6 +142,11 @@ Before any reconstructed corpus is built or used:
    a **corpus property and is version-bound**: a narrower window's pass never
    transfers to a wider one, and later evidence produces a new corpus version
    rather than rewriting an old one.
+6. **(2026-08-11)** The schema for §2 and §5 now exists as migration `f018`
+   (schema **v18**) -- see `RETROSPECTIVE_PIT_SCHEMA_V18_IMPLEMENTATION.md`. It is a
+   provenance FOUNDATION only and **has not been independently reviewed**. No
+   reader, no identity-audit engine and no market anchoring were built, and F1-R,
+   F2, production matching and model training all remain unauthorized.
 
 Until all four pass, only `strict_forward_pit` (forward collection) may support
 evaluation, and no profitability claim may be made from reconstructed data.
