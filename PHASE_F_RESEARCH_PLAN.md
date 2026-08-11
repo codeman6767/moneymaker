@@ -64,7 +64,27 @@
 > contemporaneous `commence_time`; weather uses a conservative 24-hour-lead run and
 > is excluded from the 5-season core; and retrospective economic *simulation* is
 > permitted as research while *profitability claims* still require forward evidence.
-> **G5 (provider-id stability) is the only gate blocking implementation.**
+> ~~G5 (provider-id stability) is the only gate blocking implementation.~~
+>
+> **G5 (2026-08-10): CLOSED — corpus-scoped fail-closed contract.**
+> `G5_PROVIDER_ID_STABILITY_REVIEW.md`. The original criterion (provider
+> documentation guaranteeing global permanent non-reuse) is **unattainable**
+> (BALLDONTLIE is silent on uniqueness/permanence/reuse; MLB StatsAPI documentation
+> is login-gated) and **mis-scoped** — Lane R never dereferences an ID outside its own
+> corpus. Replaced by a nine-point contract keyed on
+> `(league, provider, entity_type, provider_id)`: every observation of an ID within
+> the reconstruction corpus must be compatible with one canonical entity; any
+> incompatibility **fails closed** on a severity ladder; display name, team
+> affiliation and outcome data are never identity evidence; the manifest binds the
+> identity-audit digest and API namespace generation. The audit ran clean on real
+> evidence (MLB 400 games / 30 teams / 1,053 players; NBA 239 / 30 / 550; **zero
+> collisions**, with 1,044 and 549 player ids observed more than once). **One month
+> does not prove 3–5 season stability** — the same audit must be re-run over the full
+> F2 source window, and collision-free status is a **corpus property, version-bound**;
+> later evidence yields a new corpus version and never rewrites the old one.
+>
+> **No gate now blocks implementation**, but this authorizes nothing: implementation,
+> F1-R, F2, production matching and model training each require separate authorization.
 
 **Status:** F0 planning complete **and independently reviewed** (see §R). **F1A
 (request/credit safety controls) is complete and independently reviewed.** **The

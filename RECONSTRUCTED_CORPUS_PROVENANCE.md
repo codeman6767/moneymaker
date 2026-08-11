@@ -135,6 +135,13 @@ Before any reconstructed corpus is built or used:
 4. Any schema change implementing §2 is a **separate, independently-reviewed
    migration** — not bundled with the reconstruction builder, and never during
    ingestion.
+5. **(2026-08-10)** The static-identity crosswalk passes a **corpus-scoped
+   identity-consistency audit** over the exact reconstruction window, keyed on
+   `(league, provider, entity_type, provider_id)` and failing closed on any
+   collision — see `G5_PROVIDER_ID_STABILITY_REVIEW.md`. Collision-free status is
+   a **corpus property and is version-bound**: a narrower window's pass never
+   transfers to a wider one, and later evidence produces a new corpus version
+   rather than rewriting an old one.
 
 Until all four pass, only `strict_forward_pit` (forward collection) may support
 evaluation, and no profitability claim may be made from reconstructed data.

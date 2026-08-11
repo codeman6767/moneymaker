@@ -493,8 +493,12 @@ Must not block Lane-R research.
 | **G5** provider-id reuse (new) | whether any provider reuses/retires ids | **yes** | **yes** | yes | yes | yes | yes | provider id-stability documentation |
 | **G6** Odds terms at launch (new) | storage/research unaddressed in terms | no | no | no | no | no | no | legal review before public launch |
 
-**G5 is the only gate that blocks implementation** — the static-identity
-relaxation rests on id stability, which must be documented before it is coded.
+~~**G5 is the only gate that blocks implementation**~~ — **G5 was CLOSED on
+2026-08-10** (`G5_PROVIDER_ID_STABILITY_REVIEW.md`). The requirement for provider
+documentation of global non-reuse proved unattainable and mis-scoped; it is
+replaced by a corpus-scoped, fail-closed, version-bound identity-consistency
+audit. **No gate now blocks implementation**; G1–G4 and G6 continue to bound what
+an implementation may CLAIM, not whether it may be built.
 
 ## 26. Citations (accessed 2026-08-10, no API call)
 
@@ -553,8 +557,10 @@ Also: credit budget recomputed **~38% lower** from real schedules; evidence grad
 E0–E3 added; `availability_confidence` removed; Odds terms verified (silent on
 storage and research; commercial use permitted where data is not the product).
 
-Implementation may be **separately authorized** once **G5** (provider-id stability)
-is closed. Nothing here authorizes it.
+**G5 has since been closed** (2026-08-10, `G5_PROVIDER_ID_STABILITY_REVIEW.md`), so
+no gate blocks implementation. A separately authorized phase may implement the
+reviewed architecture, subject to its own independent review. Nothing here or
+there authorizes F1-R, F2, production matching or training.
 
 Confirmations: no implementation occurred; **no provider data/API request** was
 made; protected evidence **7/7 byte-identical**; schema **v17**; F1-R, F2,
