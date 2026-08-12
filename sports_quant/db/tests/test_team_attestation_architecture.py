@@ -11,8 +11,13 @@ The load-bearing premises:
 * the canonical team dimension is a **franchise** dimension, with relocation and
   rename encoded as historical aliases of one row;
 * every official provider franchise id resolves to **exactly one** canonical
-  franchise by **exact** normalized equality -- never similarity;
-* the resolution is corroborated by a **second independent attribute**;
+  franchise by **exact** normalized equality -- never similarity (the T1
+  invariant; the converse, one franchise per provider id, is NOT required and
+  the independent review corrected a test that had pinned it);
+* the resolution is corroborated by a **second attribute from the same
+  observation** (the independent review corrected "independent attribute":
+  name, abbreviation and nickname arrive on one provider row, so agreement
+  lowers accidental-label-match risk and is not independent-source evidence);
 * a historical label (``Montreal Expos``) cannot create a second franchise;
 * `games` can already key a canonical row on the official provider game id.
 
@@ -203,8 +208,25 @@ def test_every_official_team_id_is_uniquely_and_corroboratedly_attestable(
     assert not ambiguous, f"ambiguous provider ids: {ambiguous}"
     assert not uncorroborated, f"no second attribute agreed: {uncorroborated}"
     assert len(attested) == 30
-    # One canonical franchise per provider id, and no franchise claimed twice.
-    assert len(set(attested.values())) == 30
+
+    # THE INVARIANT (T1): each provider key denotes exactly one canonical
+    # franchise. `attested` is a dict, so this holds by construction; it is the
+    # rule the architecture actually requires.
+    assert all(isinstance(v, str) and v for v in attested.values())
+
+    # AN OBSERVATION, NOT A RULE: these two one-month 2026 corpora happen to be
+    # 30 provider ids <-> 30 franchises. The independent review corrected the
+    # earlier `len(set(attested.values())) == 30`, which promoted that shape to
+    # global canonical-target injectivity and would have rejected a legitimate
+    # provider-id transition (old id and new id denoting one franchise). Recorded
+    # here so the observation is preserved without becoming policy.
+    distinct_targets = len(set(attested.values()))
+    assert distinct_targets <= 30, "a provider key gained two franchises"
+    assert distinct_targets == 30, (
+        "observation for these corpora only: currently 1:1. If a future corpus "
+        "legitimately maps two provider ids to one franchise, relax THIS "
+        "assertion -- not the T1 invariant above."
+    )
 
 
 PROVIDER_LEAGUES_INVERSE = {v: k for k, v in PROVIDER_LEAGUES.items()}

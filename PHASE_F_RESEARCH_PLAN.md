@@ -150,6 +150,28 @@
 > training remain unauthorized.** The architecture decision itself still requires
 > independent review. G1/G2/G3/G4/G6 unchanged.
 >
+> **TEAM-A architecture REVIEWED 2026-08-13 — ACCEPTED WITH REPAIRS.**
+> `RETROSPECTIVE_TEAM_GAME_CROSSWALK_ARCHITECTURE_INDEPENDENT_REVIEW.md`. The TEAM-A
+> choice stands, but six design claims were proven false. Two are load-bearing:
+> **the corpus map digest does NOT bind the crosswalk** (v19 accepts a crosswalk
+> contradicting the committed map — the database cannot enforce agreement with an
+> external artifact), and **the curation uniqueness rule contradicted the many→one
+> rule** (the correct invariant is provider-key functional uniqueness; canonical-
+> target injectivity is NOT required, and a test that pinned the observed 30↔30
+> shape as policy has been repaired). Also: the enforced game key carries **neither
+> league nor generation** → resolved as GAME-NAMESPACE-B, namespace-qualified
+> provider values (`balldontlie:nba:v1`), needing no migration; the crosswalk digest
+> captures the conclusion, not the curation evidence; **no canonical-team seed digest
+> exists**; and "independent attribute" overstated corroboration — TEAM-A curates
+> *denotation* and does **not** prove provider-id permanence.
+>
+> Schema verdict: **V19 SUFFICIENT WITH ADDITIONAL CODE INVARIANTS** — no migration,
+> but map-membership and seed-versioning enforcement must be added in code and CI.
+>
+> **TEAM-A implementation may be separately authorized. The reader remains BLOCKED**
+> until that implementation is itself independently reviewed. F1-R, F2, production
+> matching and model training remain unauthorized. G1/G2/G3/G4/G6 unchanged.
+>
 > **This foundation has NOT been independently reviewed.** Still unimplemented:
 > `RetrospectiveResearchReader`, the identity-audit engine, and historical
 > odds/market anchoring. Still unauthorized: **F1-R**, **F2**, production matching,

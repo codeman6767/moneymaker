@@ -3,7 +3,19 @@
 Resolves the blocker retained by
 `RETROSPECTIVE_IDENTITY_AUDIT_ENGINE_INDEPENDENT_REVIEW.md` §5.
 
-**Verdict: ARCHITECTURE READY FOR INDEPENDENT REVIEW.**
+**Verdict as designed: ARCHITECTURE READY FOR INDEPENDENT REVIEW.**
+**Verdict after review: ACCEPTED WITH REPAIRS** (applied inline below).
+
+> **REVIEWED 2026-08-13 — ACCEPTED WITH REPAIRS.**
+> `RETROSPECTIVE_TEAM_GAME_CROSSWALK_ARCHITECTURE_INDEPENDENT_REVIEW.md` is
+> **authoritative where it differs from this document**. Six design claims
+> were proven wrong and are corrected inline below (RV1–RV6): the map digest
+> does **not** bind the crosswalk at v19; the curation uniqueness rule
+> contradicted the many→one rule; the enforced game key carries neither league
+> nor generation; the crosswalk digest captures the conclusion rather than the
+> curation evidence; no canonical-team seed digest exists; and "independent
+> attribute" overstated the corroboration. The TEAM-A choice itself stands.
+
 **Chosen: TEAM-A — source-controlled static attestation to the existing canonical
 seed.** No schema change; **schema stays v19**.
 
@@ -121,6 +133,13 @@ class was defined for. A per-row name match is a claim about a *row*.
 **This is accepted as STATIC_IDENTITY attestation** — but only under the curation
 evidence rules in §7, not merely because it is convenient.
 
+**What TEAM-A does and does not claim (RV6/RV7).** It curates the *denotation*
+of a provider franchise id against the corpus evidence available. It does **not**
+prove provider-id permanence or non-reuse — that is the identity audit's job, and
+the audit's own review recorded that same-league team reuse is **undetectable**
+from label evidence. Attestation therefore inherits, and cannot exceed, the
+audit's detection power.
+
 ## 6. Options considered, and why the others are rejected
 
 ### TEAM-B — provider-key canonical team redesign: **rejected, invasive**
@@ -170,10 +189,21 @@ the rule that stops manual editing from being fuzzy matching with extra steps.
 2. The provider-written **full name**, normalized by the shared normalizer,
    matches **exactly** one canonical seed alias. Exact normalized equality only —
    no similarity, no scoring, no ranking, no nearest-match.
-3. **At least one second independent attribute** (abbreviation or nickname),
+3. **At least one second corroborating attribute** (abbreviation or nickname),
    likewise exact, resolves to the **same** canonical franchise.
-4. The resolution is **unique**: exactly one canonical franchise, and no other
-   provider id in that namespace claims it.
+   **RV6 correction.** These are *not* independent-source evidence: name,
+   abbreviation and nickname arrive on the **same provider observation row**.
+   Agreement lowers the risk of an accidental single-label match; it proves
+   nothing about provider-id permanence, because a provider that reused an id
+   and copied its labels coherently would satisfy every one of them.
+4. The resolution is **functionally unique** (invariant **T1**): the provider
+   key denotes exactly one canonical franchise.
+   **RV2 correction.** This rule previously added "and no other provider id in
+   that namespace claims it", which contradicts §8's many→one rule and would
+   reject a legitimate provider-id transition. Canonical-target **injectivity
+   is not required**: two provider ids may denote one franchise. The schema
+   already permits that and already refuses the converse. The 30↔30 shape in
+   §9 is an *observation about these corpora*, not a rule.
 5. The entry is **committed to source control** and reviewed as a diff.
 6. No entry may use a game outcome, a roster, a player, a statistic, a target
    game, or any cutoff-dependent fact.
@@ -238,6 +268,16 @@ normalized equality:
 A historical provider-written label therefore cannot create a second canonical
 team, and the Hornets/Pelicans pair does not cross-contaminate.
 
+**Precision note (review §15).** Most of these entries are plain franchise
+continuation (relocation or rename). Two are **league-recognized history
+reassignment**, which is a different relation and should not be described as if
+it were the same: the 1988–2002 Charlotte Hornets history was reassigned to
+`tm_nba_cha` when the Bobcats took the name in 2014, and `tm_nba_nop`
+relinquished it; and the Seattle SuperSonics → Oklahoma City Thunder move left
+the Sonics name and banners in Seattle by settlement while the franchise itself
+continued. The seed's treatment of both is defensible for a *franchise
+dimension*, but the distinction is documented rather than flattened.
+
 ## 10. Game bootstrap design (§17, §18, §19)
 
 **The `games` table is already designed for this.** It carries
@@ -255,6 +295,22 @@ concept, not a bolt-on. No schema change.
 **Identity** (may bootstrap a canonical game): league, official provider,
 namespace generation, official provider game id, and the canonical home/away
 teams resolved through their attestations.
+
+**RV3 correction — the stated key and the enforced key disagree.** The enforced
+constraint is `UNIQUE (official_provider, official_game_key)`, which is **global**:
+it carries neither league nor namespace generation, and the provider strings
+(`mlb_statsapi`, `balldontlie`) encode neither. Proven: the same
+`(balldontlie, 12345)` pair is refused across two different leagues, and a
+hypothetical v2 generation re-issuing numeric ids would collide with v1 rows.
+BALLDONTLIE also serves more than one sport under one brand.
+
+**Resolution: GAME-NAMESPACE-B.** The stored `official_provider` value must be
+**namespace-qualified** — `balldontlie:nba:v1`, `mlb_statsapi:mlb:v1` — so the
+existing unique index enforces exactly the intended key. `official_provider` is
+plain TEXT with no CHECK, so this needs **no migration** (verified). The
+qualified form must be a single source-controlled constant shared by the game
+bootstrap and the attestation policy, and it must never be derived by string
+concatenation at a call site.
 
 **Descriptive / mutable** (never identity): scheduled start, `original_start`,
 venue, status, reschedule information, and `game_number` except where §11 of the
@@ -323,8 +379,8 @@ Everything required is already modelled at v19.
 | canonical team id | `static_crosswalk_provenance.canonical_entity_id` |
 | accepted G5 audit + its digest | `identity_audit_id`, `identity_audit_digest` (trigger-enforced ACCEPTED, same namespace, **same source corpus**) |
 | attestation policy version | `provenance_policy_version` (e.g. `g5-team-attestation-v1`) |
-| curation evidence digest | folded into `semantic_digest`, which already covers the full key + audit digest + policy |
-| **source-controlled mapping digest** | **`reconstruction_corpus_versions.static_identity_map_digest`** — an existing nullable column named for exactly this and currently unused |
+| curation evidence digest | **RV4: NOT captured today.** `semantic_digest` covers corpus, namespace, provider id, canonical id, audit digest and policy — the *conclusion*, not the evidence. The implementation must either fold the map digest in (no schema change) or carry a separate source-controlled evidence manifest. |
+| **source-controlled mapping digest** | `reconstruction_corpus_versions.static_identity_map_digest` — an existing nullable column named for exactly this. **RV1: recording it does NOT bind the crosswalk.** v19 accepts a crosswalk contradicting the declared map (proven). Binding must be enforced in code; see the review §11/§32. |
 | curated/reviewed timestamp | `curated_at` (audit wall-clock; never backdated, never a reused `decided_at`) |
 | corpus binding | `corpus_version_id` + the f019 cross-corpus trigger |
 
@@ -332,9 +388,15 @@ The f018 trigger `trg_xwk_team_target_valid` already requires a team crosswalk t
 bind an existing `teams` row **in the same league**, which is precisely the
 integrity TEAM-A needs.
 
-**Schema impact: none. Stays v19, 19 migrations.** What is required is a
-source-controlled attestation constant plus the existing v19 provenance — the
-outcome §25 says to prefer.
+**Schema impact: none. Stays v19, 19 migrations** — but the review's verdict is
+**V19 SUFFICIENT WITH ADDITIONAL CODE INVARIANTS**, not plain sufficiency. The
+implementation phase must add three reviewed enforcement steps: (a) the generator
+recomputes the map and requires exact entry membership before writing any
+crosswalk; (b) the map digest participates in the crosswalk's `semantic_digest`,
+so a crosswalk is cryptographically bound to the map version it came from;
+(c) a verifier re-derives the map from committed source and checks every
+crosswalk row in the corpus, run in CI. Without all three, "the map digest binds
+the crosswalk" remains false.
 
 ## 13. Reader resolution contract (§16)
 
@@ -367,6 +429,24 @@ here, because the live path's failure modes (a genuinely new franchise, an
 expansion team, a provider adding an id mid-season) have not been analysed.
 Crucially, TEAM-A creates **no second canonical-team system**, so that follow-up
 stays open rather than being foreclosed.
+
+## 14b. Canonical-team seed versioning (RV5)
+
+**No canonical-team seed digest exists anywhere in the repository** (verified).
+Because canonical ids are abbreviation-derived and the seed also carries the
+historical aliases the curation relies on, a later seed edit — an alias added or
+removed, an abbreviation changed, a franchise-history reinterpretation — would
+silently change what an already-built corpus's attestation *means*, and nothing
+would detect it. `code_version` is nullable and optional, so it cannot be relied
+on for this.
+
+**Requirement for the implementation phase:** compute a deterministic
+**canonical-team seed semantic digest** (over each seed's canonical name, city,
+nickname, abbreviation, derived id and full alias set, canonically ordered) and
+bind it into the attestation map digest. A seed edit then changes the map digest,
+which changes the corpus version — so an old corpus stays reproducible under the
+exact seed semantics it used. This needs no new storage: it rides the existing
+`static_identity_map_digest`.
 
 ## 15. Security and auditability (§28)
 

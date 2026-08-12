@@ -178,6 +178,14 @@ Before any reconstructed corpus is built or used:
     `reconstruction_corpus_versions.static_identity_map_digest`, so a remap
     produces a new corpus version and can never silently reinterpret an old one.
     **Decision only — not implemented, and awaiting independent review.**
+11. **(2026-08-13)** That architecture was independently reviewed: **ACCEPTED WITH
+    REPAIRS**. The map digest does **not** bind the crosswalk at v19, so
+    map-membership must be enforced in code and CI; canonical-target injectivity is
+    not required (provider-key functional uniqueness is); the game official key
+    needs namespace-qualified provider values; and a canonical-team seed digest is
+    required so a seed edit cannot silently change an old corpus's meaning. Schema
+    verdict: **V19 SUFFICIENT WITH ADDITIONAL CODE INVARIANTS**. TEAM-A
+    implementation may be separately authorized; the reader remains blocked.
 
 Until all four pass, only `strict_forward_pit` (forward collection) may support
 evaluation, and no profitability claim may be made from reconstructed data.
