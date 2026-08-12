@@ -56,6 +56,7 @@ from .sources import (
     PlayerObservation,
     TeamObservation,
     observations_for,
+    require_provider_league,
 )
 
 __all__ = [
@@ -76,12 +77,23 @@ class IdentityAuditError(RetrospectiveProvenanceError):
 #: which fields are identity-defining, which mutations are lawful, what counts as
 #: a flag -- requires a new version, because an audit record's digest binds this
 #: string and old records must never be silently reinterpreted.
-AUDIT_POLICY_VERSION: Final = "g5-identity-audit-v1"
+#:
+#: v2 (independent review, 2026-08-13). v1 was materially under-powered:
+#:   * a game id reused for the SAME matchup on another date, and a game id
+#:     reused across both halves of a doubleheader, were both reported clean;
+#:   * `reschedule_info` was bound into the source digest but never reached the
+#:     compatibility rules, so a postponement and a reuse looked identical;
+#:   * an empty namespace was reported as an ACCEPTED clean audit;
+#:   * detection power was never recorded, so "zero collisions" read as
+#:     "identity verified" when for games it meant "nothing was comparable".
+AUDIT_POLICY_VERSION: Final = "g5-identity-audit-v2"
 
 # -- Finding codes. Stable strings; each documented in the implementation report.
 GAME_INCOMPATIBLE_EVENT: Final = "GAME_ID_TWO_DIFFERENT_EVENTS"
 GAME_LEGITIMATE_MUTATION: Final = "GAME_ID_LAWFUL_MUTATION"
 GAME_INSUFFICIENT: Final = "GAME_ID_INSUFFICIENT_EVIDENCE"
+GAME_DOUBLEHEADER_REUSE: Final = "GAME_ID_TWO_EVENTS_SAME_DAY"
+GAME_UNEXPLAINED_DATE_CHANGE: Final = "GAME_ID_DATE_MOVED_WITHOUT_CONTINUITY"
 TEAM_INCOMPATIBLE_LEAGUE: Final = "TEAM_ID_TWO_LEAGUES"
 TEAM_LABEL_VARIANCE: Final = "TEAM_ID_LABEL_CHANGED"
 PLAYER_INCOMPATIBLE_LEAGUE: Final = "PLAYER_ID_TWO_LEAGUES"
@@ -89,6 +101,7 @@ PLAYER_INCOMPATIBLE_BIRTH_DATE: Final = "PLAYER_ID_TWO_BIRTH_DATES"
 PLAYER_NAME_VARIANCE: Final = "PLAYER_ID_NAME_CHANGED"
 PLAYER_INSUFFICIENT: Final = "PLAYER_ID_NO_SECONDARY_EVIDENCE"
 NAMESPACE_UNVERIFIED_CODE: Final = "NAMESPACE_GENERATION_UNVERIFIED"
+DETECTION_POWER_CODE: Final = "NAMESPACE_DETECTION_POWER"
 
 
 @dataclass(frozen=True)
@@ -215,6 +228,24 @@ def _supplied_disagreements(
     return changed
 
 
+#: Statuses that are themselves evidence an event was moved or interrupted.
+_MOVED_STATUSES: Final[frozenset[str]] = frozenset(
+    {"postponed", "suspended", "delayed", "rescheduled", "cancelled"})
+
+
+def _has_continuity_evidence(group: Sequence[GameObservation]) -> bool:
+    """Did the provider itself say this event moved?
+
+    Either an explicit ``reschedule_info`` payload, or an observed status that
+    only occurs when an event is postponed/suspended/moved. Without one of those,
+    a date change is unexplained -- and an unexplained date change under one id is
+    indistinguishable from that id being reused for a second event.
+    """
+
+    return any(o.reschedule_info for o in group) or any(
+        (o.mapped_status or "").lower() in _MOVED_STATUSES for o in group)
+
+
 def _audit_games(
     namespace: ProviderNamespace, observations: Sequence[GameObservation]
 ) -> tuple[list[PlannedFinding], dict[str, int]]:
@@ -237,10 +268,29 @@ def _audit_games(
                         "observations": len(group)},
             ))
             continue
+
+        # Two events on ONE day under one id. MLB assigns distinct game numbers to
+        # the halves of a doubleheader, so the same id carrying both is provably
+        # two events -- the matchup matching is exactly what makes it invisible to
+        # the season/home/away triple.
+        same_day_numbers = defaultdict(set)
+        for o in group:
+            if o.game_date_local is not None and o.game_number is not None:
+                same_day_numbers[o.game_date_local].add(o.game_number)
+        doubled = {d: sorted(n) for d, n in same_day_numbers.items() if len(n) > 1}
+        if doubled:
+            findings.append(PlannedFinding(
+                severity=FindingSeverity.BLOCKING,
+                finding_code=GAME_DOUBLEHEADER_REUSE,
+                classification=FindingClassification.IDENTITY_COLLISION,
+                exclusion_scope=ExclusionScope.ENTITY,
+                provider_id=provider_id,
+                detail={"dates_with_multiple_game_numbers": sorted(doubled),
+                        "observations": len(group)},
+            ))
+            continue
+
         if any(v is None for v in next(iter(identities))):
-            # The id is internally consistent, but the corpus never recorded the
-            # season or a participant, so consistency here proves less than it
-            # looks. Recorded rather than silently counted as clean.
             findings.append(PlannedFinding(
                 severity=FindingSeverity.INFO,
                 finding_code=GAME_INSUFFICIENT,
@@ -250,6 +300,24 @@ def _audit_games(
                 detail={"observations": len(group)},
             ))
             continue
+
+        dates = {o.game_date_local for o in group if o.game_date_local}
+        if len(dates) > 1 and not _has_continuity_evidence(group):
+            # A postponement legitimately moves a date, so this is NOT called a
+            # collision. But nor is it lawful mutation: with no reschedule payload
+            # and no moved-status observation, the corpus cannot distinguish "the
+            # same game moved" from "this id was reused for another game between
+            # the same teams". Recorded as a detection gap, honestly.
+            findings.append(PlannedFinding(
+                severity=FindingSeverity.WARNING,
+                finding_code=GAME_UNEXPLAINED_DATE_CHANGE,
+                classification=FindingClassification.INSUFFICIENT_EVIDENCE,
+                exclusion_scope=ExclusionScope.NONE,
+                provider_id=provider_id,
+                detail={"distinct_dates": len(dates), "observations": len(group)},
+            ))
+            continue
+
         mutations = {k for k in _game_mutation_fields(group[0])
                      if len({_game_mutation_fields(o)[k] for o in group}) > 1}
         if mutations:
@@ -416,10 +484,21 @@ def audit_namespace(
             "a different policy cannot be reproduced here, so it is refused."
         )
 
+    require_provider_league(namespace.provider, namespace.league_id)
     observations = observations_for(source, namespace.entity_type,
                                     provider=namespace.provider)
+    if not observations:
+        # An audit of nothing found no contradiction, which is true and useless.
+        # Recording it as ACCEPTED would put a clean namespace verdict on a corpus
+        # that holds no evidence for that entity type at all.
+        raise IdentityAuditError(
+            f"source corpus holds no {namespace.entity_type.value} identity evidence "
+            f"for provider {namespace.provider!r}. An empty namespace cannot be "
+            "audited clean -- refusing rather than recording a vacuous ACCEPTED."
+        )
     auditor = _AUDITORS[namespace.entity_type]
     findings, counts = auditor(namespace, observations)  # type: ignore[operator]
+    findings = [*findings, _detection_power(namespace, observations, counts)]
 
     # Entity-type audits scope by provider; the team/player tables also carry a
     # league, and an observation from another league is not this namespace's
@@ -477,6 +556,56 @@ def audit_namespace(
     )
     _reconcile(plan, observations)
     return plan
+
+
+def _detection_power(
+    namespace: ProviderNamespace,
+    observations: Sequence[Any],
+    counts: dict[str, int],
+) -> PlannedFinding:
+    """Record what this audit was ABLE to detect, not just what it found.
+
+    The independent review's central objection: "zero collisions" was being read
+    as "identity verified", when for the real one-month game namespaces it meant
+    "no id was observed twice, so nothing was compared at all". A clean verdict
+    over uncomparable evidence is not evidence of stability, and the audit record
+    must say so itself rather than leaving it to a report someone may not read.
+
+    ``comparable_ids`` is the number of ids observed more than once -- the only
+    ids where a contradiction could possibly have surfaced.
+    ``discriminating_ids`` is the number carrying independent secondary evidence
+    (a birth date, for persons); for games and teams the discriminating evidence
+    is structural and equals the comparable count.
+    """
+
+    attribute = {
+        EntityType.GAME: "provider_game_id",
+        EntityType.TEAM: "provider_team_id",
+        EntityType.PLAYER: "provider_player_id",
+    }[namespace.entity_type]
+    groups: dict[str, list[Any]] = defaultdict(list)
+    for obs in observations:
+        groups[str(getattr(obs, attribute))].append(obs)
+    comparable = sum(1 for g in groups.values() if len(g) > 1)
+    if namespace.entity_type is EntityType.PLAYER:
+        discriminating = sum(
+            1 for g in groups.values()
+            if len({o.birth_date for o in g if o.birth_date}) >= 1 and len(g) > 1)
+    else:
+        discriminating = comparable
+    return PlannedFinding(
+        severity=FindingSeverity.INFO,
+        finding_code=DETECTION_POWER_CODE,
+        classification=FindingClassification.INSUFFICIENT_EVIDENCE,
+        exclusion_scope=ExclusionScope.NONE,
+        provider_id=None,
+        detail={
+            "ids_audited": counts["distinct_ids"],
+            "ids_observed_more_than_once": comparable,
+            "ids_with_discriminating_evidence": discriminating,
+            "entity_type": namespace.entity_type.value,
+        },
+    )
 
 
 def _provider_ids(entity_type: EntityType, observations: Sequence[Any]) -> set[str]:

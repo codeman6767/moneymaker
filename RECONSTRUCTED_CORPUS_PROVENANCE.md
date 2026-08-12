@@ -142,11 +142,12 @@ Before any reconstructed corpus is built or used:
    a **corpus property and is version-bound**: a narrower window's pass never
    transfers to a wider one, and later evidence produces a new corpus version
    rather than rewriting an old one.
-6. **(2026-08-11)** The schema for §2 and §5 now exists as migration `f018`
-   (schema **v18**) -- see `RETROSPECTIVE_PIT_SCHEMA_V18_IMPLEMENTATION.md`. It is a
-   provenance FOUNDATION only and **has not been independently reviewed**. No
-   reader, no identity-audit engine and no market anchoring were built, and F1-R,
-   F2, production matching and model training all remain unauthorized.
+6. **(2026-08-11 — historical snapshot, superseded by 7 and 8.)** The schema for
+   §2 and §5 exists as migration `f018` (schema **v18**) -- see
+   `RETROSPECTIVE_PIT_SCHEMA_V18_IMPLEMENTATION.md`. *At that commit* it was a
+   provenance foundation only, not independently reviewed, with no reader, no
+   identity-audit engine and no market anchoring. F1-R, F2, production matching
+   and model training were, and remain, unauthorized.
 7. **(2026-08-11)** That foundation was independently reviewed
    (`RETROSPECTIVE_PIT_SCHEMA_V18_INDEPENDENT_REVIEW.md`): **ACCEPTED WITH REPAIRS**,
    now at schema **v19** via migration `f019`. The two material findings both
@@ -163,6 +164,13 @@ Before any reconstructed corpus is built or used:
    canonical-entity preparation, which cannot be done deterministically without
    name matching. F1-R, F2, production matching and model training remain
    unauthorized.
+9. **(2026-08-12)** That engine was independently reviewed
+   (`RETROSPECTIVE_IDENTITY_AUDIT_ENGINE_INDEPENDENT_REVIEW.md`): **ACCEPTED WITH
+   REPAIRS AND A RETAINED BLOCKER**, audit policy now `g5-identity-audit-v2`.
+   `ACCEPTED` means "no contradiction detected at this policy's detection power",
+   never "verified stable identity" -- and every audit now records that power.
+   Team and game crosswalks remain blocked; the reader must not begin until the
+   canonical-team architecture is separately decided.
 
 Until all four pass, only `strict_forward_pit` (forward collection) may support
 evaluation, and no profitability claim may be made from reconstructed data.

@@ -31,8 +31,10 @@ from sports_quant.retrospective.crosswalks import (
 from sports_quant.retrospective.identity_audit import (
     AUDIT_POLICY_VERSION,
     GAME_INCOMPATIBLE_EVENT,
+    GAME_UNEXPLAINED_DATE_CHANGE,
     PLAYER_INCOMPATIBLE_BIRTH_DATE,
     PLAYER_INCOMPATIBLE_LEAGUE,
+    PLAYER_INSUFFICIENT,
     PLAYER_NAME_VARIANCE,
     TEAM_LABEL_VARIANCE,
     IdentityAuditError,
@@ -78,21 +80,23 @@ class SourceBuilder:
              away: str = "20", observed_at: str = T0, provider: str = "mlb_statsapi",
              status: str = "final", date_local: str = "2026-06-01",
              scheduled_start: str = "2026-06-01T22:45:00Z", game_number: int = 1,
-             doubleheader: str = "N", venue: Optional[str] = "3309") -> "SourceBuilder":
+             doubleheader: str = "N", venue: Optional[str] = "3309",
+             resched: Optional[str] = None) -> "SourceBuilder":
         self._n += 1
         with self._conn() as conn:
             conn.execute(
                 "INSERT INTO game_schedule_snapshots (schedule_id, game_ref_id, "
                 "provider, provider_game_id, season, game_date_local, scheduled_start, "
                 "home_provider_team_id, away_provider_team_id, venue_provider_id, "
-                "mapped_status, game_number, doubleheader_code, observed_at, "
-                "ingested_at, run_id, raw_response_id, raw_response_hash, "
-                "content_hash, created_at) VALUES "
-                "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'run', 'raw', 'h', ?, ?)",
+                "mapped_status, game_number, doubleheader_code, reschedule_info, "
+                "observed_at, ingested_at, run_id, raw_response_id, "
+                "raw_response_hash, content_hash, created_at) VALUES "
+                "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'run', 'raw', "
+                "'h', ?, ?)",
                 (f"gss_{self._n}", f"pgr_{provider_game_id}", provider,
                  provider_game_id, season, date_local, scheduled_start, home, away,
-                 venue, status, game_number, doubleheader, observed_at, observed_at,
-                 f"ch_{self._n}", observed_at),
+                 venue, status, game_number, doubleheader, resched, observed_at,
+                 observed_at, f"ch_{self._n}", observed_at),
             )
         return self
 
@@ -190,11 +194,13 @@ def test_game_id_used_for_two_different_matchups_is_a_collision(
 
 
 @pytest.mark.parametrize("kwargs", [
-    {"date_local": "2026-06-04", "scheduled_start": "2026-06-04T22:45:00Z"},  # reschedule
-    {"status": "postponed"},                                                  # postponement
-    {"status": "in_progress"},                                                # progression
-    {"venue": "9999"},                                                        # venue change
-    {"game_number": 2},                                                       # DH numbering
+    # An explicit reschedule payload is the provider saying the event moved.
+    {"date_local": "2026-06-04", "scheduled_start": "2026-06-04T22:45:00Z",
+     "resched": '{"rescheduledFrom": "2026-06-01"}'},
+    # A moved-status observation is equally good continuity evidence.
+    {"date_local": "2026-06-04", "status": "postponed"},
+    {"status": "in_progress"},                                # progression
+    {"venue": "9999"},                                        # venue change
 ])
 def test_lawful_game_mutation_is_not_a_collision(
     builder: SourceBuilder, kwargs: dict[str, Any]
@@ -206,8 +212,9 @@ def test_lawful_game_mutation_is_not_a_collision(
     plan = _audit(builder.finish(), EntityType.GAME)
     assert plan.verdict is AuditVerdict.ACCEPTED
     assert plan.collision_count == 0
-    assert all(f.classification is FindingClassification.LEGITIMATE_MUTATION
-               for f in plan.findings)
+    assert plan.flagged_count == 0, "a lawful mutation must not raise a flag"
+    assert not [f for f in plan.findings
+                if f.finding_code == GAME_UNEXPLAINED_DATE_CHANGE]
 
 
 def test_doubleheader_games_are_distinct_ids_and_both_clean(
@@ -378,7 +385,7 @@ def test_missing_secondary_evidence_is_reported_once_at_namespace_level(
     plan = _audit(builder.finish(), EntityType.PLAYER)
     assert plan.verdict is AuditVerdict.ACCEPTED
     insufficient = [f for f in plan.findings
-                    if f.classification is FindingClassification.INSUFFICIENT_EVIDENCE]
+                    if f.finding_code == PLAYER_INSUFFICIENT]
     assert len(insufficient) == 1
     assert insufficient[0].provider_id is None
     assert insufficient[0].detail["ids_without_secondary_evidence"] == 5
@@ -426,11 +433,22 @@ def test_same_numeric_id_under_two_providers_or_types_is_distinct() -> None:
 
 
 def test_auditing_the_wrong_league_fails_closed(builder: SourceBuilder) -> None:
+    """The provider<->league binding refuses before any evidence is read.
+
+    `game_schedule_snapshots` carries no league column, so scoping games by
+    provider alone is only sound while a provider is league-exclusive. That
+    invariant is now enforced rather than assumed.
+    """
+
     builder.player("P1", league_id="lg_mlb")
     conn = open_source_corpus(builder.finish())
     try:
-        digest = source_corpus_digest(conn, league_id="lg_nba", provider="mlb_statsapi")
-        with pytest.raises(IdentityAuditError, match="mixed namespace"):
+        with pytest.raises(SourceCorpusError, match="serves"):
+            source_corpus_digest(conn, league_id="lg_nba",
+                                 provider="mlb_statsapi")
+        digest = source_corpus_digest(conn, league_id="lg_mlb",
+                                      provider="mlb_statsapi")
+        with pytest.raises(SourceCorpusError, match="serves"):
             audit_namespace(
                 conn,
                 namespace=ProviderNamespace("lg_nba", "mlb_statsapi",
@@ -896,8 +914,10 @@ def test_cli_json_and_human_report_the_same_audit(
             "--provider", "mlb_statsapi", "--namespace-generation", "v1",
             "--entity-type", "player"]
 
+    # `assert cli_main(...) == 0 or True` was here, which passes for ANY exit
+    # status and therefore asserted nothing at all.
+    assert cli_main([*argv]) == 0
     human: list[str] = []
-    assert cli_main([*argv]) == 0 or True
     machine: list[str] = []
     from sports_quant.cli import run_retrospective_identity_audit as handler
 

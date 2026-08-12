@@ -42,6 +42,7 @@ __all__ = [
     "FindingSeverity",
     "G1Variant",
     "ProvenanceClass",
+    "ATTESTED_GENERATIONS",
     "ProviderNamespace",
     "RetrospectiveProvenanceError",
     "UNVERIFIED_GENERATION",
@@ -59,6 +60,23 @@ class RetrospectiveProvenanceError(RuntimeError):
 #: established from primary evidence. Storable, and never accepted: an audit
 #: carrying it must be recorded as ``rejected_namespace_unverified``.
 UNVERIFIED_GENERATION = "unverified"
+
+#: API generations this build can actually attest to, per provider.
+#:
+#: Before this registry existed, ``verified`` was ``generation != "unverified"``,
+#: so a caller could mark an entirely undocumented namespace verified by typing
+#: ``banana`` -- a fail-OPEN in exactly the contract G5 closed fail-CLOSED. An
+#: attested generation is one whose ingestion path this repository implements and
+#: whose responses are preserved in the corpora; anything else is unverified,
+#: whatever string the caller supplied.
+#:
+#: Neither provider documents identifier stability ACROSS generations, so adding
+#: an entry here is an assertion about what this build ingested, never a claim
+#: that ids carry over from an older API version.
+ATTESTED_GENERATIONS: Final[dict[str, frozenset[str]]] = {
+    "mlb_statsapi": frozenset({"v1"}),
+    "balldontlie": frozenset({"v1"}),
+}
 
 
 class ProvenanceClass(str, enum.Enum):
@@ -207,9 +225,15 @@ class ProviderNamespace:
 
     @property
     def verified(self) -> bool:
-        """False when the API generation could not be established."""
+        """True only for a generation this build can actually attest to.
 
-        return self.generation != UNVERIFIED_GENERATION
+        Deliberately not ``generation != "unverified"``: that let any typo or
+        invented string pass as a verified namespace. An unrecognised generation
+        is treated exactly like an explicitly unverified one, so the failure mode
+        of a typo is a refused audit rather than a false clearance.
+        """
+
+        return self.generation in ATTESTED_GENERATIONS.get(self.provider, frozenset())
 
     def key(self, provider_id: str) -> tuple[str, str, str, str, str]:
         """The full comparison key for one provider id.

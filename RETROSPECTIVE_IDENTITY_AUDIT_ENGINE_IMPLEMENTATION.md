@@ -1,10 +1,28 @@
 # Retrospective identity-audit engine (G5) — implementation
 
+> Superseded in part by the independent review; see the banner below.
+
 Production implementation of the corpus-scoped identity audit and static-crosswalk
 construction required by `G5_PROVIDER_ID_STABILITY_REVIEW.md`, built on the
 independently accepted schema-v19 provenance foundation at `2824c3a`.
 
-**Not yet independently reviewed.** The `RetrospectiveResearchReader` is still
+**Reviewed 2026-08-12 — ACCEPTED WITH REPAIRS AND A RETAINED BLOCKER.**
+`RETROSPECTIVE_IDENTITY_AUDIT_ENGINE_INDEPENDENT_REVIEW.md` is **authoritative
+where it differs from this document**. Ten defects were proven and repaired and
+the audit policy moved to **`g5-identity-audit-v2`**, so three claims below are
+corrected by that review:
+
+* the game identity signature was **under-powered** — a game id reused for the
+  same matchup on another date, and one reused across both halves of a
+  doubleheader, both read as clean at v1;
+* `verified` accepted **any** generation string but the literal `unverified`, so
+  a typo produced a verified namespace and authorized crosswalks;
+* the one-month "zero collisions" is reported below without a detection-power
+  qualifier. **No game id in either corpus was observed more than once**, so the
+  game audit compared nothing, and `birth_date` is absent for every person, so
+  person reuse within a league was undetectable. See the review §4.
+
+The `RetrospectiveResearchReader` is still
 unimplemented, historical market anchoring is still unimplemented, and **F1-R,
 F2, production matching and model training all remain unauthorized.**
 
@@ -70,7 +88,8 @@ Measured: MLB June `63c7a6a1…`, NBA March `5074428c…`.
 
 ## 4. Audit policy version
 
-`AUDIT_POLICY_VERSION = "g5-identity-audit-v1"` names the exact compatibility
+`AUDIT_POLICY_VERSION = "g5-identity-audit-v2"` (bumped by the independent
+review) names the exact compatibility
 rules below. It participates in the audit's semantic digest, and a run requesting
 any other version is **refused rather than approximated** — an audit recorded
 under a policy this build does not implement cannot be reproduced here.
@@ -84,11 +103,21 @@ A game's participants do not change; two observations that disagree mean the id
 denotes two different events.
 
 **Lawful mutation** (recorded as `legitimate_mutation`, never a collision):
-scheduled start, local date, status progression, venue, game number, doubleheader
-code, reschedule info. A postponement that moves a game three days is not id
-reuse, and treating it as one would make every rescheduled game a false
-collision. Doubleheaders carry **distinct provider ids**, so game number is
-metadata rather than the key.
+scheduled start, status progression, venue, and a date change **accompanied by
+provider continuity evidence** — a `reschedule_info` payload or an observed
+postponed/suspended/delayed/rescheduled status. A postponement that moves a game
+three days is not id reuse.
+
+**Two additions from the independent review (policy v2):**
+
+* **Same date, two game numbers → BLOCKING collision**
+  (`GAME_ID_TWO_EVENTS_SAME_DAY`). One id carrying both halves of a split
+  doubleheader is *provably* two events, and the matchup matching is exactly what
+  hid it from the season/home/away triple.
+* **Date change with no continuity evidence → WARNING**
+  (`GAME_ID_DATE_MOVED_WITHOUT_CONTINUITY`, classified `insufficient_evidence`).
+  Not a collision — a postponement genuinely moves a date — but not lawful
+  mutation either, because the corpus cannot distinguish the two.
 
 **Never read:** final score, winner, any result or box-score value, any match
 decision.
@@ -131,6 +160,9 @@ merge.
 | `GAME_ID_TWO_DIFFERENT_EVENTS` | one game id, two identity triples | blocking | `identity_collision` | `entity` |
 | `GAME_ID_LAWFUL_MUTATION` | reschedule/status/venue change | info | `legitimate_mutation` | `none` |
 | `GAME_ID_INSUFFICIENT_EVIDENCE` | season or a participant never recorded | info | `insufficient_evidence` | `none` |
+| `GAME_ID_TWO_EVENTS_SAME_DAY` *(v2)* | one date, two game numbers | blocking | `identity_collision` | `entity` |
+| `GAME_ID_DATE_MOVED_WITHOUT_CONTINUITY` *(v2)* | date changed, no reschedule/moved-status evidence | warning | `insufficient_evidence` | `none` |
+| `NAMESPACE_DETECTION_POWER` *(v2)* | recorded on every audit | info | `insufficient_evidence` | `none` |
 | `TEAM_ID_TWO_LEAGUES` | one team id in two leagues | blocking | `identity_collision` | `dependent_games` |
 | `TEAM_ID_LABEL_CHANGED` | conflicting supplied labels | warning | `name_variance` | `none` |
 | `PLAYER_ID_TWO_LEAGUES` | one person id in two leagues | blocking | `identity_collision` | `entity` |
@@ -260,6 +292,24 @@ source corpus digest `5074428c2e3755335c3fc0d3…`
 
 The prior review's claimed counts (MLB 400/30/1,053; NBA 239/30/550, zero
 collisions) are **independently reproduced**.
+
+### Detection power (added by the independent review)
+
+Every audit now records what it was **able** to detect. Over the real corpora:
+
+| | ids | comparable (seen >1×) | discriminating |
+|---|---|---|---|
+| MLB game | 400 | **0** | 0 |
+| MLB team | 30 | 30 | 30 (league only) |
+| MLB player | 1,053 | 1,044 | **0** |
+| NBA game | 239 | **0** | 0 |
+| NBA team | 30 | 30 | 30 (league only) |
+| NBA player | 550 | 549 | **0** |
+
+**No game id in either corpus was observed more than once**, so the game audits
+compared nothing at all: "zero collisions" there means "nothing was comparable".
+`birth_date` is absent for every person, so within-league person reuse is
+undetectable, and same-league team reuse is undetectable by design.
 
 ### Limitations of this evidence
 

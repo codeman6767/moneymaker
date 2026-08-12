@@ -10,9 +10,11 @@ and all eight are repaired. Five required database-level enforcement, delivered 
 **migration `f019`**. **The reviewed foundation is now schema v19.** `f018` is
 preserved byte-for-byte as historical migration evidence and was not edited.
 
-Design/repair only. No `RetrospectiveResearchReader`, no identity-audit engine, no
-market anchoring, no F1-R, no F2, no production matching, no model training, **no
-provider API request**, and no mutation of protected F1 evidence.
+Design/repair only — *describing what THIS review changed, as of `2824c3a`*. It
+added no `RetrospectiveResearchReader`, no identity-audit engine, no market
+anchoring, no F1-R, no F2, no production matching, no model training, **no
+provider API request**, and no mutation of protected F1 evidence. (The
+identity-audit engine was implemented later; see §10.)
 
 ---
 
@@ -258,9 +260,10 @@ tables, 0 network trips).
 
 ## 9. Scope confirmation
 
-No `RetrospectiveResearchReader`, no identity-audit engine, no historical Odds API
-client, no market anchoring, no F1-R executor, no F2, no model training, no Lane-L
-collection. `pit/asof.py`, `pit/dataset.py` and `matching/` are untouched since
+*As of `2824c3a`, the commit this review covers:* no `RetrospectiveResearchReader`,
+no identity-audit engine, no historical Odds API client, no market anchoring, no
+F1-R executor, no F2, no model training, no Lane-L collection. (The identity-audit
+engine landed afterwards — see §10.) `pit/asof.py`, `pit/dataset.py` and `matching/` are untouched since
 `4d4ae13`.
 
 **F1-R, F2, production matching and model training remain unauthorized.**
@@ -288,3 +291,18 @@ One month is still **not** evidence of 3–5 season stability.
 Still unimplemented: `RetrospectiveResearchReader`, historical odds/market
 anchoring, team/game crosswalks. Still unauthorized: **F1-R**, **F2**, production
 matching, model training. G1/G2/G3/G4/G6 unchanged.
+
+**Identity-audit engine REVIEWED 2026-08-12 — ACCEPTED WITH REPAIRS AND A
+RETAINED BLOCKER.** `RETROSPECTIVE_IDENTITY_AUDIT_ENGINE_INDEPENDENT_REVIEW.md`.
+Ten defects proven and repaired; audit policy bumped to `g5-identity-audit-v2`.
+Two were fail-open holes in the G5 contract itself (a game id reused across a
+doubleheader read as clean; any generation string but `unverified` counted as
+VERIFIED), and one let the CLI write provenance into the corpus being audited.
+Detection power is now recorded on every audit, which changes how the one-month
+result must be read: **no game id in either corpus was observed more than once**,
+so the game audit compared nothing, and `birth_date` is absent for every person,
+so within-league person reuse is undetectable. `ACCEPTED` means "no contradiction
+detected at this policy's detection power" — **not** "verified stable identity".
+Player crosswalks accepted; **team and game crosswalks remain BLOCKED** (Option A
+ruled out on evidence: the canonical team seed carries no official provider id).
+**The reader must not begin** until that architecture is separately decided.

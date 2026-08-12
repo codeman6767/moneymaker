@@ -114,6 +114,21 @@
 > anchoring, team/game crosswalks. Still unauthorized: **F1-R**, **F2**, production
 > matching, model training. G1/G2/G3/G4/G6 unchanged.
 >
+> **Identity-audit engine REVIEWED 2026-08-12 — ACCEPTED WITH REPAIRS AND A
+> RETAINED BLOCKER.** `RETROSPECTIVE_IDENTITY_AUDIT_ENGINE_INDEPENDENT_REVIEW.md`.
+> Ten defects proven and repaired; audit policy bumped to `g5-identity-audit-v2`.
+> Two were fail-open holes in the G5 contract itself (a game id reused across a
+> doubleheader read as clean; any generation string but `unverified` counted as
+> VERIFIED), and one let the CLI write provenance into the corpus being audited.
+> Detection power is now recorded on every audit, which changes how the one-month
+> result must be read: **no game id in either corpus was observed more than once**,
+> so the game audit compared nothing, and `birth_date` is absent for every person,
+> so within-league person reuse is undetectable. `ACCEPTED` means "no contradiction
+> detected at this policy's detection power" — **not** "verified stable identity".
+> Player crosswalks accepted; **team and game crosswalks remain BLOCKED** (Option A
+> ruled out on evidence: the canonical team seed carries no official provider id).
+> **The reader must not begin** until that architecture is separately decided.
+>
 > **This foundation has NOT been independently reviewed.** Still unimplemented:
 > `RetrospectiveResearchReader`, the identity-audit engine, and historical
 > odds/market anchoring. Still unauthorized: **F1-R**, **F2**, production matching,

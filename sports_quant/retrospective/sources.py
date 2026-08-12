@@ -50,6 +50,7 @@ from .provenance import EntityType, RetrospectiveProvenanceError
 
 __all__ = [
     "AUDITED_SOURCE_TABLES",
+    "PROVIDER_LEAGUES",
     "GameObservation",
     "PlayerObservation",
     "SOURCE_DIGEST_POLICY_VERSION",
@@ -59,12 +60,44 @@ __all__ = [
     "iter_player_observations",
     "iter_team_observations",
     "open_source_corpus",
+    "require_provider_league",
     "source_corpus_digest",
 ]
 
 
 class SourceCorpusError(RetrospectiveProvenanceError):
     """The source corpus cannot be read as the audit requires."""
+
+
+#: Which league each official provider serves in this repository.
+#:
+#: ``game_schedule_snapshots`` has **no** ``league_id`` column, so the game audit
+#: and the game half of the source digest are scoped by provider alone. That is
+#: only sound while a provider is league-exclusive, which is an invariant rather
+#: than a fact of the schema -- so it is stated here and enforced, instead of
+#: being silently relied upon. A provider that ever served two leagues must get a
+#: league-scoped game query before it can be audited.
+PROVIDER_LEAGUES: Final[dict[str, str]] = {
+    "mlb_statsapi": "lg_mlb",
+    "balldontlie": "lg_nba",
+}
+
+
+def require_provider_league(provider: str, league_id: str) -> None:
+    """Refuse a (provider, league) pair this build cannot scope safely."""
+
+    expected = PROVIDER_LEAGUES.get(provider)
+    if expected is None:
+        raise SourceCorpusError(
+            f"provider {provider!r} has no declared league in PROVIDER_LEAGUES. "
+            "Game identity evidence carries no league column, so a provider whose "
+            "league is undeclared cannot be scoped safely and is refused."
+        )
+    if expected != league_id:
+        raise SourceCorpusError(
+            f"provider {provider!r} serves {expected!r}, not {league_id!r}. Refusing "
+            "rather than auditing one league's ids under another's namespace."
+        )
 
 
 #: Bumping this changes every source digest, which is the point: it means the
@@ -161,6 +194,11 @@ class GameObservation:
     game_number: Optional[int]
     doubleheader_code: Optional[str]
     venue_provider_id: Optional[str]
+    #: The provider's own statement that this event moved. It was already bound
+    #: into the source digest but was NOT exposed to the compatibility rules, so
+    #: the audit could not tell a postponement from an id reused for a second
+    #: event on another date. That gap is what `reschedule_info` closes.
+    reschedule_info: Optional[str]
     observed_at: str
 
 
@@ -222,7 +260,8 @@ def iter_game_observations(
     rows = conn.execute(
         "SELECT provider_game_id, season, game_date_local, scheduled_start, "
         "       home_provider_team_id, away_provider_team_id, mapped_status, "
-        "       game_number, doubleheader_code, venue_provider_id, observed_at "
+        "       game_number, doubleheader_code, venue_provider_id, "
+        "       reschedule_info, observed_at "
         "FROM game_schedule_snapshots WHERE provider = ? "
         "ORDER BY provider_game_id, observed_at, schedule_id",
         (provider,),
@@ -239,6 +278,7 @@ def iter_game_observations(
             game_number=_opt_int(row, "game_number"),
             doubleheader_code=_opt_str(row, "doubleheader_code"),
             venue_provider_id=_opt_str(row, "venue_provider_id"),
+            reschedule_info=_opt_str(row, "reschedule_info"),
             observed_at=str(row["observed_at"]),
         )
 
@@ -321,6 +361,7 @@ def source_corpus_digest(
     identity value does change it.
     """
 
+    require_provider_league(provider, league_id)
     payload: dict[str, object] = {
         "policy": SOURCE_DIGEST_POLICY_VERSION,
         "league_id": league_id,

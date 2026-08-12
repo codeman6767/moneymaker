@@ -16,11 +16,13 @@ withheld, which is the only way a dry run can honestly predict an apply.
 from __future__ import annotations
 
 import sqlite3
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
 from ..db.engine import Database, transaction
+from ..db.init import initialize_database
 from ..db.repositories.retrospective import SqliteRetrospectiveProvenanceRepository
 from ..db.schema import CURRENT_SCHEMA_VERSION
 from .crosswalks import CrosswalkResult, generate_crosswalks
@@ -91,6 +93,35 @@ class AuditRunResult:
         return payload
 
 
+def _require_distinct_databases(source_db: Path, output_db: Path) -> None:
+    """The source corpus is evidence; it may never also be the write target.
+
+    Found by the independent review: `--source-db X --output-db X --apply` wrote
+    provenance straight into the corpus being audited. The schema check happened
+    to stop it for a v17 corpus, but that is incidental protection -- a v19 source
+    was written to happily.
+
+    Compares resolved paths AND the filesystem identity, so a hardlink or a
+    symlink alias cannot smuggle the same file in under a second name.
+    """
+
+    if source_db.resolve() == output_db.resolve():
+        raise IdentityAuditError(
+            f"source and output are the same database ({source_db}). A historical "
+            "corpus is read-only evidence and must never receive provenance."
+        )
+    try:
+        source_stat, output_stat = source_db.stat(), output_db.stat()
+    except OSError:
+        return  # the output may not exist yet; the resolved-path check stands
+    if (source_stat.st_dev, source_stat.st_ino) == (output_stat.st_dev,
+                                                    output_stat.st_ino):
+        raise IdentityAuditError(
+            f"source {source_db} and output {output_db} are the same file "
+            "(hardlink or alias). Provenance must never be written into evidence."
+        )
+
+
 def _require_output_schema(conn: sqlite3.Connection, path: Path) -> None:
     version = conn.execute("SELECT MAX(version) FROM schema_versions").fetchone()[0]
     if int(version or 0) != CURRENT_SCHEMA_VERSION:
@@ -126,6 +157,7 @@ def run_identity_audit(
     mean writing to protected evidence.
     """
 
+    _require_distinct_databases(source_db, output_db)
     source = open_source_corpus(source_db)
     try:
         digest = source_corpus_digest(source, league_id=league_id, provider=provider)
@@ -190,15 +222,24 @@ def run_identity_audit(
 def _dry_run_crosswalks(
     source: sqlite3.Connection, plan: AuditPlan
 ) -> CrosswalkResult:
-    """Predict crosswalk generation without touching the real output database."""
+    """Predict crosswalk generation without touching the real output database.
 
-    scratch = sqlite3.connect(":memory:")
-    try:
-        scratch.execute(
-            "CREATE TABLE players (player_id TEXT PRIMARY KEY, league_id TEXT)")
-        return generate_crosswalks(
-            scratch, source, plan=plan, corpus_version_id="rcv_dry_run",
-            identity_audit_id="ida_dry_run", dry_run=True,
-        )
-    finally:
-        scratch.close()
+    The scratch database is a REAL, fully migrated schema-v19 database in a
+    temporary directory, not a hand-written stub. The review found the stub
+    version modelled ``players`` as two nullable columns with no CHECKs, so a dry
+    run could have predicted a crosswalk the real output schema would refuse --
+    which is precisely the failure a dry run exists to prevent.
+    """
+
+    with tempfile.TemporaryDirectory(prefix="lane_r_dry_run_") as directory:
+        scratch_path = Path(directory) / "dry_run.db"
+        initialize_database(scratch_path)
+        scratch = sqlite3.connect(scratch_path)
+        try:
+            scratch.row_factory = sqlite3.Row
+            return generate_crosswalks(
+                scratch, source, plan=plan, corpus_version_id="rcv_dry_run",
+                identity_audit_id="ida_dry_run", dry_run=True,
+            )
+        finally:
+            scratch.close()
