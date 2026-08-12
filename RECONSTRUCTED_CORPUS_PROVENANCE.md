@@ -171,6 +171,13 @@ Before any reconstructed corpus is built or used:
    never "verified stable identity" -- and every audit now records that power.
    Team and game crosswalks remain blocked; the reader must not begin until the
    canonical-team architecture is separately decided.
+10. **(2026-08-12)** That architecture is now decided — **TEAM-A**, a
+    source-controlled static attestation to the existing canonical franchise seed,
+    with no schema change (`RETROSPECTIVE_TEAM_GAME_CROSSWALK_ARCHITECTURE.md`).
+    The attestation map digest binds into the already-existing
+    `reconstruction_corpus_versions.static_identity_map_digest`, so a remap
+    produces a new corpus version and can never silently reinterpret an old one.
+    **Decision only — not implemented, and awaiting independent review.**
 
 Until all four pass, only `strict_forward_pit` (forward collection) may support
 evaluation, and no profitability claim may be made from reconstructed data.

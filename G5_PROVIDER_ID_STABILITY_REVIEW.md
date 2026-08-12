@@ -53,6 +53,27 @@ Player crosswalks accepted; **team and game crosswalks remain BLOCKED** (Option 
 ruled out on evidence: the canonical team seed carries no official provider id).
 **The reader must not begin** until that architecture is separately decided.
 
+**Team/game crosswalk architecture DECIDED 2026-08-12 — awaiting independent
+review.** `RETROSPECTIVE_TEAM_GAME_CROSSWALK_ARCHITECTURE.md`. Chosen **TEAM-A**:
+a source-controlled static attestation binding official provider franchise ids to
+the **existing** canonical seed, with **no schema change** (stays v19). The
+distinction that unblocks it is *when* labels are read — a one-time, reviewed,
+source-controlled attestation answers "which franchise does this provider
+franchise id denote", whereas forbidden runtime matching asks "which team was this
+row probably about". Alternatives rejected on measurement: TEAM-B would move 13
+FK-bearing tables and every deterministic `tm_*` id; TEAM-C would create a second
+franchise dimension and split Lane-R from Lane-L; TEAM-D2 fails because strict PIT
+gates `entity_match_decisions` on wall-clock `decided_at`, recreating the original
+blocker. Diagnostic: **60/60 franchises uniquely attested and corroborated by a
+second attribute, 33/33 historical aliases correct, 639/639 games ready** — and
+`games` already carries a UNIQUE `(official_provider, official_game_key)` index,
+so game bootstrap needs no schema work either.
+
+**Nothing was implemented.** Team and game crosswalks remain BLOCKED in code, the
+reader remains unimplemented, and **F1-R, F2, production matching and model
+training remain unauthorized.** The architecture decision itself still requires
+independent review. G1/G2/G3/G4/G6 unchanged.
+
 **This foundation has NOT been independently reviewed.** Still unimplemented:
 `RetrospectiveResearchReader`, the identity-audit engine, and historical
 odds/market anchoring. Still unauthorized: **F1-R**, **F2**, production matching,

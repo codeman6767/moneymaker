@@ -11,8 +11,8 @@ Mapping to the required categories, separated as §26 asks:
 |---|---|
 | **Audit engine** | **ACCEPTED WITH REPAIRS** — ten defects proven and repaired; audit policy bumped `g5-identity-audit-v1` → **`v2`** |
 | **Player crosswalks** | **ACCEPTED**, under the explicitly-stated Option-A identity basis (§3) |
-| **Team crosswalks** | **BLOCKED** — Option A ruled out on evidence; B/C/D need a separate authorized decision |
-| **Game crosswalks** | **BLOCKED**, transitively on teams |
+| **Team crosswalks** | **BLOCKED** — Option A ruled out on evidence; B/C/D need a separate authorized decision. *(Architecture since decided 2026-08-12 — see the note at the end of this document. Still blocked in code.)* |
+| **Game crosswalks** | **BLOCKED**, transitively on teams *(same note)* |
 | **Reader readiness** | **NOT READY** — the team/game canonical question must be resolved first |
 
 Ten defects were proven with failing reproducers before repair. Two of them —
@@ -195,7 +195,11 @@ detection power** — a distinct and more important caveat than the window lengt
 
 ## 5. §9 — team/game crosswalk architecture
 
-**Option A is ruled out on evidence.** `TeamSeed` in
+**Option A is ruled out on evidence.** *(Naming caution: this §9 "Option A" is
+the task's *deterministic official-provider seed mapping*. It is NOT the later
+`RETROSPECTIVE_TEAM_GAME_CROSSWALK_ARCHITECTURE.md` **TEAM-A**, which is a
+source-controlled curated attestation — a different mechanism that this
+paragraph does not address.)* `TeamSeed` in
 `sports_quant/db/seeds/mlb_teams.py` carries `abbreviation`, `city`, `nickname`
 and alias strings, and **no official provider id at all**; every seeded alias has
 `provider = ''`. The canonical team dimension was built from labels, so binding it
@@ -292,3 +296,24 @@ defects in its *implementation*, now repaired, not changes to its verdict.
 
 **The reader must not begin** until the team/game canonical-crosswalk architecture
 (§5) is separately decided and reviewed.
+
+**Team/game crosswalk architecture DECIDED 2026-08-12 — awaiting independent
+review.** `RETROSPECTIVE_TEAM_GAME_CROSSWALK_ARCHITECTURE.md`. Chosen **TEAM-A**:
+a source-controlled static attestation binding official provider franchise ids to
+the **existing** canonical seed, with **no schema change** (stays v19). The
+distinction that unblocks it is *when* labels are read — a one-time, reviewed,
+source-controlled attestation answers "which franchise does this provider
+franchise id denote", whereas forbidden runtime matching asks "which team was this
+row probably about". Alternatives rejected on measurement: TEAM-B would move 13
+FK-bearing tables and every deterministic `tm_*` id; TEAM-C would create a second
+franchise dimension and split Lane-R from Lane-L; TEAM-D2 fails because strict PIT
+gates `entity_match_decisions` on wall-clock `decided_at`, recreating the original
+blocker. Diagnostic: **60/60 franchises uniquely attested and corroborated by a
+second attribute, 33/33 historical aliases correct, 639/639 games ready** — and
+`games` already carries a UNIQUE `(official_provider, official_game_key)` index,
+so game bootstrap needs no schema work either.
+
+**Nothing was implemented.** Team and game crosswalks remain BLOCKED in code, the
+reader remains unimplemented, and **F1-R, F2, production matching and model
+training remain unauthorized.** The architecture decision itself still requires
+independent review. G1/G2/G3/G4/G6 unchanged.
