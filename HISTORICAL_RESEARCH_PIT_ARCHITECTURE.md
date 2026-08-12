@@ -76,6 +76,23 @@ gates (§13) the F1-R pilot must close.
 > `unsupported` joins, `AsOfReader` has no retrospective mode, and `_feature_cutoff`
 > is byte-identical to its v17 source.
 >
+> **Identity-audit engine implemented 2026-08-12 — NOT independently reviewed.**
+> `RETROSPECTIVE_IDENTITY_AUDIT_ENGINE_IMPLEMENTATION.md`. The production
+> corpus-scoped G5 audit now runs against real evidence and independently
+> reproduces the reviewed one-month counts (MLB 400 games / 30 teams / 1,053
+> persons; NBA 239 / 30 / 550; **zero collisions**), read-only and offline. Player
+> static crosswalks are generated (1,053 and 550); **team and game crosswalks are
+> BLOCKED** — canonical `teams` is pre-seeded from names under UNIQUE constraints,
+> so a provider-keyed franchise cannot be bootstrapped and reusing a seed would
+> require name matching, which G5 forbids as identity evidence. Reported as a
+> blocker rather than forced. Also recorded: `birth_date` is absent for **every**
+> person in both corpora, so person-collision detection had no secondary evidence.
+> One month is still **not** evidence of 3–5 season stability.
+>
+> Still unimplemented: `RetrospectiveResearchReader`, historical odds/market
+> anchoring, team/game crosswalks. Still unauthorized: **F1-R**, **F2**, production
+> matching, model training. G1/G2/G3/G4/G6 unchanged.
+>
 > **This foundation has NOT been independently reviewed.** Still unimplemented:
 > `RetrospectiveResearchReader`, the identity-audit engine, and historical
 > odds/market anchoring. Still unauthorized: **F1-R**, **F2**, production matching,

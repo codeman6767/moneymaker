@@ -156,6 +156,13 @@ Before any reconstructed corpus is built or used:
    database. An eligible reconstructed input must additionally cite preserved source
    evidence from a fixed allowlist; excluded rows remain exempt, because "not
    admissible" is often precisely a statement that the evidence does not exist.
+8. **(2026-08-12)** The production G5 identity-audit engine is implemented and
+   **has not been independently reviewed**
+   (`RETROSPECTIVE_IDENTITY_AUDIT_ENGINE_IMPLEMENTATION.md`). Static crosswalks
+   are produced for **persons only**; team and game crosswalks are blocked on
+   canonical-entity preparation, which cannot be done deterministically without
+   name matching. F1-R, F2, production matching and model training remain
+   unauthorized.
 
 Until all four pass, only `strict_forward_pit` (forward collection) may support
 evaluation, and no profitability claim may be made from reconstructed data.

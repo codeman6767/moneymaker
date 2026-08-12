@@ -2147,6 +2147,104 @@ def _add_f1a_args(parser: Any) -> None:
                    help="(--pilot) the reviewed manifest that GOVERNS execution")
 
 
+# --------------------------------------------------------------------------- #
+# Retrospective identity audit (G5)
+# --------------------------------------------------------------------------- #
+def run_retrospective_identity_audit(
+    *,
+    source_db: Path,
+    output_db: Path,
+    league_id: str,
+    provider: str,
+    namespace_generation: str,
+    entity_type: str,
+    audit_policy_version: str,
+    expected_source_corpus_digest: Optional[str] = None,
+    build_crosswalks: bool = False,
+    apply: bool = False,
+    as_json: bool = False,
+    out: Printer = print,
+) -> int:
+    """Run the corpus-scoped G5 identity audit. Offline; dry run unless ``apply``.
+
+    There is deliberately no provider-access argument on this command: the engine
+    imports no provider client and reads no settings, so no flag could turn it
+    into a fetch. The source corpus is opened immutable and is never migrated.
+    """
+
+    # Imported from the submodules rather than the package root: the root
+    # resolves the engine through a PEP-562 `__getattr__` (which breaks the
+    # import cycle), and that shim erases the return type at every call site.
+    from .retrospective.provenance import EntityType, RetrospectiveProvenanceError
+    from .retrospective.runner import run_identity_audit
+
+    types = (["game", "team", "player"] if entity_type == "all" else [entity_type])
+    results: list[dict[str, Any]] = []
+    for name in types:
+        try:
+            result = run_identity_audit(
+                source_db=source_db, output_db=output_db, league_id=league_id,
+                provider=provider, namespace_generation=namespace_generation,
+                entity_type=EntityType(name),
+                audit_policy_version=audit_policy_version,
+                expected_source_corpus_digest=expected_source_corpus_digest,
+                apply=apply, build_crosswalks=build_crosswalks,
+            )
+        except RetrospectiveProvenanceError as exc:
+            refusal: dict[str, Any] = {
+                "command": "identity-audit-retrospective", "entity_type": name,
+                "status": "refused", "reason": str(exc), "network_occurred": False}
+            if as_json:
+                out(json.dumps(refusal, sort_keys=True))
+            else:
+                out(f"[REFUSED] {name}: {exc}")
+            return 1
+        results.append(result.to_json())
+
+    if as_json:
+        out(json.dumps({"command": "identity-audit-retrospective",
+                        "mode": "apply" if apply else "dry-run",
+                        "audits": results, "network_occurred": False},
+                       sort_keys=True))
+        return 0
+
+    mode = "APPLY" if apply else "DRY RUN (nothing written)"
+    out(f"Retrospective identity audit -- {mode}; offline, no provider request is made")
+    out(f"  source corpus : {source_db} (opened immutable, never migrated)")
+    out(f"  output        : {output_db}")
+    out(f"  source digest : {results[0]['source_corpus_digest']}")
+    out(f"  policy        : {audit_policy_version}")
+    for payload in results:
+        namespace = payload["namespace"]
+        out("")
+        out(f"  [{namespace['entity_type']}] {namespace['league_id']} / "
+            f"{namespace['provider']} / generation {namespace['namespace_generation']}"
+            f"{'' if payload['namespace_verified'] else ' (UNVERIFIED)'}")
+        out(f"    distinct ids       : {payload['distinct_ids']}")
+        out(f"    observations       : {payload['total_observations']}")
+        out(f"    collisions         : {payload['collision_count']}")
+        out(f"    flags              : {payload['flagged_count']}")
+        out(f"    verdict            : {payload['verdict']}")
+        out(f"    findings           : {payload['findings_total']} "
+            f"{payload['findings_by_classification'] or '{}'}")
+        out(f"    by exclusion scope : {payload['findings_by_exclusion_scope'] or '{}'}")
+        out(f"    semantic digest    : {payload['semantic_digest']}")
+        crosswalk = payload.get("crosswalk")
+        if crosswalk is not None:
+            if crosswalk["supported"]:
+                out(f"    crosswalks         : {crosswalk['crosswalks_written']} "
+                    f"({crosswalk['canonical_bootstrapped']} canonical bootstrapped, "
+                    f"{crosswalk['reused_existing']} reused)")
+            else:
+                out(f"    crosswalks         : NOT SUPPORTED for "
+                    f"{crosswalk['entity_type']} -- {crosswalk['blocked_reason']}")
+    out("")
+    out("  network_occurred   : False")
+    out("  NOTE: a clean audit is a statement about THIS corpus only. It is not "
+        "evidence of 3-5 season identifier stability.")
+    return 0
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     """CLI dispatch.
 
@@ -2537,6 +2635,35 @@ def main(argv: Optional[list[str]] = None) -> int:
     dq.add_argument("--db", dest="database_path", type=Path, default=None, metavar="PATH")
     dq.add_argument("--json", dest="as_json", action="store_true", help="Machine-readable output")
 
+    from .retrospective.identity_audit import AUDIT_POLICY_VERSION
+
+    idaudit = sub.add_parser(
+        "identity-audit-retrospective",
+        help="Offline corpus-scoped G5 identity audit (read-only source; zero network)")
+    idaudit.add_argument("--source-db", dest="source_db", type=Path, required=True,
+                         metavar="PATH", help="Historical corpus, opened immutable")
+    idaudit.add_argument("--output-db", dest="output_db", type=Path, required=True,
+                         metavar="PATH", help="Separate schema-v19 provenance database")
+    idaudit.add_argument("--league", dest="league_id", required=True, metavar="LEAGUE_ID")
+    idaudit.add_argument("--provider", dest="provider", required=True, metavar="NAME")
+    idaudit.add_argument("--namespace-generation", dest="namespace_generation",
+                         required=True, metavar="GEN",
+                         help="Provider API generation; 'unverified' fails closed")
+    idaudit.add_argument("--entity-type", dest="entity_type", required=True,
+                         choices=["game", "team", "player", "all"])
+    idaudit.add_argument("--audit-policy-version", dest="audit_policy_version",
+                         default=AUDIT_POLICY_VERSION, metavar="VERSION")
+    idaudit.add_argument("--expect-source-digest", dest="expected_source_corpus_digest",
+                         default=None, metavar="SHA256")
+    idaudit.add_argument("--crosswalks", dest="build_crosswalks", action="store_true",
+                         help="Also build static crosswalks for an accepted audit")
+    idaudit.add_argument(
+        "--apply", dest="apply", action="store_true",
+        help="Persist the audit. WITHOUT this flag the command is a dry run and "
+             "writes nothing at all.")
+    idaudit.add_argument("--json", dest="as_json", action="store_true",
+                         help="Machine-readable output")
+
     args = parser.parse_args(argv)
 
     if args.command == "provider-audit":
@@ -2805,6 +2932,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         except ReadOnlyStartupError as exc:
             print(str(exc))
             return 2
+
+    if args.command == "identity-audit-retrospective":
+        return run_retrospective_identity_audit(
+            source_db=args.source_db, output_db=args.output_db,
+            league_id=args.league_id, provider=args.provider,
+            namespace_generation=args.namespace_generation,
+            entity_type=args.entity_type,
+            audit_policy_version=args.audit_policy_version,
+            expected_source_corpus_digest=args.expected_source_corpus_digest,
+            build_crosswalks=args.build_crosswalks, apply=args.apply,
+            as_json=args.as_json,
+        )
 
     if args.command == "data-status":
         from .status import run_data_status
