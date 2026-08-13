@@ -61,7 +61,15 @@ class ScratchClassification:
 
 
 def _ro_connect(path: Path) -> sqlite3.Connection:
-    # mode=ro never creates the file and never writes a -wal/-shm sidecar.
+    # `mode=ro` never creates the database and never writes database bytes, and
+    # it is chosen deliberately over `immutable=1` so committed WAL content IS
+    # included in the digest (see `classify_scratch_db`).
+    #
+    # It is NOT sidecar-free, though: on a WAL-mode database `mode=ro` builds the
+    # shared-memory index, which moves the `-shm` sidecar's mtime. Measured, not
+    # assumed. Callers that must leave a protected evidence directory completely
+    # untouched want `retrospective.sources.open_source_corpus`, which uses
+    # `immutable=1` and refuses a non-empty WAL rather than reading a stale view.
     conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     return conn

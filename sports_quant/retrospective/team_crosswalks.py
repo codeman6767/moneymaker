@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Optional
 
 from ..db.repositories.retrospective import SqliteRetrospectiveProvenanceRepository
@@ -60,10 +61,15 @@ class TeamCrosswalkPlan:
     attested: tuple[tuple[str, str], ...] = ()      # (provider_id, canonical_team_id)
     unresolved: tuple[str, ...] = ()                # audited but not in the map
     conflicts: tuple[tuple[str, str, str], ...] = ()  # (provider_id, teamA, teamB)
+    #: Live references that exist but are NOT backed by their own accepted team
+    #: decision (review repair §11). A corrupt link is neither agreement nor a
+    #: genuine identity conflict, and believing it either way would launder the
+    #: corruption -- so it blocks and is reported separately.
+    broken_live_links: tuple[tuple[str, str, str], ...] = ()
 
     @property
     def blocked(self) -> bool:
-        return bool(self.conflicts)
+        return bool(self.conflicts) or bool(self.broken_live_links)
 
     def as_json(self) -> dict[str, object]:
         return {
@@ -74,6 +80,7 @@ class TeamCrosswalkPlan:
             "unresolved": list(self.unresolved),
             "unresolved_count": len(self.unresolved),
             "conflicts": [list(c) for c in self.conflicts],
+            "broken_live_links": [list(b) for b in self.broken_live_links],
             "blocked": self.blocked,
         }
 
@@ -122,21 +129,57 @@ def _require_corpus_provenance(
     return corpus.source_corpus_digest, corpus.static_identity_map_digest
 
 
-def _live_conflict(
-    conn: sqlite3.Connection, namespace: ProviderNamespace, provider_id: str
-) -> Optional[str]:
-    """An existing accepted live/current canonical binding for the same key (§19).
+class LiveLink(Enum):
+    """How much authority an existing live provider-team reference carries."""
 
-    Read-only. If the live matcher already resolved this provider team to some
-    canonical team, TEAM-A must agree with it or refuse; silently preferring
-    either answer would hide a real disagreement about identity.
+    ABSENT = "absent"            # no live opinion; ordinary TEAM-A path
+    VALID = "valid"              # decision-backed; must be agreed with or refused
+    BROKEN = "broken"            # present but not decision-backed; fail closed
+
+
+def _live_link(
+    conn: sqlite3.Connection, namespace: ProviderNamespace, provider_id: str
+) -> tuple[LiveLink, Optional[str]]:
+    """Classify the live canonical binding for one provider team key (§19).
+
+    Read-only. Mirrors the already-reviewed contract in
+    ``matching.service._existing_team_link_state``: a stored ``team_id`` is
+    authoritative **only** when its own ``match_decision_id`` names an accepted
+    team decision that adjudicated *this* provider and *this* provider team id
+    and matched *that same* canonical team.
+
+    The review found TEAM-A reading ``provider_team_references.team_id``
+    directly, so a corrupt reference -- no decision, a missing/rejected
+    decision, a decision for another entity type, another provider, another
+    provider id, or a different canonical target -- was treated as an
+    authoritative live identity. That let corruption either block a correct
+    attestation or, worse, pass as agreement. A broken link is now reported as
+    broken rather than believed.
     """
 
     row = conn.execute(
-        "SELECT team_id FROM provider_team_references "
-        "WHERE provider = ? AND provider_team_id = ? AND team_id IS NOT NULL",
+        "SELECT r.team_id, r.match_decision_id, d.outcome, d.entity_type, "
+        "       d.matched_entity_id, d.source_provider, d.source_ref "
+        "FROM provider_team_references AS r "
+        "LEFT JOIN entity_match_decisions AS d "
+        "       ON d.match_id = r.match_decision_id "
+        "WHERE r.provider = ? AND r.provider_team_id = ? AND r.team_id IS NOT NULL",
         (namespace.provider, provider_id)).fetchone()
-    return None if row is None else str(row[0])
+    if row is None:
+        return LiveLink.ABSENT, None
+
+    team_id = str(row[0])
+    if row[1] is None or row[2] is None:
+        return LiveLink.BROKEN, team_id          # no decision id, or it is missing
+    if (str(row[2]) != "accepted" or str(row[3]) != "team"
+            or str(row[4]) != team_id):
+        return LiveLink.BROKEN, team_id
+    # The decision must have adjudicated THIS reference. One recorded for another
+    # provider or another provider team id may name the same canonical team by
+    # coincidence without ever having judged this one.
+    if str(row[5]) != namespace.provider or str(row[6]) != provider_id:
+        return LiveLink.BROKEN, team_id
+    return LiveLink.VALID, team_id
 
 
 def plan_team_crosswalks(
@@ -172,14 +215,21 @@ def plan_team_crosswalks(
     attested: list[tuple[str, str]] = []
     unresolved: list[str] = []
     conflicts: list[tuple[str, str, str]] = []
+    broken: list[tuple[str, str, str]] = []
     for provider_id in plan.cleared_provider_ids:
         canonical = attested_canonical_team(namespace, provider_id)
         if canonical is None:
             unresolved.append(provider_id)
             continue
-        live = _live_conflict(output, namespace, provider_id)
-        if live is not None and live != canonical:
-            conflicts.append((provider_id, canonical, live))
+        state, live = _live_link(output, namespace, provider_id)
+        if state is LiveLink.BROKEN:
+            # Not a disagreement about identity -- a corrupt link. Reported in
+            # its own bucket so it is never mistaken for either agreement or a
+            # genuine live conflict.
+            broken.append((provider_id, canonical, live or ""))
+            continue
+        if state is LiveLink.VALID and live != canonical:
+            conflicts.append((provider_id, canonical, live or ""))
             continue
         attested.append((provider_id, canonical))
 
@@ -187,6 +237,7 @@ def plan_team_crosswalks(
         namespace=namespace, map_digest=map_digest,
         attested=tuple(sorted(attested)), unresolved=tuple(sorted(unresolved)),
         conflicts=tuple(sorted(conflicts)),
+        broken_live_links=tuple(sorted(broken)),
     )
 
 
@@ -206,6 +257,14 @@ def write_team_crosswalks(
 
     team_plan = plan_team_crosswalks(output, plan=plan,
                                     corpus_version_id=corpus_version_id)
+    if team_plan.broken_live_links:
+        raise AttestationError(
+            f"{len(team_plan.broken_live_links)} live provider team reference(s) "
+            f"are not backed by their own accepted team decision: "
+            f"{list(team_plan.broken_live_links)}. That is corruption in the live "
+            "matcher's own provenance, not a TEAM-A disagreement, and TEAM-A "
+            "refuses to treat it as an authoritative identity either way."
+        )
     if team_plan.blocked:
         raise AttestationError(
             f"{len(team_plan.conflicts)} provider team id(s) disagree with an "

@@ -198,6 +198,21 @@ Before any reconstructed corpus is built or used:
     still write a contradicting row, but it cannot survive verification.
     Reproduced read-only over both protected corpora with **0 provider requests**.
     **Not independently reviewed; the reader remains blocked.**
+13. **(2026-08-13)** That implementation was independently reviewed:
+    **ACCEPTED WITH REPAIRS**
+    (`RETROSPECTIVE_TEAM_GAME_CROSSWALK_IMPLEMENTATION_INDEPENDENT_REVIEW.md`).
+    Seven defects were proven with failing reproducers and repaired. Two were
+    serious: a canonical game could be created with **no persisted G5 audit**,
+    and the dry run predicted the opposite of apply for teams and games. Every
+    Lane-R canonical game now carries a corpus-scoped, audit-backed **game static
+    crosswalk** (GAME-PROV-C) using structures v19 already had, so a reader can
+    prove *provider game G in corpus C resolves to canonical game X under audit
+    A*. Bare-provider games written by the conventional matcher now **converge**
+    instead of being duplicated. The verifier recomputes the crosswalk semantic
+    digest, so the map binding is genuinely checked. Completeness now means
+    **referenced-id coverage**, not league-map materialization. Schema verdict:
+    **V19 SUFFICIENT WITH ADDITIONAL REPAIRS** — no migration. **The reader may
+    now be separately authorized.**
 
 Until all four pass, only `strict_forward_pit` (forward collection) may support
 evaluation, and no profitability claim may be made from reconstructed data.

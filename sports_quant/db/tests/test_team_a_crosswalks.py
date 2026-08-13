@@ -179,17 +179,38 @@ def code_only(text: str) -> str:
 
 def _seed_live_reference(
     conn: sqlite3.Connection, reference_id: str, provider_team_id: str,
-    team_id: str,
+    team_id: str, *, decision: bool = True, decision_team_id: Optional[str] = None,
+    decision_provider: str = "mlb_statsapi",
+    decision_ref: Optional[str] = None, entity_type: str = "team",
+    outcome: str = "accepted",
 ) -> None:
-    """A synthetic accepted live/current canonical binding (§19 conflict input)."""
+    """A live/current canonical binding, optionally decision-backed.
 
+    Review repair: a reference is authoritative ONLY when its own
+    `match_decision_id` names an accepted team decision that adjudicated this
+    exact provider and provider team id and matched that same canonical team.
+    `decision=False` seeds the corrupt shape the earlier tests used.
+    """
+
+    decision_id = None
+    if decision:
+        decision_id = f"mtc_{reference_id}"
+        conn.execute(
+            "INSERT INTO entity_match_decisions (match_id, entity_type, "
+            "source_provider, source_ref, matched_entity_id, outcome, method, "
+            "score, threshold, needs_manual_review, matcher_version, decided_at, "
+            "created_at) "
+            "VALUES (?,?,?,?,?,?,'exact_provider_id',1.0,1.0,0,'test',?,?)",
+            (decision_id, entity_type, decision_provider,
+             decision_ref or provider_team_id, decision_team_id or team_id,
+             outcome, ISO, ISO))
     conn.execute(
         "INSERT INTO provider_team_references (reference_id, provider, "
-        "provider_team_id, team_id, first_raw_response_id, current_raw_response_id, "
-        "current_raw_response_hash, first_observed_at, last_observed_at, "
-        "created_at, updated_at) "
-        "VALUES (?, 'mlb_statsapi', ?, ?, 'raw_live', 'raw_live', 'h', ?, ?, ?, ?)",
-        (reference_id, provider_team_id, team_id, ISO, ISO, ISO, ISO))
+        "provider_team_id, team_id, match_decision_id, first_raw_response_id, "
+        "current_raw_response_id, current_raw_response_hash, first_observed_at, "
+        "last_observed_at, created_at, updated_at) "
+        "VALUES (?, 'mlb_statsapi', ?, ?, ?, 'raw_live', 'raw_live', 'h', ?, ?, ?, ?)",
+        (reference_id, provider_team_id, team_id, decision_id, ISO, ISO, ISO, ISO))
 
 
 def _audit(source_path: Path, entity_type: EntityType, *, league: str = "lg_mlb",
@@ -697,6 +718,18 @@ def _prepared(source: SourceCorpus, output_db: Path) -> tuple[Any, str, Any]:
     return team_plan, corpus.corpus_version_id, corpus
 
 
+def _game_audit(source: SourceCorpus, output_db: Path) -> str:
+    """Persist the ACCEPTED game audit `write_game_bootstrap` now requires.
+
+    Review repair: the bootstrap used to trust `plan.accepted` on an in-memory
+    object, so a canonical game could exist with no G5 audit behind it.
+    """
+
+    game_plan = _audit(source.path, EntityType.GAME)
+    with Database(output_db).connection() as conn, transaction(conn):
+        return _persist_audit(conn, game_plan)
+
+
 def test_a_canonical_game_bootstraps_from_attested_teams(
     source: SourceCorpus, output_db: Path
 ) -> None:
@@ -704,12 +737,14 @@ def test_a_canonical_game_bootstraps_from_attested_teams(
     source.game("G1", home="117", away="147")
     source.finish()
     _, corpus_id, _ = _prepared(source, output_db)
+    game_audit_id = _game_audit(source, output_db)
     game_plan = _audit(source.path, EntityType.GAME)
     src = open_source_corpus(source.path)
     try:
         with Database(output_db).connection() as conn, transaction(conn):
-            result = write_game_bootstrap(conn, src, plan=game_plan,
-                                          corpus_version_id=corpus_id)
+            result = write_game_bootstrap(
+                conn, src, plan=game_plan, corpus_version_id=corpus_id,
+                identity_audit_id=game_audit_id)
     finally:
         src.close()
     assert result.created == 1
@@ -752,15 +787,18 @@ def test_a_reschedule_does_not_mint_a_second_canonical_game(
                 start="2026-06-04T22:45:00Z", status="final", observed=T1)
     source.finish()
     _, corpus_id, _ = _prepared(source, output_db)
+    game_audit_id = _game_audit(source, output_db)
     game_plan = _audit(source.path, EntityType.GAME)
     src = open_source_corpus(source.path)
     try:
         with Database(output_db).connection() as conn, transaction(conn):
-            first = write_game_bootstrap(conn, src, plan=game_plan,
-                                         corpus_version_id=corpus_id)
+            first = write_game_bootstrap(
+                conn, src, plan=game_plan, corpus_version_id=corpus_id,
+                identity_audit_id=game_audit_id)
         with Database(output_db).connection() as conn, transaction(conn):
-            second = write_game_bootstrap(conn, src, plan=game_plan,
-                                          corpus_version_id=corpus_id)
+            second = write_game_bootstrap(
+                conn, src, plan=game_plan, corpus_version_id=corpus_id,
+                identity_audit_id=game_audit_id)
     finally:
         src.close()
     assert first.created == 1
@@ -779,6 +817,7 @@ def test_an_existing_game_with_different_teams_fails_closed(
     source.game("G1", home="117", away="147")
     source.finish()
     _, corpus_id, _ = _prepared(source, output_db)
+    game_audit_id = _game_audit(source, output_db)
     game_plan = _audit(source.path, EntityType.GAME)
     src = open_source_corpus(source.path)
     try:
@@ -795,8 +834,9 @@ def test_an_existing_game_with_different_teams_fails_closed(
                     (ISO, ISO))
             with pytest.raises(AttestationError, match="conflict with existing"):
                 with transaction(conn):
-                    write_game_bootstrap(conn, src, plan=game_plan,
-                                         corpus_version_id=corpus_id)
+                    write_game_bootstrap(
+                conn, src, plan=game_plan, corpus_version_id=corpus_id,
+                identity_audit_id=game_audit_id)
     finally:
         src.close()
 
@@ -809,13 +849,15 @@ def test_game_bootstrap_is_idempotent_and_deterministic(
     source.game("G2", home="147", away="117")
     source.finish()
     _, corpus_id, _ = _prepared(source, output_db)
+    game_audit_id = _game_audit(source, output_db)
     game_plan = _audit(source.path, EntityType.GAME)
     src = open_source_corpus(source.path)
     try:
         for _ in range(2):
             with Database(output_db).connection() as conn, transaction(conn):
-                write_game_bootstrap(conn, src, plan=game_plan,
-                                     corpus_version_id=corpus_id)
+                write_game_bootstrap(
+                conn, src, plan=game_plan, corpus_version_id=corpus_id,
+                identity_audit_id=game_audit_id)
     finally:
         src.close()
     with Database(output_db).connection() as conn:

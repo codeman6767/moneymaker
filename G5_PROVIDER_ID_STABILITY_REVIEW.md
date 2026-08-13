@@ -112,6 +112,28 @@ so it is weaker than the DB-enforced G5 bindings. **The reader remains BLOCKED**
 and F1-R, F2, production matching, model training and feature engineering remain
 unauthorized. G1/G2/G3/G4/G6 unchanged.
 
+**TEAM-A implementation REVIEWED 2026-08-13 — ACCEPTED WITH REPAIRS.**
+`RETROSPECTIVE_TEAM_GAME_CROSSWALK_IMPLEMENTATION_INDEPENDENT_REVIEW.md` is
+**authoritative where it differs from the implementation report**. Seven defects
+were proven and repaired. Two were serious: **a canonical game could be created
+with no persisted G5 audit at all** (the bootstrap trusted an in-memory object
+claiming ACCEPTED), and **dry-run predicted the opposite of apply** for both new
+entity types. Also: canonical games carried no corpus/audit provenance (now
+written as v19 game static crosswalks — **GAME-PROV-C, no v20**); no convergence
+with conventionally matched bare-provider games; an existing game with a
+contradictory season was silently reused; the verifier never recomputed the
+crosswalk semantic digest, so the "cryptographically bound to the map" claim was
+unverified; and live-reference conflicts were not decision-backed. Completeness
+semantics were split — the old check proved league-map materialization, not the
+reviewed referenced-id contract. Schema verdict: **V19 SUFFICIENT WITH
+ADDITIONAL REPAIRS**. Reproduced read-only over both corpora with **0 provider
+requests** (MLB 2026-06: 30 teams, 400 games, 400 game provenance rows; NBA
+2026-03: 30 teams, 239 games, 239 rows), dry run matching apply on both.
+**The reader may now be separately authorized**; it was NOT started. F1-R, F2,
+production matching, model training and feature engineering remain unauthorized.
+G1/G2/G3/G4/G6 unchanged.
+
+
 
 **This foundation has NOT been independently reviewed.** Still unimplemented:
 `RetrospectiveResearchReader`, the identity-audit engine, and historical

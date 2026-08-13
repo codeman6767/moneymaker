@@ -1,6 +1,18 @@
 # Retrospective TEAM-A team/game crosswalk — implementation report
 
-> **IMPLEMENTED 2026-08-12 — NOT INDEPENDENTLY REVIEWED.**
+> **IMPLEMENTED 2026-08-12. INDEPENDENTLY REVIEWED 2026-08-13 — ACCEPTED WITH
+> REPAIRS.** `RETROSPECTIVE_TEAM_GAME_CROSSWALK_IMPLEMENTATION_INDEPENDENT_REVIEW.md`
+> is **authoritative where it differs from this document**. Seven defects were
+> proven and repaired: dry-run/apply parity was broken for teams and games; a
+> canonical game could be created with no persisted G5 audit; canonical games
+> carried no corpus/audit provenance (now written as v19 game static crosswalks);
+> no convergence with conventionally matched bare-provider games; an existing
+> game with a contradictory season was silently reused; the verifier never
+> recomputed the crosswalk semantic digest; and live-reference conflicts were not
+> decision-backed. Statements below marked **SUPERSEDED** were true of `982b73b`
+> and are no longer true.
+>
+> **Original banner (as written at implementation time):**
 > This report describes what was built against the architecture reviewed at
 > `c0dfcd0` (*ACCEPTED WITH REPAIRS*, schema verdict *V19 SUFFICIENT WITH
 > ADDITIONAL CODE INVARIANTS*). It has not itself been reviewed. The
@@ -82,6 +94,14 @@ clean; a row with a **real** ACCEPTED audit, a **real** corpus and a **real**
 canonical team that nonetheless contradicts the map is reported, and
 `team-attestation-verify` exits non-zero.
 
+> **SUPERSEDED (partially):** as written at `982b73b`, the verifier checked the
+> corpus map digest, map membership, the canonical target and the policy — but
+> **never recomputed the row's own `semantic_digest`**, so "the crosswalk is
+> cryptographically bound to the map" was not actually verified: a tampered
+> digest passed. The verifier now recomputes it, and distinguishes a tampered
+> digest from a legitimate pre-TEAM-A non-map-backed one. See the independent
+> review §D6.
+
 ### RV3 — the game key must carry league and generation
 
 `games` carries `UNIQUE (official_provider, official_game_key)` — global, with
@@ -118,7 +138,13 @@ metadata, and nothing conflicts with an existing canonical game.
 
 `canonical_game_id` is a pure function of the qualified provider and the official
 game key. **No score, winner or outcome participates in identity.** A reschedule
-updates description and can never mint a second game.
+can never mint a second game.
+
+> **SUPERSEDED:** this paragraph previously said a reschedule "updates
+> description". It does not. Replay reuses the existing canonical game and writes
+> no descriptive update -- canonical descriptive metadata is immutable after
+> first bootstrap. That behaviour is correct; the prose was wrong. See the
+> independent review section 10.
 
 The plan separates two gaps that are easy to conflate:
 
@@ -188,8 +214,10 @@ Re-proved as durable tests, not asserted in prose:
 
 ## 8. What is still blocked
 
-* `RetrospectiveResearchReader` — **not implemented, still blocked.** No public
-  API produces historical model feature rows.
+* `RetrospectiveResearchReader` — **not implemented.** No public API produces
+  historical model feature rows. **Since the independent review of 2026-08-13 the
+  reader may be separately authorized**, because game identity is now
+  corpus-scoped and audit-backed.
 * Historical Odds API fetching and market anchoring — **not implemented.**
 * F1-R, F2, production matching, model training, feature engineering — **not
   run, still unauthorized.**

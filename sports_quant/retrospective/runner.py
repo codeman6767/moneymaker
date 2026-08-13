@@ -16,13 +16,11 @@ withheld, which is the only way a dry run can honestly predict an apply.
 from __future__ import annotations
 
 import sqlite3
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from ..db.engine import Database, transaction
-from ..db.init import initialize_database
+from ..db.engine import Database
 from ..db.repositories.retrospective import SqliteRetrospectiveProvenanceRepository
 from ..db.schema import CURRENT_SCHEMA_VERSION
 from .attestations import attestation_map_digest
@@ -199,69 +197,124 @@ def run_identity_audit(
             audit_policy_version=audit_policy_version,
         )
 
-        if not apply:
-            crosswalk = None
-            if build_crosswalks and plan.accepted:
-                # Dry run still exercises the crosswalk path so the prediction is
-                # real, against a throwaway in-memory database that is discarded.
-                crosswalk = _dry_run_crosswalks(source, plan)
-            return AuditRunResult(plan=plan, applied=False, identity_audit_id=None,
-                                  findings_written=0, crosswalk=crosswalk,
-                                  corpus_version_id=None)
-
         database = Database(output_db)
         with database.connection() as output:
             _require_output_schema(output, output_db)
-            with transaction(output):
-                audit_id, written = persist_audit_plan(output, plan)
-                corpus_version_id = None
-                crosswalk = None
-                team_result: Optional[TeamCrosswalkResult] = None
-                game_result: Optional[GameBootstrapResult] = None
-                if build_crosswalks and plan.accepted:
-                    repo = SqliteRetrospectiveProvenanceRepository(output)
-                    corpus = repo.record_corpus_version(
-                        provenance_class=ProvenanceClass.RECONSTRUCTED_RESEARCH,
-                        league_id=league_id,
-                        reconstruction_policy_version=reconstruction_policy_version,
-                        cutoff_policy_id=cutoff_policy_id,
-                        cutoff_policy_version=cutoff_policy_version,
-                        source_corpus_digest=digest,
-                        target_set_digest=target_set_digest,
-                        g1_variant=g1_variant,
-                        # A TEAM-A corpus must record the exact map it used and
-                        # the revision that built it; both are required before a
-                        # team crosswalk may be written, and corpus rows are
-                        # append-only so they cannot be filled in later.
-                        static_identity_map_digest=attestation_map_digest(),
-                        code_version=code_version or _repository_revision(),
-                    )
-                    corpus_version_id = corpus.corpus_version_id
-                    if entity_type in DIRECT_BOOTSTRAP_ENTITY_TYPES:
-                        crosswalk = generate_crosswalks(
-                            output, source, plan=plan,
-                            corpus_version_id=corpus_version_id,
-                            identity_audit_id=audit_id,
-                        )
-                    elif entity_type is EntityType.TEAM:
-                        team_result = write_team_crosswalks(
-                            output, plan=plan,
-                            corpus_version_id=corpus_version_id,
-                            identity_audit_id=audit_id,
-                        )
-                    else:
-                        game_result = write_game_bootstrap(
-                            output, source, plan=plan,
-                            corpus_version_id=corpus_version_id,
-                        )
+            # A dry run executes the IDENTICAL path against the REAL output
+            # database and then rolls it back. The review proved the previous
+            # design -- a separate scratch database reached through the generic
+            # provider-key module -- predicted "unsupported, 0 writes" for team
+            # and game evidence that apply then wrote, which is precisely the
+            # divergence a dry run exists to catch. It also could not predict
+            # reuse, because it never saw the real target's existing rows.
+            outcome = _execute(
+                output, source, plan=plan, entity_type=entity_type,
+                league_id=league_id, digest=digest,
+                build_crosswalks=build_crosswalks,
+                reconstruction_policy_version=reconstruction_policy_version,
+                cutoff_policy_id=cutoff_policy_id,
+                cutoff_policy_version=cutoff_policy_version,
+                target_set_digest=target_set_digest, g1_variant=g1_variant,
+                code_version=code_version, commit=apply,
+            )
             return AuditRunResult(
-                plan=plan, applied=True, identity_audit_id=audit_id,
-                findings_written=written, crosswalk=crosswalk,
-                corpus_version_id=corpus_version_id,
-                team_crosswalks=team_result, game_bootstrap=game_result,
+                plan=plan, applied=apply,
+                identity_audit_id=outcome.audit_id if apply else None,
+                findings_written=outcome.findings_written if apply else 0,
+                crosswalk=outcome.crosswalk,
+                corpus_version_id=outcome.corpus_version_id if apply else None,
+                team_crosswalks=outcome.team_result,
+                game_bootstrap=outcome.game_result,
             )
     finally:
         source.close()
+
+
+@dataclass
+class _Outcome:
+    """What one audit execution did, or would have done."""
+
+    audit_id: Optional[str] = None
+    findings_written: int = 0
+    corpus_version_id: Optional[str] = None
+    crosswalk: Optional[CrosswalkResult] = None
+    team_result: Optional[TeamCrosswalkResult] = None
+    game_result: Optional[GameBootstrapResult] = None
+
+
+def _execute(
+    output: sqlite3.Connection,
+    source: sqlite3.Connection,
+    *,
+    plan: AuditPlan,
+    entity_type: EntityType,
+    league_id: str,
+    digest: str,
+    build_crosswalks: bool,
+    reconstruction_policy_version: str,
+    cutoff_policy_id: str,
+    cutoff_policy_version: str,
+    target_set_digest: str,
+    g1_variant: G1Variant,
+    code_version: Optional[str],
+    commit: bool,
+) -> _Outcome:
+    """Run the audit write path once; commit it, or roll it back for a dry run.
+
+    One body serves both modes on purpose. Any future divergence between what a
+    dry run predicts and what apply does would have to be written deliberately
+    here, rather than arising from two code paths drifting apart.
+    """
+
+    outcome = _Outcome()
+    output.execute("BEGIN IMMEDIATE")
+    try:
+        outcome.audit_id, outcome.findings_written = persist_audit_plan(output, plan)
+        if build_crosswalks and plan.accepted:
+            repo = SqliteRetrospectiveProvenanceRepository(output)
+            corpus = repo.record_corpus_version(
+                provenance_class=ProvenanceClass.RECONSTRUCTED_RESEARCH,
+                league_id=league_id,
+                reconstruction_policy_version=reconstruction_policy_version,
+                cutoff_policy_id=cutoff_policy_id,
+                cutoff_policy_version=cutoff_policy_version,
+                source_corpus_digest=digest,
+                target_set_digest=target_set_digest,
+                g1_variant=g1_variant,
+                # A TEAM-A corpus must record the exact map it used and the
+                # revision that built it; both are required before a team
+                # crosswalk may be written, and corpus rows are append-only so
+                # they cannot be filled in later.
+                static_identity_map_digest=attestation_map_digest(),
+                code_version=code_version or _repository_revision(),
+            )
+            outcome.corpus_version_id = corpus.corpus_version_id
+            if entity_type in DIRECT_BOOTSTRAP_ENTITY_TYPES:
+                outcome.crosswalk = generate_crosswalks(
+                    output, source, plan=plan,
+                    corpus_version_id=corpus.corpus_version_id,
+                    identity_audit_id=outcome.audit_id,
+                )
+            elif entity_type is EntityType.TEAM:
+                outcome.team_result = write_team_crosswalks(
+                    output, plan=plan,
+                    corpus_version_id=corpus.corpus_version_id,
+                    identity_audit_id=outcome.audit_id,
+                )
+            else:
+                outcome.game_result = write_game_bootstrap(
+                    output, source, plan=plan,
+                    corpus_version_id=corpus.corpus_version_id,
+                    identity_audit_id=outcome.audit_id,
+                )
+    except BaseException:
+        output.rollback()
+        raise
+    if commit:
+        output.commit()
+    else:
+        output.rollback()
+    return outcome
 
 
 def _repository_revision() -> str:
@@ -284,29 +337,3 @@ def _repository_revision() -> str:
     except (OSError, subprocess.SubprocessError):  # pragma: no cover
         pass
     return "unknown-revision"
-
-
-def _dry_run_crosswalks(
-    source: sqlite3.Connection, plan: AuditPlan
-) -> CrosswalkResult:
-    """Predict crosswalk generation without touching the real output database.
-
-    The scratch database is a REAL, fully migrated schema-v19 database in a
-    temporary directory, not a hand-written stub. The review found the stub
-    version modelled ``players`` as two nullable columns with no CHECKs, so a dry
-    run could have predicted a crosswalk the real output schema would refuse --
-    which is precisely the failure a dry run exists to prevent.
-    """
-
-    with tempfile.TemporaryDirectory(prefix="lane_r_dry_run_") as directory:
-        scratch_path = Path(directory) / "dry_run.db"
-        initialize_database(scratch_path)
-        scratch = sqlite3.connect(scratch_path)
-        try:
-            scratch.row_factory = sqlite3.Row
-            return generate_crosswalks(
-                scratch, source, plan=plan, corpus_version_id="rcv_dry_run",
-                identity_audit_id="ida_dry_run", dry_run=True,
-            )
-        finally:
-            scratch.close()

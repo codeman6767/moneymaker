@@ -2252,7 +2252,8 @@ def run_team_attestation_verify(
     *,
     database_path: Optional[Path] = None,
     corpus_version_id: Optional[str] = None,
-    require_complete: bool = False,
+    require_full_league_map: bool = False,
+    source_db: Optional[Path] = None,
     as_json: bool = False,
     out: Printer = print,
 ) -> int:
@@ -2288,9 +2289,9 @@ def run_team_attestation_verify(
     }
     failed = False
     if database_path is not None:
-        reports = verify_database(database_path,
-                                  corpus_version_id=corpus_version_id,
-                                  require_complete=require_complete)
+        reports = verify_database(
+            database_path, corpus_version_id=corpus_version_id,
+            require_full_league_map=require_full_league_map, source_db=source_db)
         payload["corpora"] = [r.as_json() for r in reports]
         failed = any(not r.ok for r in reports)
 
@@ -2748,9 +2749,18 @@ def main(argv: Optional[list[str]] = None) -> int:
                         help="Reconstruction database; omit to report map digests only")
     attest.add_argument("--corpus-version", dest="corpus_version_id", default=None,
                         metavar="ID")
-    attest.add_argument("--require-complete", dest="require_complete",
-                        action="store_true",
-                        help="Also require every committed map entry to be present")
+    # Two DIFFERENT properties, deliberately not one flag (review repair):
+    # materializing the whole league map is not the same as covering the ids the
+    # corpus actually references, and only the latter can surface a referenced
+    # id that is missing from the committed map.
+    attest.add_argument("--require-full-league-map",
+                        dest="require_full_league_map", action="store_true",
+                        help="Require every committed map entry for the league "
+                             "to have a stored crosswalk")
+    attest.add_argument("--source-db", dest="source_db", type=Path, default=None,
+                        metavar="PATH",
+                        help="Source corpus (read-only) to check referenced-id "
+                             "completeness against")
     attest.add_argument("--json", dest="as_json", action="store_true",
                         help="Machine-readable output")
 
@@ -3027,7 +3037,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return run_team_attestation_verify(
             database_path=args.database_path,
             corpus_version_id=args.corpus_version_id,
-            require_complete=args.require_complete, as_json=args.as_json)
+            require_full_league_map=args.require_full_league_map,
+            source_db=args.source_db, as_json=args.as_json)
 
     if args.command == "identity-audit-retrospective":
         return run_retrospective_identity_audit(

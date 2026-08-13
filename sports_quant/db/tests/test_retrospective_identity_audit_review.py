@@ -419,21 +419,33 @@ def test_r8_dry_run_predicts_exactly_what_apply_writes(
             == applied.crosswalk.canonical_bootstrapped)
 
 
-def test_r8_dry_run_scratch_is_the_real_schema_not_a_stub() -> None:
-    """The stub was `players(player_id TEXT PRIMARY KEY, league_id TEXT)`.
+def test_r8_dry_run_runs_the_real_apply_path_not_a_separate_one() -> None:
+    """R8, strengthened by the TEAM-A implementation review.
 
-    It had no NOT NULLs and no CHECKs, so a dry run could have promised a
-    crosswalk the real output schema would refuse. The prediction now runs
-    against a genuinely migrated database.
+    R8 originally required the dry run's scratch database to be a genuinely
+    migrated schema rather than a hand-written `players` stub, because a stub
+    with no NOT NULLs or CHECKs could promise a crosswalk the real schema would
+    refuse. The scratch database is gone entirely: the dry run now executes the
+    SAME body as apply against the REAL output database and rolls it back.
+
+    That subsumes R8 (there is no stub schema to drift) and fixes what R8 could
+    not see -- the scratch path reached the generic provider-key module, so it
+    predicted "unsupported, 0 writes" for teams and games that apply then wrote.
     """
 
     import inspect
 
     from sports_quant.retrospective import runner
 
-    source = inspect.getsource(runner._dry_run_crosswalks)
+    assert not hasattr(runner, "_dry_run_crosswalks"), (
+        "a separate dry-run code path is back; dry run and apply must share one "
+        "body or they will drift again")
+    source = inspect.getsource(runner)
     assert "CREATE TABLE players" not in source, "a hand-written stub is back"
-    assert "initialize_database" in source
+
+    body = inspect.getsource(runner._execute)
+    assert "commit" in body and "rollback" in body, (
+        "the shared body must persist or discard, and nothing else may differ")
 
 
 def test_r8_dry_run_scratch_enforces_the_canonical_player_checks(

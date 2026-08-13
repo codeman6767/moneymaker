@@ -240,6 +240,189 @@ jobs:
             || { echo "verifier did not name the contradiction"; exit 1; }
           echo "RV1 OK: the contradicting crosswalk was detected and exited $rc"
 
+      - name: TEAM-A review repairs (dry-run parity, game provenance, convergence)
+        env:
+          PYTHONPATH: ""
+        working-directory: ${{ runner.temp }}
+        run: |
+          # The defects the independent review of 982b73b proved and repaired.
+          # Synthetic evidence only: no protected corpus, no provider request.
+          "$RUNNER_TEMP/smokeenv/bin/python" - <<'PY'
+          """CI part 4: the repairs proven by the independent review of 982b73b.
+
+          Team apply + dry-run parity, game apply + dry-run parity, persisted game-audit
+          provenance, bare/qualified convergence, and both verifier detections. Uses only
+          synthetic evidence in a scratch directory; no protected corpus, no network.
+          """
+
+          import os
+          import socket
+          import sqlite3
+          import tempfile
+          from pathlib import Path
+
+
+          def _boom(*a, **k):
+              raise AssertionError("TEAM-A CI check attempted network access")
+
+
+          socket.getaddrinfo = _boom
+          socket.create_connection = _boom
+
+          from sports_quant.db.engine import Database, transaction
+          from sports_quant.db.init import initialize_database
+          from sports_quant.db.schema import utc_now_iso
+          from sports_quant.retrospective.game_bootstrap import write_game_bootstrap
+          from sports_quant.retrospective.provenance import EntityType
+          from sports_quant.retrospective.runner import run_identity_audit
+          from sports_quant.retrospective.verifier import verify_corpus
+
+          TS = "2026-06-01T00:00:00.000000Z"
+          TEAMS = {"108": ("Los Angeles Angels", "LAA", "Los Angeles", "Angels"),
+                   "117": ("Houston Astros", "HOU", "Houston", "Astros"),
+                   "147": ("New York Yankees", "NYY", "New York", "Yankees")}
+
+          tmp = Path(tempfile.mkdtemp(prefix="team_a_ci_"))
+          src, out = tmp / "source.db", tmp / "out.db"
+          initialize_database(src)
+          initialize_database(out)
+
+          conn = sqlite3.connect(src)
+          conn.execute("PRAGMA foreign_keys = OFF")
+          n = 0
+          for pid, (name, abbr, city, nick) in TEAMS.items():
+              n += 1
+              conn.execute(
+                  "INSERT INTO provider_team_identity_snapshots (identity_id, provider, "
+                  "provider_team_id, league_id, full_name, normalized_name, abbreviation, "
+                  "city, nickname, observed_at, raw_response_id, raw_response_hash, "
+                  "content_hash, created_at) VALUES (?,'mlb_statsapi',?,'lg_mlb',?,?,?,?,?,"
+                  "?,'raw','h',?,?)",
+                  (f"pti_{n}", pid, name, name.lower(), abbr, city, nick, TS,
+                   f"ch_{n}", TS))
+          for gid, home, away in (("700001", "147", "117"), ("123", "117", "108")):
+              n += 1
+              conn.execute(
+                  "INSERT INTO game_schedule_snapshots (schedule_id, game_ref_id, provider, "
+                  "provider_game_id, season, game_date_local, scheduled_start, "
+                  "home_provider_team_id, away_provider_team_id, venue_provider_id, "
+                  "mapped_status, game_number, doubleheader_code, reschedule_info, "
+                  "observed_at, ingested_at, run_id, raw_response_id, raw_response_hash, "
+                  "content_hash, created_at) VALUES (?,?,'mlb_statsapi',?,2026,'2026-06-01',"
+                  "'2026-06-01T22:45:00Z',?,?,'1','final',1,'N',NULL,?,?,'run','raw','h',?,?)",
+                  (f"gss_{n}", f"pgr_{gid}", gid, home, away, TS, TS, f"ch_{n}", TS))
+          conn.commit()
+          conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+          conn.close()
+
+          now = utc_now_iso()
+          with Database(out).connection() as c:
+              c.execute("BEGIN IMMEDIATE")
+              c.execute(
+                  "INSERT INTO seasons (season_id, league_id, year, phase, label, "
+                  "start_date, end_date, created_at, updated_at) VALUES "
+                  "('sn_mlb_2026_regular','lg_mlb',2026,'regular','2026','2026-01-01',"
+                  "'2027-12-31',?,?)", (now, now))
+              # A canonical game the CONVENTIONAL matcher already created, under the BARE
+              # provider string. TEAM-A must converge on it, not mint a second row.
+              c.execute(
+                  "INSERT INTO games (game_id, league_id, season_id, home_team_id, "
+                  "away_team_id, scheduled_start, original_start, game_date_local, "
+                  "game_number, is_neutral_site, status, official_provider, "
+                  "official_game_key, created_at, updated_at) VALUES "
+                  "('gm_conventional','lg_mlb','sn_mlb_2026_regular','tm_mlb_hou',"
+                  "'tm_mlb_laa','2026-06-01T22:45:00Z','2026-06-01T22:45:00Z','2026-06-01',"
+                  "1,0,'final','mlb_statsapi','123',?,?)", (now, now))
+              c.commit()
+
+
+          def run(entity_type, apply):
+              return run_identity_audit(
+                  source_db=src, output_db=out, league_id="lg_mlb",
+                  provider="mlb_statsapi", namespace_generation="v1",
+                  entity_type=entity_type, apply=apply, build_crosswalks=True,
+                  code_version="ci")
+
+
+          # 1. TEAM dry-run must predict apply exactly.
+          tdry = run(EntityType.TEAM, False)
+          tapp = run(EntityType.TEAM, True)
+          assert tdry.team_crosswalks is not None, "TEAM dry run produced no prediction"
+          assert tdry.team_crosswalks.written == tapp.team_crosswalks.written == 3
+          assert tdry.team_crosswalks.plan.attested == tapp.team_crosswalks.plan.attested
+          assert tdry.crosswalk is None and tapp.crosswalk is None
+          print("1. TEAM dry-run/apply parity OK: 3 attested, 3 written")
+
+          # 2. GAME dry-run must predict apply exactly, and write game provenance.
+          gdry = run(EntityType.GAME, False)
+          gapp = run(EntityType.GAME, True)
+          assert gdry.game_bootstrap is not None, "GAME dry run produced no prediction"
+          assert len(gdry.game_bootstrap.plan.ready) == len(gapp.game_bootstrap.plan.ready)
+          assert gdry.game_bootstrap.created == gapp.game_bootstrap.created
+          assert gapp.game_bootstrap.provenance_written == 2, gapp.game_bootstrap
+          print(f"2. GAME dry-run/apply parity OK: created={gapp.game_bootstrap.created}, "
+                f"reused={gapp.game_bootstrap.reused}, "
+                f"provenance={gapp.game_bootstrap.provenance_written}")
+
+          # 3. Convergence: the conventionally matched game was reused, not duplicated.
+          with Database(out).connection() as c:
+              rows = c.execute(
+                  "SELECT game_id, official_provider FROM games WHERE official_game_key='123'"
+                  ).fetchall()
+              assert len(rows) == 1, f"the same real game has {len(rows)} canonical rows"
+              assert rows[0][0] == "gm_conventional", rows[0][0]
+              assert c.execute(
+                  "SELECT COUNT(*) FROM static_crosswalk_provenance WHERE entity_type='game' "
+                  "AND canonical_entity_id='gm_conventional'").fetchone()[0] == 1
+          print("3. bare/qualified convergence OK: one canonical game, provenance attached")
+
+          # 4. A forged, unpersisted audit must not mint canonical games.
+          from sports_quant.retrospective.sources import open_source_corpus
+
+          sconn = open_source_corpus(src)
+          try:
+              with Database(out).connection() as c:
+                  try:
+                      with transaction(c):
+                          write_game_bootstrap(
+                              c, sconn, plan=gapp.plan,
+                              corpus_version_id=gapp.corpus_version_id,
+                              identity_audit_id="ida_not_a_real_audit")
+                  except Exception as exc:
+                      assert "audit" in str(exc).lower(), exc
+                      print(f"4. forged game audit refused: {str(exc)[:70]}")
+                  else:
+                      raise AssertionError("a forged audit id minted canonical games")
+          finally:
+              sconn.close()
+
+          # 5. Verifier: wrong canonical target IS detected.
+          with Database(out).connection() as c:
+              c.execute("DROP TRIGGER trg_xwk_no_update")
+              with transaction(c):
+                  c.execute(
+                      "UPDATE static_crosswalk_provenance SET canonical_entity_id='tm_mlb_hou' "
+                      "WHERE entity_type='team' AND provider_id='147'")
+              rep = verify_corpus(c, tapp.corpus_version_id)
+              assert not rep.ok and any("committed map says" in p for p in rep.problems), rep
+              print(f"5. verifier caught a wrong target: {rep.problems[0][:70]}")
+
+              # 6. Verifier: a tampered semantic digest IS detected.
+              with transaction(c):
+                  c.execute(
+                      "UPDATE static_crosswalk_provenance SET canonical_entity_id='tm_mlb_nyy' "
+                      "WHERE entity_type='team' AND provider_id='147'")
+                  c.execute(
+                      "UPDATE static_crosswalk_provenance SET semantic_digest=? "
+                      "WHERE entity_type='team' AND provider_id='147'", ("0" * 64,))
+              rep = verify_corpus(c, tapp.corpus_version_id)
+              assert not rep.ok and any("digest" in p for p in rep.problems), rep
+              print(f"6. verifier caught a tampered digest: {rep.problems[0][:70]}")
+
+          print("TEAM-A review repairs verified from the installed wheel")
+
+          PY
+
       - name: Checkpoint provenance from the installed wheel (offline, zero network)
         env:
           PYTHONPATH: ""

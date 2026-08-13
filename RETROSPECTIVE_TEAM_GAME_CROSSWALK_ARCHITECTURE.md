@@ -23,6 +23,12 @@ Resolves the blocker retained by
 > for what the code does. Schema stayed **v19**. The reader remains BLOCKED, and
 > F1-R, F2, production matching and model training remain unauthorized.
 
+> **IMPLEMENTATION REVIEWED 2026-08-13 — ACCEPTED WITH REPAIRS.**
+> `RETROSPECTIVE_TEAM_GAME_CROSSWALK_IMPLEMENTATION_INDEPENDENT_REVIEW.md`.
+> Seven defects were proven and repaired; schema stayed **v19** (game identity
+> provenance uses v19's existing `static_crosswalk_provenance`, so no v20). The
+> reader may now be separately authorized.
+
 **Chosen: TEAM-A — source-controlled static attestation to the existing canonical
 seed.** No schema change; **schema stays v19**.
 
