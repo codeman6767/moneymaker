@@ -758,10 +758,20 @@ def test_a_rejected_audit_produces_no_crosswalks(
 
 
 @pytest.mark.parametrize("entity_type", [EntityType.TEAM, EntityType.GAME])
-def test_team_and_game_crosswalks_report_the_blocker_rather_than_forcing_it(
+def test_team_and_game_crosswalks_are_routed_to_the_team_a_path(
     builder: SourceBuilder, output_db: Path, entity_type: EntityType
 ) -> None:
-    """Canonical preparation is unsolved for these two; it is reported, not faked."""
+    """Canonical preparation for these two is TEAM-A's, not the key bootstrap's.
+
+    Previously this asserted a reported blocker. The blocker is closed, so what
+    matters now is that the runner does not quietly fall back to provider-key
+    bootstrapping: `crosswalk` must stay empty and the TEAM-A result must appear
+    in its own field.
+
+    The synthetic ids here ("T1"/"G1") are NOT in the committed map, so the
+    correct outcome is zero writes -- proving the path refuses an unattested key
+    rather than inventing a franchise.
+    """
 
     builder.team("T1").game("G1")
     result = run_identity_audit(
@@ -769,11 +779,21 @@ def test_team_and_game_crosswalks_report_the_blocker_rather_than_forcing_it(
         provider="mlb_statsapi", namespace_generation="v1",
         entity_type=entity_type, apply=True, build_crosswalks=True)
     assert result.plan.verdict is AuditVerdict.ACCEPTED
-    assert result.crosswalk is not None
-    assert result.crosswalk.supported is False
-    assert result.crosswalk.crosswalks_written == 0
-    assert result.crosswalk.blocked_reason
-    assert entity_type not in CROSSWALK_SUPPORTED_ENTITY_TYPES
+    assert entity_type in CROSSWALK_SUPPORTED_ENTITY_TYPES
+    # The provider-key bootstrap must not have run for a team or a game.
+    assert result.crosswalk is None
+
+    if entity_type is EntityType.TEAM:
+        assert result.team_crosswalks is not None
+        assert result.game_bootstrap is None
+        assert result.team_crosswalks.written == 0
+        assert result.team_crosswalks.plan.unresolved == ("T1",)
+    else:
+        assert result.game_bootstrap is not None
+        assert result.team_crosswalks is None
+        assert result.game_bootstrap.created == 0
+        # No attested team crosswalk exists, so the game cannot be built.
+        assert result.game_bootstrap.plan.unattested_team_ids
 
 
 def test_a_crosswalk_cannot_be_built_into_a_corpus_over_other_evidence(

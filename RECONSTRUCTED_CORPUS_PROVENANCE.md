@@ -178,7 +178,7 @@ Before any reconstructed corpus is built or used:
     `reconstruction_corpus_versions.static_identity_map_digest`, so a remap
     produces a new corpus version and can never silently reinterpret an old one.
     **Decision only — not implemented, and awaiting independent review.**
-11. **(2026-08-13)** That architecture was independently reviewed: **ACCEPTED WITH
+11. **(2026-08-12)** That architecture was independently reviewed: **ACCEPTED WITH
     REPAIRS**. The map digest does **not** bind the crosswalk at v19, so
     map-membership must be enforced in code and CI; canonical-target injectivity is
     not required (provider-key functional uniqueness is); the game official key
@@ -186,6 +186,18 @@ Before any reconstructed corpus is built or used:
     required so a seed edit cannot silently change an old corpus's meaning. Schema
     verdict: **V19 SUFFICIENT WITH ADDITIONAL CODE INVARIANTS**. TEAM-A
     implementation may be separately authorized; the reader remains blocked.
+12. **(2026-08-12)** TEAM-A was **implemented**
+    (`RETROSPECTIVE_TEAM_GAME_CROSSWALK_IMPLEMENTATION.md`): the committed
+    60-entry attestation map, deterministic team static crosswalks, the
+    official-provider canonical-game bootstrap, and the RV1/RV3/RV5 code+CI
+    invariants. **Schema stayed v19 — no migration was added or edited.** The map
+    digest now genuinely participates in the crosswalk semantic digest, and a
+    corpus must declare the matching map digest and a code version *before* a team
+    crosswalk may be written. Map-membership enforcement is a **detective**
+    control (code + CI), weaker than the DB-enforced G5 bindings: direct SQL can
+    still write a contradicting row, but it cannot survive verification.
+    Reproduced read-only over both protected corpora with **0 provider requests**.
+    **Not independently reviewed; the reader remains blocked.**
 
 Until all four pass, only `strict_forward_pit` (forward collection) may support
 evaluation, and no profitability claim may be made from reconstructed data.

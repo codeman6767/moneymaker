@@ -25,7 +25,13 @@ from ..db.engine import Database, transaction
 from ..db.init import initialize_database
 from ..db.repositories.retrospective import SqliteRetrospectiveProvenanceRepository
 from ..db.schema import CURRENT_SCHEMA_VERSION
-from .crosswalks import CrosswalkResult, generate_crosswalks
+from .attestations import attestation_map_digest
+from .crosswalks import (
+    DIRECT_BOOTSTRAP_ENTITY_TYPES,
+    CrosswalkResult,
+    generate_crosswalks,
+)
+from .game_bootstrap import GameBootstrapResult, write_game_bootstrap
 from .identity_audit import (
     AUDIT_POLICY_VERSION,
     AuditPlan,
@@ -35,6 +41,7 @@ from .identity_audit import (
 )
 from .provenance import EntityType, G1Variant, ProvenanceClass, ProviderNamespace
 from .sources import open_source_corpus, source_corpus_digest
+from .team_crosswalks import TeamCrosswalkResult, write_team_crosswalks
 
 __all__ = ["AuditRunResult", "run_identity_audit"]
 
@@ -49,6 +56,8 @@ class AuditRunResult:
     findings_written: int
     crosswalk: Optional[CrosswalkResult]
     corpus_version_id: Optional[str]
+    team_crosswalks: Optional[TeamCrosswalkResult] = None
+    game_bootstrap: Optional[GameBootstrapResult] = None
 
     def to_json(self) -> dict[str, Any]:
         plan = self.plan
@@ -81,6 +90,20 @@ class AuditRunResult:
             # so a report can be checked rather than trusted.
             "network_occurred": False,
         }
+        if self.team_crosswalks is not None:
+            team = self.team_crosswalks
+            payload["team_attestation"] = {
+                **team.plan.as_json(),
+                "written": team.written,
+                "reused": team.reused,
+            }
+        if self.game_bootstrap is not None:
+            game = self.game_bootstrap
+            payload["game_bootstrap"] = {
+                **game.plan.as_json(),
+                "created": game.created,
+                "reused": game.reused,
+            }
         if self.crosswalk is not None:
             payload["crosswalk"] = {
                 "entity_type": self.crosswalk.entity_type.value,
@@ -149,6 +172,7 @@ def run_identity_audit(
     cutoff_policy_version: str = "1",
     target_set_digest: str = "identity-audit-no-targets",
     g1_variant: G1Variant = G1Variant.G1_B_CORE,
+    code_version: Optional[str] = None,
 ) -> AuditRunResult:
     """Audit one namespace over one corpus, optionally persisting the result.
 
@@ -192,6 +216,8 @@ def run_identity_audit(
                 audit_id, written = persist_audit_plan(output, plan)
                 corpus_version_id = None
                 crosswalk = None
+                team_result: Optional[TeamCrosswalkResult] = None
+                game_result: Optional[GameBootstrapResult] = None
                 if build_crosswalks and plan.accepted:
                     repo = SqliteRetrospectiveProvenanceRepository(output)
                     corpus = repo.record_corpus_version(
@@ -203,20 +229,61 @@ def run_identity_audit(
                         source_corpus_digest=digest,
                         target_set_digest=target_set_digest,
                         g1_variant=g1_variant,
+                        # A TEAM-A corpus must record the exact map it used and
+                        # the revision that built it; both are required before a
+                        # team crosswalk may be written, and corpus rows are
+                        # append-only so they cannot be filled in later.
+                        static_identity_map_digest=attestation_map_digest(),
+                        code_version=code_version or _repository_revision(),
                     )
                     corpus_version_id = corpus.corpus_version_id
-                    crosswalk = generate_crosswalks(
-                        output, source, plan=plan,
-                        corpus_version_id=corpus_version_id,
-                        identity_audit_id=audit_id,
-                    )
+                    if entity_type in DIRECT_BOOTSTRAP_ENTITY_TYPES:
+                        crosswalk = generate_crosswalks(
+                            output, source, plan=plan,
+                            corpus_version_id=corpus_version_id,
+                            identity_audit_id=audit_id,
+                        )
+                    elif entity_type is EntityType.TEAM:
+                        team_result = write_team_crosswalks(
+                            output, plan=plan,
+                            corpus_version_id=corpus_version_id,
+                            identity_audit_id=audit_id,
+                        )
+                    else:
+                        game_result = write_game_bootstrap(
+                            output, source, plan=plan,
+                            corpus_version_id=corpus_version_id,
+                        )
             return AuditRunResult(
                 plan=plan, applied=True, identity_audit_id=audit_id,
                 findings_written=written, crosswalk=crosswalk,
                 corpus_version_id=corpus_version_id,
+                team_crosswalks=team_result, game_bootstrap=game_result,
             )
     finally:
         source.close()
+
+
+def _repository_revision() -> str:
+    """The commit this build came from, for the corpus's reproducibility record.
+
+    Falls back to a stable sentinel rather than raising: a working tree with no
+    git metadata is a legitimate environment, and the honest record is that the
+    revision is unknown -- which a reviewer can then reject.
+    """
+
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True,
+            timeout=15, cwd=Path(__file__).resolve().parents[2])
+        revision = result.stdout.strip()
+        if result.returncode == 0 and revision:
+            return revision
+    except (OSError, subprocess.SubprocessError):  # pragma: no cover
+        pass
+    return "unknown-revision"
 
 
 def _dry_run_crosswalks(

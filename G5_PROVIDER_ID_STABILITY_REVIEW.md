@@ -74,7 +74,7 @@ reader remains unimplemented, and **F1-R, F2, production matching and model
 training remain unauthorized.** The architecture decision itself still requires
 independent review. G1/G2/G3/G4/G6 unchanged.
 
-**TEAM-A architecture REVIEWED 2026-08-13 — ACCEPTED WITH REPAIRS.**
+**TEAM-A architecture REVIEWED 2026-08-12 — ACCEPTED WITH REPAIRS.**
 `RETROSPECTIVE_TEAM_GAME_CROSSWALK_ARCHITECTURE_INDEPENDENT_REVIEW.md`. The TEAM-A
 choice stands, but six design claims were proven false. Two are load-bearing:
 **the corpus map digest does NOT bind the crosswalk** (v19 accepts a crosswalk
@@ -98,6 +98,20 @@ and are weaker than the DB-enforced G5 bindings.
 **TEAM-A implementation may be separately authorized. The reader remains BLOCKED**
 until that implementation is itself independently reviewed. F1-R, F2, production
 matching and model training remain unauthorized. G1/G2/G3/G4/G6 unchanged.
+
+**TEAM-A IMPLEMENTED 2026-08-12 — NOT independently reviewed.**
+`RETROSPECTIVE_TEAM_GAME_CROSSWALK_IMPLEMENTATION.md`. The committed 60-entry
+attestation map, deterministic team static-crosswalk generation, official-provider
+canonical-game bootstrap, and the RV1/RV3/RV5 code+CI invariants are in place.
+**Schema stays v19** (19 migrations, no new migration, f018/f019 untouched).
+Reproduced read-only over both protected corpora with **0 provider requests** and
+byte-identical protected artefacts (MLB 2026-06: 30 teams, 400 games; NBA 2026-03:
+30 teams, 239 games). RV1 map-membership enforcement is a **detective** control:
+CI proves a contradicting crosswalk is caught, but direct SQL can still write one,
+so it is weaker than the DB-enforced G5 bindings. **The reader remains BLOCKED**,
+and F1-R, F2, production matching, model training and feature engineering remain
+unauthorized. G1/G2/G3/G4/G6 unchanged.
+
 
 **This foundation has NOT been independently reviewed.** Still unimplemented:
 `RetrospectiveResearchReader`, the identity-audit engine, and historical

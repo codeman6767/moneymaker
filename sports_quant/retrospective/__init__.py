@@ -11,6 +11,9 @@ Deliberately absent, and each for a stated reason:
   implementation phase, after this storage contract has been independently
   reviewed. Building the consumer first would mean reviewing the contract by
   reading the code that already depends on it.
+* **TEAM-A team attestation and canonical game bootstrap ARE implemented**
+  (``attestations``, ``namespaces``, ``team_crosswalks``, ``game_bootstrap``,
+  ``verifier``) as of 2026-08-12, and have **not** been independently reviewed.
 * **The identity-audit engine IS implemented** (``identity_audit``, ``sources``,
   ``crosswalks``, ``runner``) as of 2026-08-12, and has **not** been
   independently reviewed. It audits game, team and person namespaces; crosswalk
@@ -119,6 +122,32 @@ __all__ = [
 # `from sports_quant.retrospective import run_identity_audit` while resolving the
 # engine only when it is actually asked for.
 _LAZY: dict[str, str] = {
+    "MAP_FORMAT_VERSION": "attestations",
+    "TEAM_ATTESTATIONS": "attestations",
+    "TEAM_ATTESTATION_POLICY_VERSION": "attestations",
+    "AttestationError": "attestations",
+    "TeamAttestation": "attestations",
+    "attestation_map_digest": "attestations",
+    "attested_canonical_team": "attestations",
+    "canonical_team_seed_digest": "attestations",
+    "describe_map_shape": "attestations",
+    "QUALIFIED_PROVIDERS": "namespaces",
+    "QualifiedProvider": "namespaces",
+    "qualified_provider": "namespaces",
+    "qualified_provider_for": "namespaces",
+    "TeamCrosswalkPlan": "team_crosswalks",
+    "TeamCrosswalkResult": "team_crosswalks",
+    "plan_team_crosswalks": "team_crosswalks",
+    "write_team_crosswalks": "team_crosswalks",
+    "GAME_BOOTSTRAP_POLICY_VERSION": "game_bootstrap",
+    "GameBootstrapPlan": "game_bootstrap",
+    "GameBootstrapResult": "game_bootstrap",
+    "canonical_game_id": "game_bootstrap",
+    "plan_game_bootstrap": "game_bootstrap",
+    "write_game_bootstrap": "game_bootstrap",
+    "VerificationReport": "verifier",
+    "verify_corpus": "verifier",
+    "verify_database": "verifier",
     "AUDIT_POLICY_VERSION": "identity_audit",
     "AuditPlan": "identity_audit",
     "IdentityAuditError": "identity_audit",

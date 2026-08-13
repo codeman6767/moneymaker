@@ -2245,6 +2245,82 @@ def run_retrospective_identity_audit(
     return 0
 
 
+# --------------------------------------------------------------------------- #
+# TEAM-A committed-map verifier (review repair RV1 #3)
+# --------------------------------------------------------------------------- #
+def run_team_attestation_verify(
+    *,
+    database_path: Optional[Path] = None,
+    corpus_version_id: Optional[str] = None,
+    require_complete: bool = False,
+    as_json: bool = False,
+    out: Printer = print,
+) -> int:
+    """Check stored TEAM-A crosswalks against the committed attestation map.
+
+    Schema v19 accepts a crosswalk that contradicts the committed map, because
+    SQLite cannot read an external artifact's contents. This command is the
+    detective control that closes that loop, and it is deliberately runnable with
+    no database at all so CI can assert the map's own invariants (digests, T1,
+    canonical targets) without needing a protected corpus.
+
+    Exits non-zero on any mismatch.
+    """
+
+    from .retrospective.attestations import (
+        MAP_FORMAT_VERSION,
+        TEAM_ATTESTATION_POLICY_VERSION,
+        attestation_map_digest,
+        canonical_team_seed_digest,
+        describe_map_shape,
+    )
+    from .retrospective.verifier import verify_database
+
+    payload: dict[str, Any] = {
+        "command": "team-attestation-verify",
+        "map_format_version": MAP_FORMAT_VERSION,
+        "attestation_policy_version": TEAM_ATTESTATION_POLICY_VERSION,
+        "canonical_team_seed_digest": canonical_team_seed_digest(),
+        "attestation_map_digest": attestation_map_digest(),
+        "map_shape": describe_map_shape(),
+        "corpora": [],
+        "network_occurred": False,
+    }
+    failed = False
+    if database_path is not None:
+        reports = verify_database(database_path,
+                                  corpus_version_id=corpus_version_id,
+                                  require_complete=require_complete)
+        payload["corpora"] = [r.as_json() for r in reports]
+        failed = any(not r.ok for r in reports)
+
+    if as_json:
+        out(json.dumps(payload, sort_keys=True))
+        return 1 if failed else 0
+
+    out("TEAM-A attestation verification (offline; no provider request is made)")
+    out(f"  map format          : {payload['map_format_version']}")
+    out(f"  attestation policy  : {payload['attestation_policy_version']}")
+    out(f"  canonical seed digest: {payload['canonical_team_seed_digest']}")
+    out(f"  attestation map digest: {payload['attestation_map_digest']}")
+    shape = payload["map_shape"]
+    out(f"  entries             : {shape['entries']} {shape['entries_by_league']}")
+    out(f"  distinct provider keys : {shape['distinct_provider_keys']}")
+    out(f"  distinct canonical targets: {shape['distinct_canonical_targets']} "
+        "(observation, not a rule -- many provider ids may denote one franchise)")
+    for report in payload["corpora"]:
+        out("")
+        out(f"  corpus {report['corpus_version_id']}: "
+            f"{report['crosswalks_checked']} crosswalk(s) checked, "
+            f"{'OK' if report['ok'] else 'PROBLEMS'}")
+        for problem in report["problems"]:
+            out(f"    - {problem}")
+    if database_path is None:
+        out("")
+        out("  (no --db given: map invariants checked, no stored crosswalks inspected)")
+    return 1 if failed else 0
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     """CLI dispatch.
 
@@ -2664,6 +2740,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     idaudit.add_argument("--json", dest="as_json", action="store_true",
                          help="Machine-readable output")
 
+    attest = sub.add_parser(
+        "team-attestation-verify",
+        help="Verify TEAM-A crosswalks against the committed map (offline, RV1)")
+    attest.add_argument("--db", dest="database_path", type=Path, default=None,
+                        metavar="PATH",
+                        help="Reconstruction database; omit to report map digests only")
+    attest.add_argument("--corpus-version", dest="corpus_version_id", default=None,
+                        metavar="ID")
+    attest.add_argument("--require-complete", dest="require_complete",
+                        action="store_true",
+                        help="Also require every committed map entry to be present")
+    attest.add_argument("--json", dest="as_json", action="store_true",
+                        help="Machine-readable output")
+
     args = parser.parse_args(argv)
 
     if args.command == "provider-audit":
@@ -2932,6 +3022,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         except ReadOnlyStartupError as exc:
             print(str(exc))
             return 2
+
+    if args.command == "team-attestation-verify":
+        return run_team_attestation_verify(
+            database_path=args.database_path,
+            corpus_version_id=args.corpus_version_id,
+            require_complete=args.require_complete, as_json=args.as_json)
 
     if args.command == "identity-audit-retrospective":
         return run_retrospective_identity_audit(

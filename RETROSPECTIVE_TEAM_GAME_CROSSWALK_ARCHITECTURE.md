@@ -6,7 +6,7 @@ Resolves the blocker retained by
 **Verdict as designed: ARCHITECTURE READY FOR INDEPENDENT REVIEW.**
 **Verdict after review: ACCEPTED WITH REPAIRS** (applied inline below).
 
-> **REVIEWED 2026-08-13 — ACCEPTED WITH REPAIRS.**
+> **REVIEWED 2026-08-12 — ACCEPTED WITH REPAIRS.**
 > `RETROSPECTIVE_TEAM_GAME_CROSSWALK_ARCHITECTURE_INDEPENDENT_REVIEW.md` is
 > **authoritative where it differs from this document**. Six design claims
 > were proven wrong and are corrected inline below (RV1–RV6): the map digest
@@ -15,6 +15,13 @@ Resolves the blocker retained by
 > nor generation; the crosswalk digest captures the conclusion rather than the
 > curation evidence; no canonical-team seed digest exists; and "independent
 > attribute" overstated the corroboration. The TEAM-A choice itself stands.
+
+> **IMPLEMENTED 2026-08-12 — NOT independently reviewed.**
+> See `RETROSPECTIVE_TEAM_GAME_CROSSWALK_IMPLEMENTATION.md`. This document
+> remains a **design** record: where it describes intent and the implementation
+> report describes shipped behaviour, the implementation report is authoritative
+> for what the code does. Schema stayed **v19**. The reader remains BLOCKED, and
+> F1-R, F2, production matching and model training remain unauthorized.
 
 **Chosen: TEAM-A — source-controlled static attestation to the existing canonical
 seed.** No schema change; **schema stays v19**.

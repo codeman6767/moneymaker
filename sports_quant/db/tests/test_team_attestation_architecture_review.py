@@ -122,14 +122,29 @@ def test_rv1_and_the_wrong_crosswalk_is_indistinguishable_in_the_database(
     assert "MAP_M" not in " ".join(str(v) for v in tuple(stored))
 
 
-def test_rv1_requirement_the_map_digest_must_enter_the_crosswalk_digest() -> None:
-    """What the implementation phase must change (design requirement, not code).
+def _digest_block(source: str) -> str:
+    """The crosswalk semantic-digest inputs, as written in the repository.
 
-    Today the crosswalk semantic digest is computed from corpus, namespace,
-    provider id, canonical id, audit digest and policy version. The map digest is
-    absent, so a crosswalk built under map M and one built under map M' are
-    cryptographically identical. Folding the map digest in is a digest-input
-    change, not a schema change.
+    Spans from the payload dict to the `semantic_digest(...)` call, so the
+    conditional map-digest branch introduced by the RV1 repair is included.
+    """
+
+    start = source.index("digest_payload: dict[str, Any] = {")
+    end = source.index("digest = semantic_digest(digest_payload)")
+    return source[start:end]
+
+
+def test_rv1_requirement_the_map_digest_must_enter_the_crosswalk_digest() -> None:
+    """RV1's digest-input requirement, now CLOSED by the implementation phase.
+
+    The review recorded that the crosswalk semantic digest omitted the map
+    digest, so a crosswalk built under map M and one built under map M' were
+    cryptographically identical. The implementation folds the map digest in --
+    a digest-input change, not a schema change -- and this assertion has flipped
+    accordingly.
+
+    It is folded in ONLY when supplied, so player crosswalk digests written
+    before the implementation stay byte-identical.
     """
 
     import inspect
@@ -139,13 +154,11 @@ def test_rv1_requirement_the_map_digest_must_enter_the_crosswalk_digest() -> Non
     )
 
     source = inspect.getsource(Repo.record_static_crosswalk)
-    digest_block = source[source.index('digest = semantic_digest({'):]
-    digest_block = digest_block[:digest_block.index("})") + 2]
-    assert "identity_audit_digest" in digest_block
-    # The gap this review recorded. When the implementation phase closes it, this
-    # assertion flips and the test's docstring should be updated with it.
-    assert "map_digest" not in digest_block, (
-        "map digest now participates -- update RV1 and the review report")
+    block = _digest_block(source)
+    assert "identity_audit_digest" in block
+    assert "attestation_map_digest" in block, (
+        "RV1 regressed: the attestation map digest no longer participates, so a "
+        "crosswalk built under a different map would digest identically")
 
 
 # --------------------------------------------------------------------------- #
@@ -323,11 +336,13 @@ def test_rv4_the_crosswalk_digest_captures_the_conclusion_not_the_evidence() -> 
     )
 
     source = inspect.getsource(Repo.record_static_crosswalk)
-    block = source[source.index('digest = semantic_digest({'):]
-    block = block[:block.index("})") + 2]
+    block = _digest_block(source)
+    # `map_digest` is deliberately NOT in this list any more: RV1 closed, and the
+    # map digest is a VERSIONING input (which map was in force), not curation
+    # evidence. What must stay out is the name evidence itself.
     for evidence_field in ("normalized_name", "abbreviation", "nickname",
-                           "curation_evidence", "map_digest"):
-        assert evidence_field not in block
+                           "full_name", "curation_evidence"):
+        assert evidence_field not in block, evidence_field
 
 
 def test_rv5_no_canonical_team_seed_digest_exists_yet() -> None:
@@ -377,17 +392,34 @@ def test_rv6_corroborating_attributes_come_from_the_same_observation_family(
 # --------------------------------------------------------------------------- #
 # Nothing was implemented
 # --------------------------------------------------------------------------- #
-def test_no_attestation_map_or_crosswalk_support_was_added() -> None:
+def test_the_reviewed_scope_was_implemented_and_nothing_beyond_it() -> None:
+    """Was a review-phase scope guard; now pins the implemented boundary.
+
+    The review shipped no code. The implementation phase (authorized separately)
+    shipped exactly the TEAM-A map, team crosswalks and game bootstrap -- and
+    still no reader and no market machinery.
+    """
+
     import sports_quant.retrospective as retro
     from sports_quant.retrospective.crosswalks import (
         CROSSWALK_SUPPORTED_ENTITY_TYPES,
+        DIRECT_BOOTSTRAP_ENTITY_TYPES,
     )
 
-    assert CROSSWALK_SUPPORTED_ENTITY_TYPES == frozenset({EntityType.PLAYER})
+    assert CROSSWALK_SUPPORTED_ENTITY_TYPES == frozenset(
+        {EntityType.PLAYER, EntityType.TEAM, EntityType.GAME})
+    # Only players are bootstrapped straight from a provider key; teams and games
+    # go through the attested TEAM-A path.
+    assert DIRECT_BOOTSTRAP_ENTITY_TYPES == frozenset({EntityType.PLAYER})
+
     package = Path(retro.__file__).parent
-    for forbidden in ("attestations.py", "team_attestations.py", "reader.py",
-                      "team_crosswalks.py", "game_crosswalks.py"):
-        assert not (package / forbidden).exists()
+    for present in ("attestations.py", "team_crosswalks.py", "game_bootstrap.py",
+                    "namespaces.py", "verifier.py"):
+        assert (package / present).exists(), present
+    # Still blocked, and still out of scope.
+    for forbidden in ("reader.py", "market.py", "odds.py", "anchoring.py",
+                      "features.py"):
+        assert not (package / forbidden).exists(), forbidden
 
 
 def test_schema_unchanged_at_v19() -> None:

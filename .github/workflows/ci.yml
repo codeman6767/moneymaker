@@ -117,6 +117,129 @@ jobs:
           grep -q "Schema version: 19" /tmp/init1.txt
           grep -q "nothing was changed" /tmp/init2.txt
 
+      - name: TEAM-A attestation invariants (RV1/RV3/RV5, offline, synthetic only)
+        env:
+          PYTHONPATH: ""
+        working-directory: ${{ runner.temp }}
+        run: |
+          # The RV1 detective control is a CODE+CI invariant, not a DB constraint:
+          # SQLite cannot read the committed map, so it cannot reject a crosswalk
+          # that contradicts it. This step proves the verifier actually catches
+          # such a row. It uses only the fresh smoke database seeded above and a
+          # synthetic corpus -- NO protected F1 corpus is required or touched, and
+          # no provider request is made.
+          PY="$RUNNER_TEMP/smokeenv/bin/python"
+          SQ="$RUNNER_TEMP/smokeenv/bin/sports-quant"
+
+          # 1. Map invariants alone must pass with no database at all.
+          "$SQ" team-attestation-verify --json | tee /tmp/attest.json
+          # The report is passed by PATH, not on stdin: a heredoc already owns
+          # stdin here, so a `< file` redirect would be silently discarded.
+          REPORT=/tmp/attest.json "$PY" - <<'PY'
+          import json, os
+          with open(os.environ["REPORT"], encoding="utf-8") as fh:
+              p = json.load(fh)
+          assert p["network_occurred"] is False, p
+          assert p["map_format_version"] == "team-a-map-v1", p
+          assert p["attestation_policy_version"] == "g5-team-attestation-v1", p
+          # Pinned so a silent edit to the map or to the canonical franchise seed
+          # changes CI, not just a corpus that nobody rebuilds.
+          assert p["canonical_team_seed_digest"] == (
+              "19d7e98d239a582c8968fbe819fb6926"
+              "b60f8a568ef56a71e134e7e74d6a7fcc"), p["canonical_team_seed_digest"]
+          assert p["attestation_map_digest"] == (
+              "ae21c26b7ca642755dbf6d2f5e4aeee1"
+              "ae4c169889670f730ff40aa031d290d9"), p["attestation_map_digest"]
+          assert p["map_shape"]["entries"] == 60, p["map_shape"]
+          print("map invariants pinned:", p["map_shape"]["entries_by_league"])
+          PY
+
+          # 2. RV5: every canonical target the map names must exist in the
+          #    freshly seeded canonical `teams` dimension.
+          DB="$RUNNER_TEMP/smoke.db" "$PY" - <<'PY'
+          import os, sqlite3
+          from sports_quant.retrospective.attestations import TEAM_ATTESTATIONS
+          conn = sqlite3.connect(os.environ["DB"])
+          have = {r[0] for r in conn.execute("SELECT team_id FROM teams")}
+          missing = sorted({e.canonical_team_id for e in TEAM_ATTESTATIONS} - have)
+          assert not missing, f"attested canonical teams absent from the seed: {missing}"
+          print(f"RV5 OK: {len(TEAM_ATTESTATIONS)} attestations resolve into {len(have)} seeded teams")
+          PY
+
+          # 3. RV1: an honest crosswalk must verify clean, and a row that
+          #    satisfies every v19 constraint -- real ACCEPTED audit, real corpus,
+          #    real canonical team -- but contradicts the committed map must be
+          #    REPORTED, with the command exiting non-zero.
+          cp "$RUNNER_TEMP/smoke.db" "$RUNNER_TEMP/attest.db"
+          DB="$RUNNER_TEMP/attest.db" "$PY" - <<'PY'
+          import os
+          from sports_quant.db.engine import Database, transaction
+          from sports_quant.db.repositories.retrospective import (
+              SqliteRetrospectiveProvenanceRepository)
+          from sports_quant.db.schema import utc_now_iso
+          from sports_quant.retrospective.attestations import (
+              TEAM_ATTESTATION_POLICY_VERSION, attestation_map_digest,
+              attested_canonical_team)
+          from sports_quant.retrospective.provenance import (
+              AuditVerdict, EntityType, G1Variant, ProvenanceClass, ProviderNamespace)
+          from sports_quant.retrospective.verifier import verify_corpus
+
+          ns = ProviderNamespace("lg_mlb", "mlb_statsapi", EntityType.TEAM, "v1")
+          DIGEST, now = "src-digest-ci", utc_now_iso()
+          with Database(os.environ["DB"]).connection() as conn:
+              with transaction(conn):
+                  repo = SqliteRetrospectiveProvenanceRepository(conn)
+                  corpus = repo.record_corpus_version(
+                      provenance_class=ProvenanceClass.RECONSTRUCTED_RESEARCH,
+                      league_id="lg_mlb", reconstruction_policy_version="ci",
+                      cutoff_policy_id="cp_ci", cutoff_policy_version="v1",
+                      source_corpus_digest=DIGEST, target_set_digest="t",
+                      g1_variant=G1Variant.G1_B_CORE,
+                      static_identity_map_digest=attestation_map_digest(),
+                      code_version="ci")
+                  audit = repo.record_identity_audit(
+                      namespace=ns, source_corpus_digest=DIGEST,
+                      audit_policy_version="ci", distinct_ids=2,
+                      total_observations=4, collision_count=0,
+                      verdict=AuditVerdict.ACCEPTED)
+                  # A) An honest crosswalk, written as the TEAM-A path writes it.
+                  repo.record_static_crosswalk(
+                      corpus_version_id=corpus.corpus_version_id, namespace=ns,
+                      provider_id="147",
+                      canonical_entity_id=attested_canonical_team(ns, "147"),
+                      identity_audit_id=audit.identity_audit_id,
+                      provenance_policy_version=TEAM_ATTESTATION_POLICY_VERSION,
+                      attestation_map_digest=attestation_map_digest())
+              clean = verify_corpus(conn, corpus.corpus_version_id)
+              assert clean.ok and clean.checked == 1, clean.as_json()
+              print("honest crosswalk verified clean")
+
+              # B) 108 is the Angels in the committed map; bind it to Houston.
+              with transaction(conn):
+                  conn.execute(
+                      "INSERT INTO static_crosswalk_provenance (crosswalk_id, "
+                      "corpus_version_id, league_id, provider, namespace_generation, "
+                      "entity_type, provider_id, canonical_entity_id, "
+                      "identity_audit_id, identity_audit_digest, "
+                      "provenance_policy_version, semantic_digest, curated_at, "
+                      "created_at) VALUES ('xwk_ci_planted',?,'lg_mlb',"
+                      "'mlb_statsapi','v1','team','108','tm_mlb_hou',?,?,?,"
+                      "'digest_ci',?,?)",
+                      (corpus.corpus_version_id, audit.identity_audit_id,
+                       audit.semantic_digest, TEAM_ATTESTATION_POLICY_VERSION,
+                       now, now))
+          print("planted a v19-valid crosswalk that contradicts the committed map")
+          PY
+          set +e
+          "$SQ" team-attestation-verify --db "$RUNNER_TEMP/attest.db" --json >/tmp/bad.json
+          rc=$?
+          set -e
+          cat /tmp/bad.json
+          test "$rc" -ne 0 || { echo "verifier accepted a contradicting crosswalk"; exit 1; }
+          grep -q "committed map says" /tmp/bad.json \
+            || { echo "verifier did not name the contradiction"; exit 1; }
+          echo "RV1 OK: the contradicting crosswalk was detected and exited $rc"
+
       - name: Checkpoint provenance from the installed wheel (offline, zero network)
         env:
           PYTHONPATH: ""

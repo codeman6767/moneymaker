@@ -411,6 +411,7 @@ class SqliteRetrospectiveProvenanceRepository(Repository):
         identity_audit_id: str,
         provenance_policy_version: str,
         curated_at: Optional[str] = None,
+        attestation_map_digest: Optional[str] = None,
     ) -> StaticCrosswalkProvenance:
         """Bind one provider key to a canonical entity, under a cleared audit.
 
@@ -422,6 +423,13 @@ class SqliteRetrospectiveProvenanceRepository(Repository):
         ``curated_at`` defaults to now and is AUDIT time. It is not backdated and
         it is not a reused ``decided_at`` -- a matcher wall-clock is not a
         historical effective time.
+
+        ``attestation_map_digest`` (review repair RV1) binds a crosswalk to the
+        exact source-controlled map it came from, by participating in the semantic
+        digest. It is **optional and omitted by default**, so player crosswalks --
+        which are derived from the provider key alone and have no map -- keep
+        their existing digests and remain valid. Passing it makes a crosswalk
+        built under map M cryptographically distinct from one built under map M'.
         """
 
         audit = self.identity_audit(identity_audit_id)
@@ -464,7 +472,7 @@ class SqliteRetrospectiveProvenanceRepository(Repository):
                 f"{namespace.generation}, {namespace.entity_type.value})"
             )
 
-        digest = semantic_digest({
+        digest_payload: dict[str, Any] = {
             "kind": "static_crosswalk",
             "corpus_version_id": corpus_version_id,
             **namespace.as_dict(),
@@ -472,7 +480,12 @@ class SqliteRetrospectiveProvenanceRepository(Repository):
             "canonical_entity_id": canonical_entity_id,
             "identity_audit_digest": audit.semantic_digest,
             "provenance_policy_version": provenance_policy_version,
-        })
+        }
+        if attestation_map_digest is not None:
+            # Only present for map-backed (TEAM-A) crosswalks, so existing
+            # player-crosswalk digests are byte-identical to before.
+            digest_payload["attestation_map_digest"] = attestation_map_digest
+        digest = semantic_digest(digest_payload)
         existing = self._fetch_one(
             f"SELECT * FROM {_CROSSWALK_TABLE} WHERE semantic_digest = ?", (digest,)
         )

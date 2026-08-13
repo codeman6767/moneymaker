@@ -18,22 +18,17 @@ a measured property of this repository rather than a preference:
   provider key. Names are stored as descriptive metadata; they never participate
   in identity.
 
-* **team -- BLOCKED.** ``teams`` is pre-seeded with 60 name-based franchises and
-  constrained ``UNIQUE (league_id, canonical_name)`` and
-  ``UNIQUE (league_id, abbreviation)``. Bootstrapping a provider-keyed franchise
-  with the provider-written name is refused by those constraints (verified), and
-  the only way to reuse a seeded row is to decide that the provider's
-  "Houston Astros" denotes the seed ``tm_mlb_hou`` -- which is name matching,
-  exactly what §16 forbids as historical identity evidence. Dodging the
-  constraint by mangling the canonical label would corrupt a canonical dimension
-  to satisfy a foreign key.
+* **team -- moved to TEAM-A.** ``teams`` is pre-seeded with 60 name-based
+  franchises under ``UNIQUE (league_id, canonical_name)`` and
+  ``UNIQUE (league_id, abbreviation)``, so a provider-keyed franchise cannot be
+  bootstrapped alongside them and reusing a seed by name is forbidden. The
+  reviewed resolution is a **source-controlled attestation map**, implemented in
+  ``retrospective.attestations`` and applied by ``retrospective.team_crosswalks``.
 
-* **game -- BLOCKED, transitively.** ``games.home_team_id`` and
-  ``games.away_team_id`` are NOT NULL references to ``teams``, so a game
-  crosswalk cannot exist until the team question is answered.
-
-That is reported as a blocker rather than forced. The audit engine audits all
-three entity types regardless; only crosswalk *generation* is limited.
+* **game -- moved to the canonical bootstrap.** ``games`` already carries
+  ``official_provider``/``official_game_key`` under a UNIQUE index, so once teams
+  are attested a canonical game keys natively on the official provider game id.
+  See ``retrospective.game_bootstrap``.
 """
 
 from __future__ import annotations
@@ -67,24 +62,25 @@ class CanonicalPreparationBlocked(RetrospectiveProvenanceError):
 #: rule by which a provider key was bound to a canonical entity would have moved.
 CROSSWALK_POLICY_VERSION: Final = "g5-static-crosswalk-v1"
 
-#: Only the entity type whose canonical dimension can be prepared deterministically.
-CROSSWALK_SUPPORTED_ENTITY_TYPES: Final[frozenset[EntityType]] = frozenset(
+#: Entity types this module resolves directly.
+#:
+#: **player** only. TEAM-A team attestation lives in ``team_crosswalks`` and
+#: canonical game bootstrap in ``game_bootstrap``, because both need the committed
+#: attestation map and its digest -- machinery a provider-key bootstrap has no use
+#: for. ``CROSSWALK_SUPPORTED_ENTITY_TYPES`` below reports what the retrospective
+#: lane supports overall, which is now all three.
+DIRECT_BOOTSTRAP_ENTITY_TYPES: Final[frozenset[EntityType]] = frozenset(
     {EntityType.PLAYER}
 )
 
-_BLOCKED_REASON: Final[dict[EntityType, str]] = {
-    EntityType.TEAM: (
-        "canonical `teams` is pre-seeded from names and constrained UNIQUE on "
-        "(league_id, canonical_name) and (league_id, abbreviation). A provider-keyed "
-        "franchise cannot be bootstrapped alongside it, and reusing a seeded row "
-        "would require matching the provider-written name to a seed -- name matching, "
-        "which G5 forbids as historical identity evidence."
-    ),
-    EntityType.GAME: (
-        "canonical `games` requires NOT NULL home_team_id/away_team_id referencing "
-        "`teams`, so a game crosswalk inherits the unresolved team-canonical question."
-    ),
-}
+#: Every entity type the retrospective lane can now produce static identity for.
+#: Teams and games arrived with the reviewed TEAM-A architecture; the blocker the
+#: identity-audit review recorded is closed.
+CROSSWALK_SUPPORTED_ENTITY_TYPES: Final[frozenset[EntityType]] = frozenset(
+    {EntityType.PLAYER, EntityType.TEAM, EntityType.GAME}
+)
+
+_BLOCKED_REASON: Final[dict[EntityType, str]] = {}
 
 
 @dataclass(frozen=True)
@@ -151,11 +147,16 @@ def generate_crosswalks(
             f"audit verdict is {plan.verdict.value!r}; only an accepted audit clears a "
             "namespace for crosswalk use"
         )
-    if entity_type not in CROSSWALK_SUPPORTED_ENTITY_TYPES:
+    if entity_type not in DIRECT_BOOTSTRAP_ENTITY_TYPES:
+        # Teams and games are produced by the TEAM-A modules, which need the
+        # committed attestation map; the runner dispatches them there.
         return CrosswalkResult(
             entity_type=entity_type, supported=False, canonical_bootstrapped=0,
             crosswalks_written=0, reused_existing=0,
-            blocked_reason=_BLOCKED_REASON[entity_type],
+            blocked_reason=(
+                f"{entity_type.value} static identity is produced by the TEAM-A path "
+                "(retrospective.team_crosswalks / retrospective.game_bootstrap), "
+                "not by provider-key bootstrap"),
         )
 
     by_id: dict[str, list[PlayerObservation]] = {}

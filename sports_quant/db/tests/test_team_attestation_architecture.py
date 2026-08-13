@@ -273,27 +273,41 @@ def test_games_already_supports_official_provider_keying(db_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 # The architecture is a DECISION, not an implementation
 # --------------------------------------------------------------------------- #
-def test_team_and_game_crosswalks_are_still_blocked_in_code() -> None:
-    """This phase decided the architecture; it implemented none of it."""
+def test_team_and_game_crosswalks_are_no_longer_blocked_in_code() -> None:
+    """This phase decided the architecture; a later phase implemented it.
+
+    The blocker the identity-audit review recorded is closed. Kept (rather than
+    deleted) so the transition is visible in the file that pinned the block.
+    """
 
     from sports_quant.retrospective.crosswalks import (
         CROSSWALK_SUPPORTED_ENTITY_TYPES,
     )
     from sports_quant.retrospective.provenance import EntityType
 
-    assert CROSSWALK_SUPPORTED_ENTITY_TYPES == frozenset({EntityType.PLAYER})
-    assert EntityType.TEAM not in CROSSWALK_SUPPORTED_ENTITY_TYPES
-    assert EntityType.GAME not in CROSSWALK_SUPPORTED_ENTITY_TYPES
+    assert EntityType.TEAM in CROSSWALK_SUPPORTED_ENTITY_TYPES
+    assert EntityType.GAME in CROSSWALK_SUPPORTED_ENTITY_TYPES
 
 
-def test_no_attestation_map_has_been_committed_yet() -> None:
-    """TEAM-A's map is a follow-up; this phase must not have shipped one."""
+def test_the_attestation_map_has_since_been_committed() -> None:
+    """TEAM-A's map was a follow-up; the follow-up shipped it.
+
+    The digests are pinned in CI and in the implementation report; here we only
+    assert the map exists and is the reviewed 60-entry, 2-league shape.
+    """
 
     import sports_quant.retrospective as retro
+    from sports_quant.retrospective.attestations import (
+        MAP_FORMAT_VERSION,
+        TEAM_ATTESTATIONS,
+        describe_map_shape,
+    )
 
     package = Path(retro.__file__).parent
-    assert not (package / "attestations.py").exists()
-    assert not (package / "team_attestations.py").exists()
+    assert (package / "attestations.py").exists()
+    assert MAP_FORMAT_VERSION == "team-a-map-v1"
+    assert len(TEAM_ATTESTATIONS) == 60
+    assert describe_map_shape()["entries_by_league"] == {"lg_mlb": 30, "lg_nba": 30}
 
 
 def test_schema_is_unchanged_at_v19() -> None:
