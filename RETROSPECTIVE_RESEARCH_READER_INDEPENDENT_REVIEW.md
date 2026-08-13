@@ -277,3 +277,29 @@ F1-R can proceed on existing evidence or requires new collection.
 F1-R execution, historical odds and market anchoring, F2, production matching,
 feature engineering, model training, calibration, backtesting, recommendation
 output and UI all remain **UNAUTHORIZED**. Gates G1, G2, G3, G4, G6 unchanged.
+
+**EVENT-COMPLETION EVIDENCE INVESTIGATED 2026-08-13 — EXISTING EVIDENCE
+SUFFICIENT FOR NBA ONLY.**
+`LANE_R_EVENT_COMPLETION_EVIDENCE_INVESTIGATION.md`. Read-only, zero provider
+requests. **NBA 2026-03:** all 239 bounded games carry a source-provided per-play
+UTC instant (`plays[].wallclock`) that survived ten adversarial checks with zero
+anomalies — never equal to the scheduled tip, never a collection timestamp, no
+duplicates, and overtime games show a longer median span (159.5 vs 136.9 min), an
+internal-consistency signal a constant could not fake. It is a **DEFENSIBLE
+DERIVED BOUND, not a DIRECT completion field**: it bounds completion from below,
+and the existing conservative rule's 6-hour lag already absorbs the residual
+last-play-to-final gap, so **no new availability rule is needed**. One narrow
+policy decision is required — that the final play's wallclock is the completion
+evidence. **MLB 2026-06: INSUFFICIENT.** Play-by-play was never collected at all,
+and the only candidates are display strings (`First pitch` as a local 12-hour
+clock with **zero timezone markers anywhere in the corpus**, plus `T`, which
+explicitly excludes delays in 22 of 395 cases); deriving completion from them
+would manufacture it. Sequential-snapshot bounding is impossible for both leagues
+because every payload was received months after its games. **Schema v19 is
+sufficient** for the NBA path; `raw_responses` is already an admissible evidence
+table. Prior-game coverage is **228/239 (95.4 %)** — the 11 first-date games have
+no in-corpus prior. **F1-R remains UNAUTHORIZED** and would be NBA-only and
+bounded if later authorized; MLB needs a separate bounded endpoint-capability
+probe. Odds/market anchoring, F2, production matching, feature engineering, model
+training, calibration, backtesting, recommendation output and UI remain
+UNAUTHORIZED. G1/G2/G3/G4/G6 unchanged.

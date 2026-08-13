@@ -244,6 +244,20 @@ Before any reconstructed corpus is built or used:
     results table has a completion column — so **EVENT_DERIVED is data-blocked**
     and F1-R cannot yet produce it. The same-database evidence constraint was
     adjudicated as an intentional, acceptable boundary, not a contradiction.
+16. **(2026-08-13)** The retained blocker was investigated read-only
+    (`LANE_R_EVENT_COMPLETION_EVIDENCE_INVESTIGATION.md`): **existing evidence is
+    sufficient for NBA only.** All 239 bounded NBA games carry a source-provided
+    per-play UTC instant (`plays[].wallclock`) that survived ten adversarial
+    checks with zero anomalies; it is a **defensible derived bound**, not a
+    direct completion field, and the existing conservative rule's 6-hour lag
+    already absorbs the residual gap, so no new availability rule is needed.
+    **MLB is insufficient**: play-by-play was never collected, and the only
+    candidates are display strings with no timezone anywhere in the corpus.
+    Sequential-snapshot bounding is impossible for both leagues — every payload
+    was received months after its games. **Schema v19 suffices** for the NBA
+    path; `raw_responses` is already an admissible evidence table. Prior-game
+    coverage is 228/239 (95.4%). **F1-R remains unauthorized** and would be
+    NBA-only and bounded.
 
 Until all four pass, only `strict_forward_pit` (forward collection) may support
 evaluation, and no profitability claim may be made from reconstructed data.
