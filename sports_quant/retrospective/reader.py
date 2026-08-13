@@ -48,10 +48,13 @@ from __future__ import annotations
 import enum
 import sqlite3
 from dataclasses import dataclass
-from typing import Final, Optional, TypeVar
+from typing import Any, Final, Optional, TypeVar
 
-from ..db.models import ReconstructedInputProvenance
-from ..db.repositories.retrospective import SqliteRetrospectiveProvenanceRepository
+from ..db.models import (
+    ReconstructedInputProvenance,
+    StaticCrosswalkProvenance,
+)
+from ..db.repositories.retrospective import SqliteRetrospectiveProvenanceRepository, semantic_digest
 from ..db.schema import from_iso
 from .evidence import evidence_id_column
 from .families import (
@@ -124,6 +127,7 @@ class AdmissionOutcome(str, enum.Enum):
     BASIS_CONTRADICTS_FAMILY = "basis_contradicts_family"
     MISSING_CROSSWALK = "missing_crosswalk"
     CROSSWALK_FROM_ANOTHER_CORPUS = "crosswalk_from_another_corpus"
+    CROSSWALK_DIGEST_MISMATCH = "crosswalk_digest_mismatch"
     CORPUS_SUPERSEDED = "corpus_superseded"
     #: Availability refusals.
     NOT_YET_AVAILABLE = "not_yet_available"
@@ -322,6 +326,56 @@ class RetrospectiveResearchReader:
         return (_parse(G1Variant, self._corpus.g1_variant, "g1_variant")
                 is G1Variant.G1_A_EXTENDED)
 
+
+    def _crosswalk_integrity_error(
+        self, crosswalk: StaticCrosswalkProvenance
+    ) -> Optional[str]:
+        """Recompute a crosswalk's semantic digest from its own stored contents.
+
+        Review repair R2. Before this, the STATIC_IDENTITY path checked only that
+        the crosswalk existed and named this corpus, so direct SQL that flipped
+        ``canonical_entity_id`` produced an ADMITTED identity pointing at the
+        wrong franchise -- and ``static_identity()`` returned that wrong id.
+
+        The out-of-band verifier already catches it, but a reader whose whole job
+        is admission cannot depend on someone remembering to run a CLI later. So
+        the check is done in-band, here, on every identity read.
+
+        The attestation map digest is optional in the stored payload (player
+        crosswalks have no map), so both forms are tried: a row is intact if it
+        matches EITHER the plain payload or the payload bound to the currently
+        committed TEAM-A map. A row matching neither has been altered since it
+        was written, or was built under a different map -- both fail closed.
+        """
+
+        base: dict[str, Any] = {
+            "kind": "static_crosswalk",
+            "corpus_version_id": crosswalk.corpus_version_id,
+            **ProviderNamespace(
+                crosswalk.league_id, crosswalk.provider,
+                _parse(EntityType, crosswalk.entity_type, "entity_type"),
+                crosswalk.namespace_generation).as_dict(),
+            "provider_id": crosswalk.provider_id,
+            "canonical_entity_id": crosswalk.canonical_entity_id,
+            "identity_audit_digest": crosswalk.identity_audit_digest,
+            "provenance_policy_version": crosswalk.provenance_policy_version,
+        }
+        candidates = [semantic_digest(base)]
+        try:
+            from .attestations import attestation_map_digest
+
+            candidates.append(semantic_digest(
+                {**base, "attestation_map_digest": attestation_map_digest()}))
+        except Exception:      # pragma: no cover - map import is not required
+            pass
+        if crosswalk.semantic_digest in candidates:
+            return None
+        return (
+            f"crosswalk {crosswalk.crosswalk_id!r} does not match its own "
+            f"semantic digest; its stored contents have been altered since it "
+            "was written, or it was built under a different attestation map"
+        )
+
     # -- static identity ------------------------------------------------------ #
     def static_identity(
         self, *, namespace: ProviderNamespace, provider_id: str
@@ -352,6 +406,9 @@ class RetrospectiveResearchReader:
             raise LaneRAdmissionError(
                 f"crosswalk {crosswalk.crosswalk_id!r} belongs to corpus "
                 f"{crosswalk.corpus_version_id!r}, not {self._corpus_version_id!r}")
+        problem = self._crosswalk_integrity_error(crosswalk)
+        if problem is not None:
+            raise LaneRAdmissionError(problem)
         return StaticIdentity(
             provider_id=provider_id, entity_type=namespace.entity_type,
             canonical_entity_id=crosswalk.canonical_entity_id,
@@ -422,6 +479,20 @@ class RetrospectiveResearchReader:
         self, *, namespace: ProviderNamespace, provider_game_id: str,
         feature_family: str, as_label: bool,
     ) -> AdmittedInput | RejectedInput:
+        # Review repair R1. `reconstructed_input_provenance` has no entity_type
+        # column -- correctly, since a certification is about a feature family
+        # for a target GAME. The API took a full namespace anyway and silently
+        # ignored that component, so a caller passing a TEAM namespace quietly
+        # received game-scoped certifications. An argument the type checker reads
+        # and the runtime ignores is an invitation to misuse, so it is now
+        # required to be what it actually means.
+        if namespace.entity_type is not EntityType.GAME:
+            raise LaneRAdmissionError(
+                f"admission is per TARGET GAME, so it requires a game namespace; "
+                f"got entity_type={namespace.entity_type.value!r}. Entity identity "
+                "is resolved through static_identity(), which does use the entity "
+                "type."
+            )
         # ---- 1. structural: the family itself ------------------------------ #
         # Before any database access. A FORWARD_ONLY family is not "filtered";
         # there is no path from here to one.
@@ -527,6 +598,17 @@ class RetrospectiveResearchReader:
                     f"crosswalk {cert.crosswalk_id!r} belongs to corpus {owner!r}; "
                     "an audit of one corpus never authorizes another",
                     provider_game_id)
+            cited = self._repo.static_crosswalk_by_id(cert.crosswalk_id)
+            if cited is None:
+                return self._reject(
+                    feature_family, AdmissionOutcome.MISSING_CROSSWALK,
+                    f"crosswalk {cert.crosswalk_id!r} does not exist",
+                    provider_game_id)
+            problem = self._crosswalk_integrity_error(cited)
+            if problem is not None:
+                return self._reject(
+                    feature_family, AdmissionOutcome.CROSSWALK_DIGEST_MISMATCH,
+                    problem, provider_game_id)
             return self._admit(family, cert, namespace, provider_game_id,
                                provenance_class=provenance_class,
                                basis=basis, effective_at=None)

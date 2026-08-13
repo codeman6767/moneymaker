@@ -154,6 +154,26 @@ prevent. **F1-R, historical odds/market anchoring, F2, production matching,
 feature engineering, model training, calibration, backtesting, recommendation
 output and UI remain UNAUTHORIZED.** G1/G2/G3/G4/G6 unchanged.
 
+**Lane-R reader INDEPENDENTLY REVIEWED 2026-08-13 — ACCEPTED WITH REPAIRS,
+RETAINED DATA BLOCKER for F1-R.**
+`RETROSPECTIVE_RESEARCH_READER_INDEPENDENT_REVIEW.md`. Two defects reproduced and
+repaired: **(high)** a tampered crosswalk canonical target was ADMITTED and
+`static_identity()` returned the wrong canonical id, because the reader never
+recomputed the crosswalk's own semantic digest — now checked in-band on every
+identity read; **(moderate)** the admission API silently ignored the namespace
+`entity_type` — now required to be GAME. Seventeen further falsification attempts
+(corpus/namespace/family substitution, rule-digest and rule-id tampering,
+malformed timestamps, hostile family names, label relabelling, live-reference
+identity) all failed to break it. Strict-forward PIT unweakened; **schema stays
+v19**, no migration. **RETAINED BLOCKER:** no event-completion instant exists in
+either bounded corpus (`game_status_history` empty in both), so **EVENT_DERIVED
+is data-blocked** and F1-R may not yet be authorized to produce it. The safe next
+step is a read-only investigation of whether preserved `raw_responses` carry a
+usable completion timestamp. F1-R, odds/market anchoring, F2, production
+matching, feature engineering, model training, calibration, backtesting,
+recommendation output and UI remain UNAUTHORIZED. G1/G2/G3/G4/G6 unchanged.
+
+
 
 
 

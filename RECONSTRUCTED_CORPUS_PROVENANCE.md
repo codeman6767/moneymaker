@@ -227,6 +227,23 @@ Before any reconstructed corpus is built or used:
     collection-time-observed rather than carrying a true event-completion
     instant. **Not independently reviewed.** F1-R, odds/market anchoring, F2,
     matching, feature engineering and model training remain unauthorized.
+15. **(2026-08-13)** The reader was **independently reviewed**:
+    **ACCEPTED WITH REPAIRS, with a RETAINED DATA BLOCKER**
+    (`RETROSPECTIVE_RESEARCH_READER_INDEPENDENT_REVIEW.md`). Two defects were
+    reproduced on `0496987` and repaired. The serious one: the reader verified
+    only that a cited crosswalk existed and named this corpus, never recomputing
+    the crosswalk's own semantic digest — so a direct-SQL edit to
+    `canonical_entity_id` produced an **admitted** static identity pointing at
+    the wrong franchise, and `static_identity()` returned that wrong id.
+    Reproduced on real MLB and NBA evidence. The digest is now recomputed in-band
+    on every identity read. The second: the admission API silently ignored the
+    namespace `entity_type`, now required to be GAME. Seventeen further
+    falsification attempts failed to break the reader. **Schema stays v19; no
+    migration.** **RETAINED BLOCKER:** neither bounded corpus contains any
+    event-completion instant — `game_status_history` is empty in both and no
+    results table has a completion column — so **EVENT_DERIVED is data-blocked**
+    and F1-R cannot yet produce it. The same-database evidence constraint was
+    adjudicated as an intentional, acceptable boundary, not a contradiction.
 
 Until all four pass, only `strict_forward_pit` (forward collection) may support
 evaluation, and no profitability claim may be made from reconstructed data.

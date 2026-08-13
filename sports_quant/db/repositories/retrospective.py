@@ -547,6 +547,22 @@ class SqliteRetrospectiveProvenanceRepository(Repository):
         )
 
     # -- reconstructed input certifications ---------------------------------- #
+    def static_crosswalk_by_id(
+        self, crosswalk_id: str
+    ) -> Optional[StaticCrosswalkProvenance]:
+        """Fetch one crosswalk by its own id.
+
+        Needed by the Lane-R reader, which cites a crosswalk by id and must
+        re-derive that row's semantic digest before trusting its canonical
+        target.
+        """
+
+        row = self._fetch_one(
+            f"SELECT * FROM {_CROSSWALK_TABLE} WHERE crosswalk_id = ?",
+            (crosswalk_id,),
+        )
+        return None if row is None else self._to_crosswalk(row)
+
     def certify_input(
         self,
         *,

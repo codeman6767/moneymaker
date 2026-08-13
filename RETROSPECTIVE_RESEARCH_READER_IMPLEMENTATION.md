@@ -1,6 +1,19 @@
 # `RetrospectiveResearchReader` — implementation report
 
-> **IMPLEMENTED 2026-08-13 — NOT INDEPENDENTLY REVIEWED.**
+> **IMPLEMENTED 2026-08-13. INDEPENDENTLY REVIEWED 2026-08-13 — ACCEPTED WITH
+> REPAIRS, with a RETAINED DATA BLOCKER for F1-R.**
+> `RETROSPECTIVE_RESEARCH_READER_INDEPENDENT_REVIEW.md` is **authoritative where
+> it differs from this document**. Two defects were reproduced and repaired:
+> **(R2, high)** a tampered `static_crosswalk_provenance.canonical_entity_id` was
+> ADMITTED, and `static_identity()` returned the wrong canonical id — the reader
+> never recomputed the crosswalk's own semantic digest; **(R1, moderate)** the
+> admission API silently ignored the namespace's `entity_type`. The review also
+> found that **no event-completion instant exists anywhere in the bounded
+> corpora** (`game_status_history` is empty in both), so EVENT_DERIVED is
+> data-blocked for F1-R. Statements below marked **SUPERSEDED** were true of
+> `0496987` and are no longer true.
+>
+> **Original banner (as written at implementation time):**
 > Implements the Lane-R reader contract in `HISTORICAL_RESEARCH_PIT_ARCHITECTURE.md`
 > §12, on the identity/provenance foundation cleared by
 > `RETROSPECTIVE_TEAM_GAME_CROSSWALK_IMPLEMENTATION_INDEPENDENT_REVIEW.md`.
@@ -201,6 +214,13 @@ exist**: of 19 families, exactly one is admitted per corpus, and it is the one
 with genuine audited provenance behind it.
 
 ## 9. Limitations and blockers
+
+> **SUPERSEDED (limitation 1):** the independent review determined this is an
+> intentional, acceptable boundary rather than a blocker — a reconstruction
+> corpus is meant to be self-contained, and materializing an evidence row carries
+> `observed_at` verbatim with no backdating. The *real* blocker is limitation 2,
+> which is more severe than stated here: there is no completion instant anywhere
+> in the corpora, and `game_status_history` is empty in both. See the review §5–§6.
 
 1. **Cross-database evidence citation.** The f018 evidence check runs
    `SELECT 1 FROM <table> WHERE <id> = ?` on the **provenance connection**, so a
