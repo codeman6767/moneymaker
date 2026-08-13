@@ -988,13 +988,22 @@ def test_schema_is_unchanged_at_v19() -> None:
     assert len(discover_migrations()) == 19
 
 
-def test_no_reader_or_market_module_was_added() -> None:
+def test_no_market_or_feature_module_was_added() -> None:
+    """The reader was separately authorized and shipped; the rest was not.
+
+    `reader.py` was on this forbidden list until the Lane-R reader was authorized
+    as its own phase. Market anchoring, odds fetching and feature engineering
+    remain out of scope, so they stay on it.
+    """
+
     import sports_quant.retrospective as retro
 
     package = Path(retro.__file__).parent
-    for forbidden in ("reader.py", "market.py", "odds.py", "anchoring.py",
-                      "features.py"):
-        assert not (package / forbidden).exists()
+    assert (package / "reader.py").exists(), (
+        "the authorized Lane-R reader is missing")
+    for forbidden in ("market.py", "odds.py", "anchoring.py", "features.py",
+                      "f1r.py", "builder.py"):
+        assert not (package / forbidden).exists(), forbidden
 
 
 # --------------------------------------------------------------------------- #

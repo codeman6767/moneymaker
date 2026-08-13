@@ -337,6 +337,13 @@ Standing limitations the reader must not paper over:
 
 **The reader may be separately authorized.** It was not started here.
 
+> **UPDATE 2026-08-13:** it was separately authorized and implemented —
+> `RETROSPECTIVE_RESEARCH_READER_IMPLEMENTATION.md`. The reader is NOT yet
+> independently reviewed. Schema stayed v19. The four standing limitations above
+> remain true, and real-evidence validation added a fifth: the bounded corpora
+> are collection-time-observed, so they carry no true event-completion instant
+> and EVENT_DERIVED families are not admissible from them today.
+
 ## 9. Status of other gates
 
 G1, G2, G3, G4 and G6 are **unchanged** by this review. F1-R, F2, production

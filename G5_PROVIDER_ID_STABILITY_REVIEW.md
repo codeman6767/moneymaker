@@ -133,6 +133,28 @@ requests** (MLB 2026-06: 30 teams, 400 games, 400 game provenance rows; NBA
 production matching, model training and feature engineering remain unauthorized.
 G1/G2/G3/G4/G6 unchanged.
 
+**RetrospectiveResearchReader IMPLEMENTED 2026-08-13 — NOT independently
+reviewed.** `RETROSPECTIVE_RESEARCH_READER_IMPLEMENTATION.md`. The Lane-R reader
+(architecture §12) is a **distinct type**, not a flag: no `ignore_pit=`-style
+bypass exists on either reader, `_feature_cutoff` is byte-identical, and
+`AsOfReader` gained nothing. **Schema stays v19** — no migration. FORWARD_ONLY
+families (lineups, injuries, rosters, probable pitchers) are refused
+**structurally**, before any database access, at any cutoff, even with a valid
+certification present. Admission requires a **persisted** v19 certification for
+the exact corpus/namespace/target/family; `effective_at` is **derived on read**
+(STATIC_IDENTITY timeless, EVENT_DERIVED completion + digest-bound rule lag,
+VERSIONED_SNAPSHOT provider stamp) and gated `<= T_cut`. Three gates were found
+comparing a stored `str` to an enum with `is` and **failing open** — EXCLUDED
+certifications admitted, strict-forward corpora readable, extended evidence
+reported as core — all three repaired with regression tests. Real evidence,
+read-only, **0 provider requests**: exactly one family (`static_identity`) is
+admitted per corpus; `prior_results` was correctly **refused** because both
+corpora are collection-time-observed, which is the very leak Lane R exists to
+prevent. **F1-R, historical odds/market anchoring, F2, production matching,
+feature engineering, model training, calibration, backtesting, recommendation
+output and UI remain UNAUTHORIZED.** G1/G2/G3/G4/G6 unchanged.
+
+
 
 
 **This foundation has NOT been independently reviewed.** Still unimplemented:

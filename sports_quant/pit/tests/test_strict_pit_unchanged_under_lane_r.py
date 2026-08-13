@@ -284,3 +284,57 @@ def test_observed_at_is_never_rewritten_by_f018(
     assert triggers, "the pre-existing guards should still be present"
     assert all(not t.startswith(("trg_rcv", "trg_ida", "trg_idf", "trg_xwk", "trg_rip"))
                for t in triggers)
+
+
+# --------------------------------------------------------------------------- #
+# 4. The Lane-R reader exists now. It must still change nothing here.
+# --------------------------------------------------------------------------- #
+def test_the_lane_r_reader_is_a_separate_type_reached_a_separate_way() -> None:
+    """Lane selection is a type, not a flag (architecture §12).
+
+    The strict reader must not know the retrospective one exists, and neither
+    can be constructed from the other.
+    """
+
+    import sports_quant.pit.asof as strict_module
+    from sports_quant.retrospective.reader import RetrospectiveResearchReader
+
+    assert not issubclass(RetrospectiveResearchReader, AsOfReader)
+    assert not issubclass(AsOfReader, RetrospectiveResearchReader)
+    for attr in dir(strict_module):
+        assert "etrospective" not in attr, attr
+
+    strict_source = inspect.getsource(strict_module)
+    code_only = "".join(strict_source.split('"""')[::2])
+    for banned in ("retrospective", "effective_at", "reconstructed",
+                   "availability_basis", "RetrospectiveResearchReader"):
+        assert banned not in code_only, (
+            f"the strict forward reader references {banned!r}")
+
+
+def test_the_lane_r_reader_cannot_be_handed_a_strict_cutoff_object() -> None:
+    """The two lanes do not even share a cutoff type by accident.
+
+    `AsOfReader` takes a parsed `Cutoff`; the Lane-R reader takes an ISO string
+    it parses itself. Passing a `Cutoff` where an ISO string is expected must
+    fail rather than silently stringify into something comparable.
+    """
+
+    from sports_quant.retrospective.reader import RetrospectiveResearchReader
+
+    signature = inspect.signature(RetrospectiveResearchReader.__init__)
+    assert "cutoff" in signature.parameters
+    annotation = signature.parameters["cutoff"].annotation
+    assert annotation in ("str", str), annotation
+
+
+def test_importing_the_lane_r_reader_does_not_alter_the_strict_reader() -> None:
+    """Import order must not matter: no monkeypatching, no registration."""
+
+    before = sorted(dir(AsOfReader))
+    import sports_quant.retrospective.reader  # noqa: F401
+
+    assert sorted(dir(AsOfReader)) == before
+    digest = hashlib.sha256(
+        inspect.getsource(_feature_cutoff).encode("utf-8")).hexdigest()
+    assert digest == _FEATURE_CUTOFF_V17_SHA256

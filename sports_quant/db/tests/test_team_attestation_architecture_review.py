@@ -396,8 +396,9 @@ def test_the_reviewed_scope_was_implemented_and_nothing_beyond_it() -> None:
     """Was a review-phase scope guard; now pins the implemented boundary.
 
     The review shipped no code. The implementation phase (authorized separately)
-    shipped exactly the TEAM-A map, team crosswalks and game bootstrap -- and
-    still no reader and no market machinery.
+    shipped exactly the TEAM-A map, team crosswalks and game bootstrap. The
+    Lane-R reader followed as its own authorized phase; market anchoring, odds
+    fetching and feature engineering did not.
     """
 
     import sports_quant.retrospective as retro
@@ -414,11 +415,11 @@ def test_the_reviewed_scope_was_implemented_and_nothing_beyond_it() -> None:
 
     package = Path(retro.__file__).parent
     for present in ("attestations.py", "team_crosswalks.py", "game_bootstrap.py",
-                    "namespaces.py", "verifier.py"):
+                    "namespaces.py", "verifier.py", "reader.py", "families.py"):
         assert (package / present).exists(), present
-    # Still blocked, and still out of scope.
-    for forbidden in ("reader.py", "market.py", "odds.py", "anchoring.py",
-                      "features.py"):
+    # Still out of scope.
+    for forbidden in ("market.py", "odds.py", "anchoring.py", "features.py",
+                      "f1r.py", "builder.py"):
         assert not (package / forbidden).exists(), forbidden
 
 

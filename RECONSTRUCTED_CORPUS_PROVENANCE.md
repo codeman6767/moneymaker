@@ -213,6 +213,20 @@ Before any reconstructed corpus is built or used:
     **referenced-id coverage**, not league-map materialization. Schema verdict:
     **V19 SUFFICIENT WITH ADDITIONAL REPAIRS** — no migration. **The reader may
     now be separately authorized.**
+14. **(2026-08-13)** The `RetrospectiveResearchReader` was **implemented**
+    (`RETROSPECTIVE_RESEARCH_READER_IMPLEMENTATION.md`). Lane selection is a
+    **distinct type, not a flag**; strict-forward PIT is byte-identical and
+    `AsOfReader` gained nothing. FORWARD_ONLY families are refused structurally
+    before any database access. Admission requires a persisted v19 certification
+    for the exact corpus/namespace/target/family, and `effective_at` is derived
+    on read — never stored — then gated `<= T_cut`. **Schema stayed v19.**
+    Implementation found three gates comparing a stored `str` to an enum with
+    `is`, all **failing open**; all three are repaired with regression tests.
+    Real-evidence validation admitted exactly one family per corpus and
+    correctly **refused** `prior_results`, because both bounded corpora are
+    collection-time-observed rather than carrying a true event-completion
+    instant. **Not independently reviewed.** F1-R, odds/market anchoring, F2,
+    matching, feature engineering and model training remain unauthorized.
 
 Until all four pass, only `strict_forward_pit` (forward collection) may support
 evaluation, and no profitability claim may be made from reconstructed data.
