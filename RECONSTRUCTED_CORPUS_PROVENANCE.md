@@ -258,6 +258,19 @@ Before any reconstructed corpus is built or used:
     path; `raw_responses` is already an admissible evidence table. Prior-game
     coverage is 228/239 (95.4%). **F1-R remains unauthorized** and would be
     NBA-only and bounded.
+17. **(2026-08-13)** The NBA completion-evidence policy was **implemented**
+    (`NBA_LANE_R_EVENT_COMPLETION_MATERIALIZATION_IMPLEMENTATION.md`):
+    `nba-final-play-wallclock-v1`, bound through the existing v19
+    `availability_source` field, reusing
+    `prior_event_completion_conservative_v1` (+6 h). **No new rule, no
+    migration, schema stays v19.** Applying the full fail-closed contract to the
+    real corpus accepted **236 of 239** payloads (98.7 %); the investigation's
+    239 counted wallclock presence, not terminal completeness. Materialization
+    copies the `raw_responses` row verbatim including its identifier, preserves
+    receipt metadata exactly, is idempotent, and never synthesizes a
+    `game_status_history` row. The v19 certification path was proved end to end
+    on disposable evidence. **Not independently reviewed. F1-R was not
+    executed** (zero certification rows produced), and MLB remains blocked.
 
 Until all four pass, only `strict_forward_pit` (forward collection) may support
 evaluation, and no profitability claim may be made from reconstructed data.

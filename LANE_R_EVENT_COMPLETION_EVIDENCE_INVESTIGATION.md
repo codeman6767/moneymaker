@@ -13,7 +13,14 @@ populate `source_event_completed_at` for EVENT_DERIVED Lane-R evidence?
 > **NBA 2026-03 — a defensible derived bound exists.** Every one of the 239
 > bounded games carries a source-provided per-play UTC instant
 > (`plays[].wallclock`). It survived ten adversarial falsification checks with
-> zero anomalies. It is a **DEFENSIBLE DERIVED BOUND**, not a DIRECT completion
+> zero anomalies.
+>
+> **SUPERSEDED IN PART (2026-08-13):** those ten checks tested wallclock
+> *presence, plausibility and provenance*. They did not test **terminal
+> completeness or play-order integrity**. Applying the full fail-closed contract
+> during implementation rejected **3 of the 239** payloads for period regression
+> along play order, giving **236 usable (98.7 %)**. See
+> `NBA_LANE_R_EVENT_COMPLETION_MATERIALIZATION_IMPLEMENTATION.md` §5. It is a **DEFENSIBLE DERIVED BOUND**, not a DIRECT completion
 > field, and using it requires **one narrow documented policy decision**.
 >
 > **MLB 2026-06 — insufficient. New collection required.** No completion
@@ -258,3 +265,34 @@ bounded**, reporting the 11 first-date games as excluded. Historical
 odds/market anchoring, F2, production matching, feature engineering, model
 training, calibration, backtesting, recommendation output and UI all remain
 UNAUTHORIZED. Gates G1, G2, G3, G4, G6 unchanged.
+
+---
+
+**NBA LANE-R EVENT-COMPLETION POLICY + MATERIALIZATION IMPLEMENTED 2026-08-13 —
+NOT independently reviewed.**
+`NBA_LANE_R_EVENT_COMPLETION_MATERIALIZATION_IMPLEMENTATION.md`. The versioned
+policy `nba-final-play-wallclock-v1` records that the final recorded play's
+wallclock in the preserved BALLDONTLIE `/v1/plays` payload is accepted as source
+event completion evidence — a **lower-bound proxy, NOT an official-final
+timestamp**; a test forbids the wording from drifting into an over-claim. It is
+bound through the existing v19 `availability_source` field, so **no schema state
+was added to hold prose**, and the existing
+`prior_event_completion_conservative_v1` (+6 h) rule is reused — **no new
+availability rule**. **Schema stays v19**, no migration, `f018`/`f019` untouched.
+Real NBA 2026-03 result, recomputed rather than assumed: **236 of 239 payloads
+accepted (98.7 %)**, 3 rejected for period regression along play order. The
+investigation's 239 counted wallclock *presence*, not terminal completeness. The
+three rejects are contiguous game ids on one date (a likely collection-batch
+defect); one of them would have passed a terminal-marker-only check, and is
+refused because its period sequence is scrambled. Materialization copies the
+`raw_responses` row verbatim **including its identifier**, preserves
+`requested_at`/`received_at`/`created_at` exactly (the derived March instant is
+never written over the August receipt time), is idempotent, fails rather than
+overwrites on conflict, never writes to the source, and **never synthesizes a
+`game_status_history` row**. The full v19 path was proved end to end on
+disposable evidence: admitted at exactly completion + 6 h, exact to the
+microsecond. **F1-R was NOT executed** — zero certification rows were produced.
+**MLB remains blocked** pending its own endpoint-capability probe. Odds/market
+anchoring, F2, production matching, feature engineering, model training,
+calibration, backtesting, recommendation output and UI remain UNAUTHORIZED.
+G1/G2/G3/G4/G6 unchanged.
