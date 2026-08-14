@@ -271,6 +271,21 @@ Before any reconstructed corpus is built or used:
     `game_status_history` row. The v19 certification path was proved end to end
     on disposable evidence. **Not independently reviewed. F1-R was not
     executed** (zero certification rows produced), and MLB remains blocked.
+18. **(2026-08-14)** That implementation was **independently reviewed**:
+    **ACCEPTED WITH REPAIRS**
+    (`NBA_LANE_R_EVENT_COMPLETION_MATERIALIZATION_INDEPENDENT_REVIEW.md`). Four
+    defects were reproduced and repaired; the most consequential was a **false
+    rejection** — the period-monotonicity gate discarded a genuine game whose
+    terminal play was corroborated three independent ways. It is replaced by
+    terminal-score corroboration. Also repaired: a boolean `order` was accepted,
+    and nothing re-derived a stored `source_event_completed_at` from its cited
+    evidence (a new detective verifier now does; `availability_source` is a
+    free-text locator by architecture and correctly not digest-bound). **Real
+    coverage corrected from 236/239 to 237/239 (99.2 %)** with 2 genuine
+    exclusions. `raw_response_id` preservation adjudicated safe. **Schema stays
+    v19**, no migration, no new rule. **An NBA-only bounded F1-R may now be
+    separately authorized**, reporting the 2 exclusions and the 11 first-date
+    games explicitly.
 
 Until all four pass, only `strict_forward_pit` (forward collection) may support
 evaluation, and no profitability claim may be made from reconstructed data.

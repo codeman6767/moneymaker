@@ -45,6 +45,8 @@ from .provenance import RetrospectiveProvenanceError
 
 __all__ = [
     "NBA_COMPLETION_CLASSIFICATION",
+    "CompletionVerificationReport",
+    "verify_completion_certifications",
     "NBA_COMPLETION_ENDPOINT",
     "NBA_COMPLETION_POLICY",
     "NBA_COMPLETION_POLICY_VERSION",
@@ -232,7 +234,9 @@ def derive_completion_evidence(raw: RawResponse) -> NbaCompletionEvidence:
         if not isinstance(p, dict):
             raise _fail(f"{where}: a play is {type(p).__name__}, expected an object")
         order = p.get("order")
-        if not isinstance(order, int):
+        # `isinstance(True, int)` is True in Python, and True would sort as 1 --
+        # silently reordering the sequence. Booleans are refused explicitly.
+        if isinstance(order, bool) or not isinstance(order, int):
             raise _fail(f"{where}: a play has non-integer order {order!r}")
         orders.append(order)
     if len(set(orders)) != len(orders):
@@ -248,19 +252,15 @@ def derive_completion_evidence(raw: RawResponse) -> NbaCompletionEvidence:
             raise _fail(f"{where}: wallclock decreases along play order; the "
                         "chronology is self-contradictory")
 
-    # Period must not go backwards either. This is the check that catches a
-    # payload whose `order` field disagrees with the actual period progression --
-    # observed in the real March corpus, where an 'End Game' play sat at order
-    # 393 with 91 THIRD-QUARTER plays ordered after it, timestamped 23 minutes
-    # later. Monotonic wallclock alone does not catch that.
-    periods = [p.get("period") for p in ordered]
-    for previous, current in zip(periods, periods[1:], strict=False):
-        if not isinstance(current, int) or not isinstance(previous, int):
-            raise _fail(f"{where}: a play has a non-integer period")
-        if current < previous:
-            raise _fail(f"{where}: period decreases along play order (saw "
-                        f"{previous} then {current}); the sequence is truncated "
-                        "or mis-ordered and its final play is not the game's")
+    # NOTE (independent review, defect R1): a global period-monotonicity gate
+    # used to live here. It was removed because the preserved evidence does not
+    # support it. Real game 18447743 visits periods out of order in the MIDDLE of
+    # its `order` sequence while its terminal play is corroborated three
+    # independent ways, and the gate rejected it -- shrinking the corpus for an
+    # assumption about provider `order` semantics that nothing evidences.
+    #
+    # What actually distinguishes a truncated feed from a merely disordered one
+    # is whether the sequence ENDS where it claims to, which is checked below.
 
     # ---- 6. terminality: the last play must actually end the game ----------- #
     terminal_positions = [i for i, p in enumerate(ordered)
@@ -280,6 +280,30 @@ def derive_completion_evidence(raw: RawResponse) -> NbaCompletionEvidence:
     completed_at = stamps[-1]
     if completed_at != max(stamps):
         raise _fail(f"{where}: the terminal play is not the latest instant")
+
+    # ---- 7. the sequence must END where it claims to ----------------------- #
+    # The discriminator the review identified. A truncated or stitched feed can
+    # still carry an `End Game` marker at maximum order and maximum wallclock --
+    # real games 18447741 and 18447742 both do -- but its terminal play reports a
+    # score LOWER than plays it supposedly follows. A game's score never
+    # decreases, so a terminal play below the payload's own maximum is proof the
+    # recorded sequence is not the whole game.
+    #
+    # Deliberately compared WITHIN the payload rather than against `/v1/games`:
+    # real game 18447470's play feed disagrees with the game object by 3 points,
+    # which is a scoring-feed discrepancy and says nothing about when the game
+    # ended. Gating on it would reject sound completion evidence.
+    scores = [(p.get("home_score"), p.get("away_score")) for p in ordered]
+    if any(h is None or a is None for h, a in scores):
+        raise _fail(f"{where}: a play carries no score, so the terminal play "
+                    "cannot be corroborated")
+    highest = (max(h for h, _ in scores), max(a for _, a in scores))
+    if (terminal.get("home_score"), terminal.get("away_score")) != highest:
+        raise _fail(
+            f"{where}: the terminal play reports score "
+            f"{(terminal.get('home_score'), terminal.get('away_score'))} but the "
+            f"payload reaches {highest}; the recorded sequence does not end "
+            "where it claims to, so its last play is not the game's final play")
 
     return NbaCompletionEvidence(
         provider_game_id=requested,
@@ -402,3 +426,108 @@ def find_completion_payload(
             f"({[str(r[0]) for r in rows]}); refusing to choose between "
             "conflicting evidence")
     return SqliteRawResponseRepository(source).get(str(rows[0][0]))
+
+
+@dataclass(frozen=True)
+class CompletionVerificationReport:
+    """Every certification whose completion instant does not re-derive."""
+
+    checked: int = 0
+    problems: tuple[str, ...] = ()
+
+    @property
+    def ok(self) -> bool:
+        return not self.problems
+
+    def as_json(self) -> dict[str, object]:
+        return {
+            "policy_version": NBA_COMPLETION_POLICY_VERSION,
+            "certifications_checked": self.checked,
+            "problems": list(self.problems),
+            "ok": self.ok,
+        }
+
+
+def verify_completion_certifications(
+    conn: sqlite3.Connection, *, corpus_version_id: Optional[str] = None
+) -> CompletionVerificationReport:
+    """Re-derive every stored NBA completion instant from its own evidence.
+
+    Independent review repair (R4). ``availability_source`` is a free-text
+    LOCATOR by design -- the architecture asks for "a pointer to the documenting
+    evidence" and f018 calls the column "a stable citation key" -- so unlike
+    ``availability_rule_digest`` it is deliberately not digest-bound, and
+    nothing should claim it is.
+
+    The consequence is that a stored ``source_event_completed_at`` was checked by
+    nothing at all: a certification could name this policy, cite real preserved
+    evidence, and still carry an instant that evidence does not produce. The
+    reader admits it, correctly, because the reader decides availability rather
+    than re-deriving evidence.
+
+    This closes that loop the same way the TEAM-A verifier does -- as a
+    **detective** control. It is weaker than a DB constraint and is stated as
+    such: direct SQL can still write a wrong instant; what it cannot do is
+    survive verification.
+    """
+
+    where = "WHERE rip.availability_basis = 'event_derived' "             "AND rip.source_evidence_table = 'raw_responses' "             "AND rip.source_event_completed_at IS NOT NULL"
+    params: tuple[str, ...] = ()
+    if corpus_version_id is not None:
+        where += " AND rip.corpus_version_id = ?"
+        params = (corpus_version_id,)
+
+    rows = conn.execute(
+        "SELECT rip.input_provenance_id, rip.corpus_version_id, "
+        "       rip.provider_game_id, rip.source_evidence_id, "
+        "       rip.source_event_completed_at, rip.availability_source "
+        f"FROM reconstructed_input_provenance AS rip {where} "
+        "ORDER BY rip.input_provenance_id", params).fetchall()
+
+    repo = SqliteRawResponseRepository(conn)
+    problems: list[str] = []
+    checked = 0
+    for row in rows:
+        (input_id, _corpus, game_id, evidence_id, stored_at,
+         source_text) = (str(row[0]), str(row[1]), str(row[2]),
+                         row[3], str(row[4]), row[5] or "")
+        # Only certifications written under THIS policy are re-derivable here.
+        if NBA_COMPLETION_POLICY_VERSION not in source_text:
+            continue
+        checked += 1
+        if evidence_id is None:
+            problems.append(
+                f"certification {input_id} cites this policy but names no "
+                "source evidence row")
+            continue
+        raw = repo.get(str(evidence_id))
+        if raw is None:
+            problems.append(
+                f"certification {input_id} cites evidence "
+                f"{str(evidence_id)!r} which no longer exists in this database")
+            continue
+        try:
+            evidence = derive_completion_evidence(raw)
+        except CompletionEvidenceError as exc:
+            problems.append(
+                f"certification {input_id} cites evidence {str(evidence_id)!r} "
+                f"that no longer yields a completion instant: {exc}")
+            continue
+        if evidence.source_event_completed_at != stored_at:
+            problems.append(
+                f"certification {input_id} stores completion {stored_at}, but "
+                f"its cited evidence re-derives to "
+                f"{evidence.source_event_completed_at}; the stored instant does "
+                "not match the evidence it claims to come from")
+        # NOT an equality check. An EVENT_DERIVED certification is for a TARGET
+        # game and its evidence comes from a PRIOR one, so these differing is
+        # the normal case; them MATCHING is the leak the reader already refuses
+        # as `target_game_self_reference`. Verified here too, because this
+        # verifier is also runnable standalone.
+        if evidence.provider_game_id == game_id:
+            problems.append(
+                f"certification {input_id} for target game {game_id!r} cites "
+                "completion evidence from that same game; a game cannot be a "
+                "prior event for itself")
+    return CompletionVerificationReport(checked=checked,
+                                        problems=tuple(problems))

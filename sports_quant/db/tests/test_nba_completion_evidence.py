@@ -46,9 +46,12 @@ EFFECTIVE = "2026-03-02T02:36:10.000000Z"
 
 def play(order: int, *, period: int = 1, wallclock: str = TIP,
          type_: str = "Jumpball", game_id: str = GAME,
-         clock: str = "12:00") -> dict[str, Any]:
+         clock: str = "12:00", home: int = 0, away: int = 0) -> dict[str, Any]:
+    # Scores are always present in the real feed and are what corroborates the
+    # terminal play, so fixtures carry them too.
     return {"game_id": int(game_id), "order": order, "type": type_,
-            "period": period, "clock": clock, "wallclock": wallclock}
+            "period": period, "clock": clock, "wallclock": wallclock,
+            "home_score": home, "away_score": away}
 
 
 def payload(plays: list[dict[str, Any]]) -> str:
@@ -59,10 +62,11 @@ def good_plays() -> list[dict[str, Any]]:
     """A minimal but structurally valid completed NBA game."""
 
     return [
-        play(1, period=1, wallclock=TIP),
-        play(2, period=2, wallclock="2026-03-01T19:05:00.000Z"),
-        play(3, period=4, wallclock="2026-03-01T20:36:09.000Z"),
-        play(4, period=4, wallclock=END, type_="End Game", clock="0.0"),
+        play(1, period=1, wallclock=TIP, home=0, away=0),
+        play(2, period=2, wallclock="2026-03-01T19:05:00.000Z", home=48, away=44),
+        play(3, period=4, wallclock="2026-03-01T20:36:09.000Z", home=110, away=104),
+        play(4, period=4, wallclock=END, type_="End Game", clock="0.0",
+             home=112, away=104),
     ]
 
 
@@ -243,22 +247,23 @@ def test_the_real_corpus_shape_of_misordered_evidence_is_refused() -> None:
     """
 
     plays = [
-        play(1, period=1, wallclock="2026-03-01T18:11:00.000Z"),
+        play(1, period=1, wallclock="2026-03-01T18:11:00.000Z", home=2, away=0),
         play(2, period=4, wallclock="2026-03-01T20:36:27.000Z",
-             type_="End Game", clock="0.0"),
+             type_="End Game", clock="0.0", home=121, away=110),
         play(3, period=3, wallclock="2026-03-01T20:59:22.000Z",
-             type_="End Period", clock="0.0"),
+             type_="End Period", clock="0.0", home=103, away=80),
     ]
-    with pytest.raises(CompletionEvidenceError, match="period decreases"):
+    with pytest.raises(CompletionEvidenceError):
         derive_completion_evidence(raw(payload(plays)))
 
 
 def test_end_game_that_is_not_the_last_play_is_refused() -> None:
     plays = [
-        play(1, period=1, wallclock="2026-03-01T18:11:00.000Z"),
+        play(1, period=1, wallclock="2026-03-01T18:11:00.000Z", home=2, away=0),
         play(2, period=4, wallclock="2026-03-01T20:36:00.000Z",
-             type_="End Game", clock="0.0"),
-        play(3, period=4, wallclock="2026-03-01T20:40:00.000Z"),
+             type_="End Game", clock="0.0", home=110, away=104),
+        play(3, period=4, wallclock="2026-03-01T20:40:00.000Z",
+             home=110, away=104),
     ]
     with pytest.raises(CompletionEvidenceError, match="not the last play"):
         derive_completion_evidence(raw(payload(plays)))
@@ -348,7 +353,7 @@ def test_a_conflicting_destination_row_fails_rather_than_overwrites(
     original = raw(payload(good_plays()))
     tampered = raw(payload(good_plays()[:2] + [
         play(3, period=4, wallclock="2026-03-01T21:00:00.000Z",
-             type_="End Game", clock="0.0")]))
+             type_="End Game", clock="0.0", home=112, away=104)]))
     with db(tmp_path / "src.db") as src, db(tmp_path / "dst.db") as dst:
         with transaction(src):
             store(src, original)

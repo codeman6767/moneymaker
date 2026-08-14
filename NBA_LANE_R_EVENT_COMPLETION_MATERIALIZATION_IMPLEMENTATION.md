@@ -1,6 +1,18 @@
 # NBA Lane-R event-completion policy + materialization — implementation report
 
-> **IMPLEMENTED 2026-08-13 — NOT INDEPENDENTLY REVIEWED.**
+> **IMPLEMENTED 2026-08-13. INDEPENDENTLY REVIEWED 2026-08-14 — ACCEPTED WITH
+> REPAIRS.** `NBA_LANE_R_EVENT_COMPLETION_MATERIALIZATION_INDEPENDENT_REVIEW.md`
+> is **authoritative where it differs from this document**. Four defects were
+> reproduced and repaired: **(R1)** the period-monotonicity gate caused a FALSE
+> REJECTION of a genuine game whose terminal play was corroborated three ways —
+> real coverage is **237/239, not 236/239**; **(R2)** no terminal-score
+> corroboration existed, so a truncated feed could be admitted; **(R3)** a boolean
+> `order` was accepted because `isinstance(True, int)` is True; **(R4)** nothing
+> re-derived a stored `source_event_completed_at` from its cited evidence — a new
+> `verify_completion_certifications()` detective control closes that. Statements
+> below marked **SUPERSEDED** were true of `30a8746` and are no longer true.
+>
+> **Original banner (as written at implementation time):**
 > Implements the NBA-only path established by
 > `LANE_R_EVENT_COMPLETION_EVIDENCE_INVESTIGATION.md` (verdict: *existing
 > evidence sufficient for NBA only*).
@@ -80,7 +92,8 @@ strict-PIT code was modified.
 * unparseable `wallclock`
 * **naive / unzoned `wallclock`** (three forms tested)
 * `wallclock` decreasing along play order
-* **`period` decreasing along play order**
+* ~~`period` decreasing along play order~~ **(SUPERSEDED — removed by the independent review; replaced by terminal-score corroboration)**
+* **the terminal play carrying a score below the payload maximum** (added by the review)
 * no `End Game` play (truncated)
 * more than one `End Game` play
 * `End Game` not being the last play by order
@@ -89,14 +102,19 @@ strict-PIT code was modified.
 `find_completion_payload()` additionally refuses when a game has **more than one**
 preserved `/v1/plays` payload, rather than resolving the conflict by recency.
 
-### The period-regression check earns its place
+### The period-regression check — SUPERSEDED
 
-It is not defensive padding. The real March corpus contains payloads where
-`End Game` sits mid-sequence with later-ordered plays from **earlier** periods
-carrying later wallclocks. Wallclock is monotonic in `order` for those payloads,
-so a monotonicity check alone passes them. The period check is what exposes the
-corruption — and it caught a third case (§5) that even a terminal-marker check
-would have accepted.
+> This section argued that a global period-monotonicity gate was load-bearing.
+> The independent review **disproved it**: the gate rejected real game
+> `18447743`, whose terminal play carries the `End Game` marker at maximum
+> order, holds the maximum wallclock, and matches both the payload maximum and
+> the official score. The pagination hypothesis offered here was also disproved —
+> the regressions occur *within* 100-play chunks, not at chunk boundaries.
+>
+> What actually separates a truncated feed from a merely disordered one is
+> whether the terminal play carries the payload's maximum score. That check
+> replaces this one, and real coverage is **237/239, not 236/239**. See the
+> independent review §2.
 
 ## 4. Materialization — honest by construction
 
@@ -141,6 +159,11 @@ Read-only source, disposable destination, **0 provider requests**.
 | **Accepted** | **236** |
 | **Rejected** | **3** |
 | Rejection reason | all 3: period regression along play order |
+
+> **SUPERSEDED:** the independent review proved the period gate rejected a
+> genuine game (`18447743`). Corrected figures: **237 accepted, 2 rejected**
+> (`18447741`, `18447742`), refused because `End Game` is not the last play by
+> order. See the review §2 and §4.
 | Overtime games accepted | 9 |
 | Earliest derived instant | `2026-03-01T20:36:10.000000Z` |
 | Latest derived instant | `2026-04-01T05:29:21.000000Z` |
@@ -150,6 +173,10 @@ Read-only source, disposable destination, **0 provider requests**.
 | Destination `game_status_history` rows | **0** |
 | Destination certification rows | **0** (F1-R not executed) |
 | Derivation deterministic on re-run | **yes** |
+
+> **SUPERSEDED:** the 236/98.7 % figures in this section are superseded by
+> **237/99.2 %**. The reasoning below about 239 counting presence rather than
+> terminal completeness still stands.
 
 ### The investigation's 239 was a different number
 

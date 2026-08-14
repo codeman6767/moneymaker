@@ -296,3 +296,32 @@ microsecond. **F1-R was NOT executed** — zero certification rows were produced
 anchoring, F2, production matching, feature engineering, model training,
 calibration, backtesting, recommendation output and UI remain UNAUTHORIZED.
 G1/G2/G3/G4/G6 unchanged.
+
+---
+
+**NBA COMPLETION MATERIALIZATION INDEPENDENTLY REVIEWED 2026-08-14 — ACCEPTED
+WITH REPAIRS.**
+`NBA_LANE_R_EVENT_COMPLETION_MATERIALIZATION_INDEPENDENT_REVIEW.md`. Four defects
+reproduced and repaired. The most consequential was a **false rejection**: the
+period-monotonicity gate discarded real game `18447743`, whose terminal play was
+corroborated three independent ways (End Game marker at max order, max wallclock,
+score equal to both the payload maximum and the official score). The pagination
+hypothesis was disproved — regressions occur *within* 100-play chunks. It is
+replaced by **terminal-score corroboration**, which is what actually separates a
+truncated feed from a merely disordered one, compared within the payload rather
+than against `/v1/games` (real game `18447470` disagrees by 3 points, which says
+nothing about when the game ended). Also repaired: a boolean `order` was accepted
+because `isinstance(True, int)` is True; and **nothing re-derived a stored
+`source_event_completed_at` from its cited evidence** — `availability_source` is a
+free-text **locator** by architecture, correctly not digest-bound, so a new
+`verify_completion_certifications()` detective control now re-derives every stored
+instant. **Real coverage corrected to 237/239 (99.2 %)**, 2 genuine exclusions,
+226/237 with an in-corpus prior date. `raw_response_id` preservation adjudicated
+**safe** (all-17-column conflict detection; same-id/different-content refused).
+Strict PIT unweakened, **schema stays v19**, no migration, no new availability
+rule, **0 provider requests**, 42/42 protected artefacts byte-identical. **An
+NBA-only bounded F1-R may now be separately authorized**, reporting the 2
+exclusions and 11 no-prior games explicitly. MLB, odds/market anchoring, F2,
+production matching, feature engineering, model training, calibration,
+backtesting, recommendation output and UI remain UNAUTHORIZED. G1/G2/G3/G4/G6
+unchanged.

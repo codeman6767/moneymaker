@@ -146,6 +146,8 @@ _LAZY: dict[str, str] = {
     "plan_game_bootstrap": "game_bootstrap",
     "write_game_bootstrap": "game_bootstrap",
     "NBA_COMPLETION_CLASSIFICATION": "nba_completion",
+    "CompletionVerificationReport": "nba_completion",
+    "verify_completion_certifications": "nba_completion",
     "NBA_COMPLETION_ENDPOINT": "nba_completion",
     "NBA_COMPLETION_POLICY": "nba_completion",
     "NBA_COMPLETION_POLICY_VERSION": "nba_completion",
