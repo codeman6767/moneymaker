@@ -1799,3 +1799,33 @@ exclusions and 11 no-prior games explicitly. MLB, odds/market anchoring, F2,
 production matching, feature engineering, model training, calibration,
 backtesting, recommendation output and UI remain UNAUTHORIZED. G1/G2/G3/G4/G6
 unchanged.
+
+---
+
+**NBA F1-R TARGET-ANCHOR PREFLIGHT 2026-08-14 — F1-R BLOCKED: HISTORICAL MARKET
+ANCHOR REQUIRED.**
+`NBA_F1R_TARGET_ANCHOR_PREFLIGHT.md`. Read-only, **0 provider requests, 0 credits
+spent**. Target-anchor coverage from preserved evidence is **0 of 239 games
+(0.0 %)**. The reviewed contract (architecture Repair 4) requires every target's
+`T_cut` to derive from a **historical market snapshot's contemporaneous
+`commence_time`**, with the retrospective start usable only as a search hint and
+**never** as the anchor. Two independent gaps: the NBA 2026-03 corpus preserves
+**no market endpoint at all**, and the Odds API client implements **only current
+odds** (`/v4/sports`, `/v4/sports/{key}/odds`) with **no `/v4/historical/`**. The
+only market rows anywhere in the project are 1 978 dev-capture price snapshots
+from a 30-minute window on 2026-07-23, all `baseball_mlb`, **zero** commencing in
+March 2026 and **zero** linked to a canonical game. Every anchor shortcut was
+tested and refused structurally, including the most plausible one — an
+August-observed schedule snapshot used for a March target, which the reader
+rejects as `not_yet_available`. **Reconciliation:** the completion review cleared
+the *prior-event availability* prerequisite and never spoke to the *target
+anchor*; F1-R needs both, so no wording is superseded. Next steps, in order: a
+historical Odds API implementation task (zero-network), a **user decision on plan
+entitlement** (a configured key proves nothing; monetary price is **UNKNOWN** and
+was not guessed), a bounded live probe capped at ≤10 requests / ≤100 credits, and
+an independent review — only then a bounded NBA F1-R. First-pass anchoring cost
+independently computed as **160 requests (5.16 buckets/day) ≈ 1 600 credits**,
+corroborating the architecture's measured 5.0/day. Schema v19 unchanged, strict
+PIT unchanged, 42/42 protected artefacts byte-identical. MLB probe, F2, feature
+engineering, model training, calibration, EV/backtesting, recommendations and UI
+remain UNAUTHORIZED. G1/G2/G3/G4/G6 unchanged.

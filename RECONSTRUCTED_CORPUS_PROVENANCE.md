@@ -286,6 +286,18 @@ Before any reconstructed corpus is built or used:
     v19**, no migration, no new rule. **An NBA-only bounded F1-R may now be
     separately authorized**, reporting the 2 exclusions and the 11 first-date
     games explicitly.
+19. **(2026-08-14)** An NBA F1-R **target-anchor preflight** found F1-R
+    **BLOCKED — historical market anchor required**
+    (`NBA_F1R_TARGET_ANCHOR_PREFLIGHT.md`). Target-anchor coverage from preserved
+    evidence is **0/239 (0.0 %)**. Architecture Repair 4 requires `T_cut` to
+    derive from a historical market snapshot's contemporaneous `commence_time`;
+    the retrospective start is only a search hint and never the anchor. The NBA
+    corpus preserves no market endpoint, and the Odds API client implements only
+    current odds with no `/v4/historical/`. The completion review had cleared the
+    *prior-event availability* prerequisite only — F1-R needs the target anchor
+    too, so the two statements reconcile without either being superseded. Zero
+    provider requests; zero credits spent; plan entitlement and price remain
+    **UNKNOWN** and require a user decision.
 
 Until all four pass, only `strict_forward_pit` (forward collection) may support
 evaluation, and no profitability claim may be made from reconstructed data.
