@@ -165,6 +165,16 @@ snapshot**, so an unauthorized run cannot spend a credit either.
 Everything else in this module is complete and tested against an exact-identity
 double. **What is missing is one architectural decision, not code.**
 
+> **Update 2026-08-15.** That decision has been made — see
+> `NBA_HISTORICAL_EVENT_CANONICAL_IDENTITY_ARCHITECTURE.md`. It found one thing
+> this section did not anticipate: the chosen path additionally needs a **schema
+> change**, because the G5 event-id audit that v19's own crosswalk triggers
+> demand has no append-only table to read. So the correct statement is now "one
+> architectural decision *and* one migration, then code." The characterization of
+> the existing sportsbook matcher as *fuzzy* is also corrected there: it is exact
+> alias matching, and it is disqualified for mutable-unhashed-alias-state and
+> retrospective-schedule-window reasons instead.
+
 ---
 
 ## 4. §K — Offline NBA 2026-03 request plan (independently recomputed)
@@ -371,20 +381,31 @@ explicitly and separately. They are listed in the order the blockers actually
 bind; the first is the only one that unblocks anything.
 
 **1. Exact historical-event ↔ canonical-game identity (BLOCKING, zero-network).**
-Adjudicate how an Odds API historical event links to a canonical game without
-name or alias matching. This is an architecture/adjudication task, not an
-implementation one, and it needs no network and no credits. Until it lands,
-every other item below is moot, because the resolver refuses before requesting a
-snapshot.
+**ADJUDICATED 2026-08-15 — see
+`NBA_HISTORICAL_EVENT_CANONICAL_IDENTITY_ARCHITECTURE.md`.** Verdict:
+*ARCHITECTURE ACCEPTED — SCHEMA CHANGE REQUIRED BEFORE IMPLEMENTATION*. A
+two-stage acquire-then-curate event-id attestation was chosen; the crosswalk fits
+v19, but the G5 audit it depends on has no append-only table to read, so a
+migration is a prerequisite. That adjudication now supersedes the framing below
+and adds a schema step ahead of implementation.
 
 **2. Independent adversarial review of this implementation.** Not performed here
 and deliberately not self-reviewed. Reviewing this work in the same context that
 produced it is not a review.
 
-**3. A bounded live entitlement probe.** Only after (1) and (2). It must carry
-its own explicit cap; the built-in guard defaults to **≤10 requests / ≤100
-credits** and will refuse before spending. Its purpose is solely to establish
-whether the account has historical access — currently UNKNOWN.
+**3. A bounded live entitlement probe.** ~~Only after (1) and (2).~~ **CORRECTED
+2026-08-15 by `NBA_HISTORICAL_EVENT_CANONICAL_IDENTITY_ARCHITECTURE.md` §12: the
+probe does NOT require canonical event identity and may proceed in parallel with
+(1) and (2).** A capability probe establishes entitlement, the wrapper shape, the
+provider snapshot timestamp and the quota headers — none of which depends on
+knowing which canonical game an event is. It does not go through
+`resolve_target_anchor()`, so `RefuseNameMatching` never fires. The ordering
+stated here was an accidental implementation dependency, not a real constraint.
+It must still carry its own explicit cap; the built-in guard defaults to **≤10
+requests / ≤100 credits** and will refuse before spending. Its purpose is solely
+to establish whether the account has historical access — currently UNKNOWN. It
+must claim no identity, and its payload may not be promoted to identity-audit
+input without the schema change that adjudication also identified.
 
 **4. A full NBA 2026-03 anchor pass.** **160 requests / 160 credits** first
 pass, **≤638 / ≤638** worst case. This does **not** fit the probe guard, by
