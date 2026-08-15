@@ -183,7 +183,12 @@ The number was **not** taken from the preflight and not forced to match it.
 | Largest bucket | 4 games |
 | Bucket-size histogram | 1→106, 2→33, 3→17, 4→4 |
 | First / last bucket | `2026-03-01T17:00Z` / `2026-04-01T02:00Z` |
-| Worst case (all 3 iterations, no re-query sharing) | **≤ 638** requests |
+| Worst case (all 3 iterations, no re-query sharing) | **≤ 638** requests / **≤ 638** credits |
+
+Worst-case requests and credits are the same number here only because the events
+endpoint is 1 credit per request. The two are tracked separately regardless,
+because that identity does not hold for any other endpoint — which is exactly
+why the guard caps both.
 
 The independently recomputed bucket count, **160**, agrees exactly with the
 preflight's independently computed 160. The date count differs (32 here versus
@@ -300,6 +305,48 @@ deviation is the **`-shm` sidecar mtime** of `data/f1_nba_2026_03_scratch.db`.
 Recording it rather than rounding 41/42 up to 42/42: no evidence changed, but
 the baseline did not match exactly and saying otherwise would be false.
 
+### Strict-PIT result
+
+**No strict-PIT boundary was crossed, weakened, or bypassed.**
+
+- No `ignore_pit`, `retrospective=True`, `unsafe=True`, or equivalent bypass flag
+  was added anywhere. The strict-forward `AsOfReader` is untouched.
+- The retrospectively known start `S_final` enters the resolver **only** as a
+  search hint. It cannot reach an anchor by any code path: on every rejection
+  `cutoff` is `None`, and on acceptance `cutoff` is derived solely from the
+  snapshot's contemporaneous `commence_time`. This is asserted directly, with a
+  case where the circular rule and the correct rule give different answers.
+- Grid flooring is **always downward**, so a resolved cutoff is never later than
+  intended — the only direction that could admit post-cutoff information.
+- Step 5's "already commenced" test compares against the **snapshot's own
+  timestamp**, not the requested instant, because the provider may answer with a
+  different snapshot than the one asked for. Asserted adversarially.
+- No feature value, rolling statistic, label, or training row was read or
+  written, so there was no surface on which leakage could occur.
+
+### Entitlement limitation (§H)
+
+Whether the configured account can actually read `/v4/historical` is **UNKNOWN**
+and was deliberately **not** tested — doing so requires a live request. Possession
+of an Odds API key does not imply historical entitlement.
+
+The code handles the documented refusal
+(`HISTORICAL_UNAVAILABLE_ON_FREE_USAGE_PLAN`) as a **terminal**
+`HistoricalAccessError` that is **never retried**, because it is a subscription
+question rather than a transient error. Unrelated failures are not disguised as
+entitlement problems. Both behaviours are tested offline against a mock
+transport. No subscription was purchased, inspected, or modified.
+
+### F1-R was NOT executed
+
+Stated explicitly: **F1-R was not started, not partially started, and not
+prepared beyond this capability.** No target population was constructed, no
+`target_schedule_anchor` row was certified, no real historical market snapshot
+was created, no target or prior feature row was enumerated, no rolling statistic
+or feature value was computed, no historical price was fetched, no economic
+backtest was run, and no model was trained. The bounded live probe was **not**
+performed.
+
 ## 9. Where F1-R stands now
 
 **Before this task:** blocked because no historical-market anchor *capability*
@@ -314,3 +361,39 @@ The remaining blocker has moved and narrowed to a single question:
 
 Answering that is an architectural decision. Until it is answered and reviewed,
 `resolve_target_anchor()` refuses — costing nothing — and F1-R stays blocked.
+
+---
+
+## 10. Exact next authorization boundary
+
+Nothing further should proceed without one of the following being authorized
+explicitly and separately. They are listed in the order the blockers actually
+bind; the first is the only one that unblocks anything.
+
+**1. Exact historical-event ↔ canonical-game identity (BLOCKING, zero-network).**
+Adjudicate how an Odds API historical event links to a canonical game without
+name or alias matching. This is an architecture/adjudication task, not an
+implementation one, and it needs no network and no credits. Until it lands,
+every other item below is moot, because the resolver refuses before requesting a
+snapshot.
+
+**2. Independent adversarial review of this implementation.** Not performed here
+and deliberately not self-reviewed. Reviewing this work in the same context that
+produced it is not a review.
+
+**3. A bounded live entitlement probe.** Only after (1) and (2). It must carry
+its own explicit cap; the built-in guard defaults to **≤10 requests / ≤100
+credits** and will refuse before spending. Its purpose is solely to establish
+whether the account has historical access — currently UNKNOWN.
+
+**4. A full NBA 2026-03 anchor pass.** **160 requests / 160 credits** first
+pass, **≤638 / ≤638** worst case. This does **not** fit the probe guard, by
+design, and needs its own authorization with its own cap.
+
+**5. E1 economic evidence.** Separate again. Historical *odds* (with prices) at
+**10 × markets × regions** per request — the retained ~1,600-credit first-pass
+estimate. Required before any EV, edge, CLV, or no-vig claim. Nothing in this
+task moved that requirement.
+
+**F1-R itself remains blocked** and is not authorized by any of the above on its
+own.
