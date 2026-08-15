@@ -146,6 +146,52 @@ class SportsResult(BaseModel):
     from_cache: bool = False
 
 
+class HistoricalAccessError(RuntimeError):
+    """The account cannot read historical snapshots. NEVER retried.
+
+    The Odds API returns a documented plan-entitlement failure for historical
+    endpoints on a free usage plan. Retrying it burns wall-clock and obscures
+    the real answer, which is that a human must change a subscription.
+    """
+
+
+class HistoricalEvent(BaseModel):
+    """One event exactly as it appeared at a historical snapshot instant.
+
+    ``commence_time`` is the CONTEMPORANEOUS value from that snapshot -- the only
+    start time the reviewed anchoring algorithm may use. It is not the
+    retrospectively known final start.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    sport_key: str
+    commence_time: str
+    home_team: Optional[str] = None
+    away_team: Optional[str] = None
+    sport_title: Optional[str] = None
+
+
+class HistoricalSnapshot(BaseModel):
+    """The provider historical wrapper: which snapshot actually answered.
+
+    The requested ``date`` is NOT the snapshot instant. The provider returns the
+    closest snapshot at or before the request, and ``timestamp`` is that instant.
+    Everything downstream anchors on ``timestamp``; ``requested_date`` is only
+    what was asked for, kept separate so the two can never be confused.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+    timestamp: str
+    previous_timestamp: Optional[str] = None
+    next_timestamp: Optional[str] = None
+    events: list[HistoricalEvent] = Field(default_factory=list)
+    requested_date: str = ""
+    raw: list[dict[str, Any]] = Field(default_factory=list)
+    credits: CreditHeaders = Field(default_factory=CreditHeaders)
+    exchange: Optional[RawExchange] = None
+
+
 # --------------------------------------------------------------------------- #
 # Normalization
 # --------------------------------------------------------------------------- #
@@ -403,8 +449,127 @@ class OddsApiClient:
         self._cache.set(cache_key, result)
         return result
 
+
+    async def get_historical_events(
+        self, *, sport_key: str, date: str,
+    ) -> HistoricalSnapshot:
+        """GET /v4/historical/sports/{sport}/events -- E0 anchor evidence.
+
+        Returns the events that HAD ODDS AVAILABLE at the requested historical
+        instant. Under the reviewed economic-evidence grades that is **E0**
+        ("market existed, no price"), which the architecture permits for
+        **target anchoring only** and forbids for any EV claim. This method
+        therefore fetches no prices, by design.
+
+        Costs 1 credit per request (no charge when no events are found), against
+        10 x markets x regions for the historical ODDS endpoint. That is a
+        consequence of choosing the narrower evidence, not the reason for it.
+
+        Separate from ``get_odds`` deliberately: no existing method may silently
+        begin returning historical data, and nothing here falls back to the
+        10-credit endpoint.
+        """
+
+        if not sport_key or not sport_key.strip():
+            raise ValueError("sport_key is required for a historical request")
+        if not date or not date.strip():
+            raise ValueError("a historical request requires an explicit date")
+
+        path = f"/v4/historical/sports/{sport_key}/events"
+        params: dict[str, Any] = {"date": date, "dateFormat": "iso"}
+        try:
+            raw, credits, exchange = await self._get_json(path, params)
+        except OddsApiHTTPError as exc:
+            body = ""
+            try:
+                body = exc.response.text or ""
+            except Exception:      # pragma: no cover - defensive
+                body = ""
+            if _is_historical_entitlement_failure(exc.response.status_code, body):
+                raise HistoricalAccessError(
+                    "The Odds API refused historical access for this plan "
+                    "(HISTORICAL_UNAVAILABLE_ON_FREE_USAGE_PLAN). That is a "
+                    "subscription question, not a transient error, so it is "
+                    "never retried."
+                ) from None
+            raise
+
+        return _parse_historical_snapshot(
+            raw, requested_date=date, credits=credits, exchange=exchange)
+
     async def get_mlb_odds(self, **kwargs: Any) -> OddsApiResult:
         return await self.get_odds(MLB_SPORT_KEY, **kwargs)
 
     async def get_nba_odds(self, **kwargs: Any) -> OddsApiResult:
         return await self.get_odds(NBA_SPORT_KEY, **kwargs)
+
+
+# --------------------------------------------------------------------------- #
+# Historical snapshot parsing
+# --------------------------------------------------------------------------- #
+#: Substrings the provider uses for the historical plan-entitlement refusal.
+_HISTORICAL_ENTITLEMENT_MARKERS = (
+    "historical_unavailable_on_free_usage_plan",
+    "historical data is not available on the free",
+)
+
+
+def _is_historical_entitlement_failure(status: int, body: str) -> bool:
+    """Recognize the documented historical plan refusal, whatever its status."""
+
+    lowered = (body or "").lower()
+    if any(marker in lowered for marker in _HISTORICAL_ENTITLEMENT_MARKERS):
+        return True
+    return status == 401 and "historical" in lowered
+
+
+def _parse_historical_snapshot(
+    raw: Any, *, requested_date: str, credits: CreditHeaders,
+    exchange: Optional[RawExchange],
+) -> HistoricalSnapshot:
+    """Parse the historical wrapper, failing closed on anything malformed.
+
+    A snapshot with no ``timestamp`` carries no availability evidence, so it is
+    refused rather than defaulted to the requested date. Substituting what was
+    asked for in place of what the provider answered is exactly the clock
+    overloading this lane forbids.
+    """
+
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"historical response is {type(raw).__name__}, expected the "
+            "timestamp/previous_timestamp/next_timestamp/data wrapper")
+    timestamp = raw.get("timestamp")
+    if not isinstance(timestamp, str) or not timestamp.strip():
+        raise ValueError(
+            "historical response carries no snapshot timestamp; the requested "
+            "date is NOT a substitute for the instant the provider answered")
+    data = raw.get("data")
+    if data is None:
+        data = []
+    if not isinstance(data, list):
+        raise ValueError(
+            f"historical response data is {type(data).__name__}, expected a list")
+
+    events: list[HistoricalEvent] = []
+    kept: list[dict[str, Any]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            raise ValueError("a historical event entry is not an object")
+        kept.append(item)
+        events.append(HistoricalEvent.model_validate(item))
+
+    def _opt(key: str) -> Optional[str]:
+        value = raw.get(key)
+        return value if isinstance(value, str) and value.strip() else None
+
+    return HistoricalSnapshot(
+        timestamp=timestamp,
+        previous_timestamp=_opt("previous_timestamp"),
+        next_timestamp=_opt("next_timestamp"),
+        events=events,
+        requested_date=requested_date,
+        raw=kept,
+        credits=credits,
+        exchange=exchange,
+    )

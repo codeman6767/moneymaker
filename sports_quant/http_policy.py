@@ -97,13 +97,21 @@ def kalshi_host_rule(base_url: str) -> HostRule:
 
 
 def odds_api_host_rule(host: str = "api.the-odds-api.com") -> HostRule:
-    """Build The Odds API allow-list (sports list + per-sport odds)."""
+    """Build The Odds API allow-list (sports list, per-sport odds, historical events).
+
+    ``/v4/historical/sports/{sport}/events`` is admitted because Lane-R target
+    anchoring needs the contemporaneous ``commence_time`` it carries. Its priced
+    sibling ``/v4/historical/sports/{sport}/odds`` is deliberately NOT admitted:
+    nothing implemented reads it, it costs ten times as much per request, and an
+    allow-list entry with no caller behind it is just an unguarded door.
+    """
 
     return HostRule(
         host=host,
         allowed_patterns=(
             re.compile(r"/v4/sports/?"),
             re.compile(r"/v4/sports/[^/]+/odds/?"),
+            re.compile(r"/v4/historical/sports/[^/]+/events/?"),
         ),
     )
 
