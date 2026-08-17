@@ -152,7 +152,18 @@ class HistoricalAccessError(RuntimeError):
     The Odds API returns a documented plan-entitlement failure for historical
     endpoints on a free usage plan. Retrying it burns wall-clock and obscures
     the real answer, which is that a human must change a subscription.
+
+    Carries the sanitized ``exchange`` so the refusal is preservable evidence.
+    An entitlement refusal is the single most important thing a capability probe
+    can learn, and discarding its exchange would mean the one authorized request
+    left nothing behind. The API key is already redacted by ``build_exchange``.
     """
+
+    def __init__(self, message: str, *, exchange: Optional[RawExchange] = None,
+                 status_code: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.exchange = exchange
+        self.status_code = status_code
 
 
 class HistoricalEvent(BaseModel):
@@ -490,7 +501,9 @@ class OddsApiClient:
                     "The Odds API refused historical access for this plan "
                     "(HISTORICAL_UNAVAILABLE_ON_FREE_USAGE_PLAN). That is a "
                     "subscription question, not a transient error, so it is "
-                    "never retried."
+                    "never retried.",
+                    exchange=exc.exchange,
+                    status_code=exc.response.status_code,
                 ) from None
             raise
 

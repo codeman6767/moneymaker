@@ -616,3 +616,22 @@ async def test_a_list_shaped_historical_response_is_refused() -> None:
     with pytest.raises(ValueError, match="expected the"):
         await _client(handler).get_historical_events(
             sport_key=SPORT, date="2026-03-05T23:10:00Z")
+
+
+async def test_the_entitlement_refusal_preserves_its_exchange() -> None:
+    """A refusal is evidence; the one authorized probe must not lose it."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={
+            "message": "Historical data is not available on the free usage plan",
+            "error_code": "HISTORICAL_UNAVAILABLE_ON_FREE_USAGE_PLAN"})
+
+    with pytest.raises(HistoricalAccessError) as caught:
+        await _client(handler).get_historical_events(
+            sport_key=SPORT, date="2026-03-05T23:10:00Z")
+
+    assert caught.value.status_code == 401
+    assert caught.value.exchange is not None
+    assert caught.value.exchange.http_status == 401
+    # Still redacted: a preserved refusal must not leak the key either.
+    assert API_KEY not in caught.value.exchange.model_dump_json()
