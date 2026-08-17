@@ -363,6 +363,29 @@ Each was updated to its *real* invariant rather than bumped mechanically:
 
 No failure was waived, and no assertion was deleted to make a number agree.
 
+### CI #111: the workflow itself pinned 19 (four more)
+
+The first push passed `Ruff, mypy, pytest` and **failed the wheel-install smoke
+job**. The cause was not the wheel — f020 packages correctly — but four literals
+inside `.github/workflows/ci.yml`:
+
+| Location | Repair |
+|---|---|
+| wheel-contents check: `len(migs) == 19 and migs[-1] == "f019_…"` | now compares the wheel's migration set against the **source tree's**, which catches a migration that failed to package regardless of count and needs no future edit |
+| installed-wheel check: `len(migs) == 19 and migs[-1].name == "f019_…"` | now asserts `len(migs) == CURRENT_SCHEMA_VERSION` **and** that versions are contiguous from 1 |
+| `grep -q "Schema version: 19"` | now derives the expected version from the installed package |
+| checkpoint-provenance step: `assert CURRENT_SCHEMA_VERSION == 19` | now asserts the declared version equals the discovered migration count **and** is in `SUPPORTED_SCHEMA_VERSIONS` — which is what actually keeps a preserved checkpoint's manifest valid across an additive migration |
+
+Each was reproduced locally before repair: the wheel was built and the
+contents check re-run (20 migrations, last `f020_…`), and the installed-package
+assertions and `db-init` output (`Schema version: 20`) were verified. The YAML
+parses and all seven inlined Python heredocs are syntactically valid.
+
+These four were genuine failures introduced by this task. The repairs make the
+workflow assert the *invariant* (every migration ships; the declared version and
+the packaged sequence agree) rather than a number that moves with every additive
+migration.
+
 ## 12. Non-regression
 
 **Provider authority** — asserted by test: `the_odds_api:basketball_nba` is

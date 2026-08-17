@@ -73,13 +73,23 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip wheel . --no-deps --wheel-dir "$RUNNER_TEMP/wheelhouse"
           echo "Wheel contents:"
-          python - "$RUNNER_TEMP/wheelhouse" <<'PY'
-          import glob, sys, zipfile
+          WORKSPACE="$GITHUB_WORKSPACE" python - "$RUNNER_TEMP/wheelhouse" <<'PY'
+          import glob, os, sys, zipfile
           whl = glob.glob(f"{sys.argv[1]}/sports_quant-*.whl")[0]
           names = zipfile.ZipFile(whl).namelist()
           migs = sorted(n.split("/")[-1] for n in names if "/db/migrations/" in n and n.endswith(".sql"))
           assert "sports_quant/matching/sportsbook.py" in names, "matching package missing"
-          assert len(migs) == 19 and migs[0] == "a001_core_entities.sql" and migs[-1] == "f019_retrospective_provenance_repairs.sql", migs
+          # Compare against the SOURCE TREE rather than a hard-coded count. This
+          # catches a migration that failed to package no matter how many exist,
+          # and it does not need editing every time one is added -- a pinned
+          # literal here only ever reports "the number changed", which is not the
+          # thing we care about.
+          src = sorted(os.path.basename(p) for p in glob.glob(
+              os.path.join(os.environ["WORKSPACE"], "sports_quant", "db", "migrations", "*.sql")))
+          assert src, "no migrations found in the source tree"
+          assert migs == src, {"missing_from_wheel": sorted(set(src) - set(migs)),
+                               "extra_in_wheel": sorted(set(migs) - set(src))}
+          assert migs[0] == "a001_core_entities.sql", migs[0]
           assert {"e017_provider_identity.sql", "f018_retrospective_provenance.sql"} <= set(migs), migs
           assert not any("/tests/" in n for n in names), "tests packaged"
           assert not any(n.lower().endswith((".env", ".db")) for n in names), "secret/db packaged"
@@ -107,14 +117,21 @@ jobs:
               f = os.path.abspath(m.__file__)
               assert "site-packages" in f and not f.startswith(repo), f"{m.__name__} not from wheel: {f}"
           from sports_quant.db.engine import discover_migrations
+          from sports_quant.db.schema import CURRENT_SCHEMA_VERSION
           migs = discover_migrations()
-          assert len(migs) == 19 and migs[-1].name == "f019_retrospective_provenance_repairs", (len(migs), migs[-1].name)
-          print("imports + migrations resolve from the installed wheel")
+          # The declared version and the packaged sequence must agree, and the
+          # sequence must be contiguous from 1. That is the real invariant; a
+          # pinned count would only tell us a migration was added.
+          assert len(migs) == CURRENT_SCHEMA_VERSION, (len(migs), CURRENT_SCHEMA_VERSION)
+          assert [m.version for m in migs] == list(range(1, CURRENT_SCHEMA_VERSION + 1))
+          print("imports + migrations resolve from the installed wheel:",
+                len(migs), "migrations, last is", migs[-1].name)
           PY
           "$RUNNER_TEMP/smokeenv/bin/sports-quant" --help >/dev/null
           "$PY" -m sports_quant db-init --db "$RUNNER_TEMP/smoke.db" | tee /tmp/init1.txt
           "$PY" -m sports_quant db-init --db "$RUNNER_TEMP/smoke.db" | tee /tmp/init2.txt
-          grep -q "Schema version: 19" /tmp/init1.txt
+          EXPECTED_VERSION="$("$PY" -c 'from sports_quant.db.schema import CURRENT_SCHEMA_VERSION as v; print(v)')"
+          grep -q "Schema version: $EXPECTED_VERSION" /tmp/init1.txt
           grep -q "nothing was changed" /tmp/init2.txt
 
       - name: TEAM-A attestation invariants (RV1/RV3/RV5, offline, synthetic only)
@@ -446,8 +463,14 @@ jobs:
           httpx.HTTPTransport.handle_request = _boom
           httpx.AsyncHTTPTransport.handle_async_request = _boom
 
-          from sports_quant.db.schema import CURRENT_SCHEMA_VERSION
-          assert CURRENT_SCHEMA_VERSION == 19, CURRENT_SCHEMA_VERSION
+          from sports_quant.db.engine import discover_migrations
+          from sports_quant.db.schema import CURRENT_SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS
+          # The declared version must be real and must be one the tooling accepts
+          # on an existing database -- which is what keeps a preserved checkpoint's
+          # recorded manifest valid across an additive migration. A pinned literal
+          # would instead fail every time a purely additive migration lands.
+          assert CURRENT_SCHEMA_VERSION == len(discover_migrations()), CURRENT_SCHEMA_VERSION
+          assert CURRENT_SCHEMA_VERSION in SUPPORTED_SCHEMA_VERSIONS, CURRENT_SCHEMA_VERSION
 
           from sports_quant.ingest.checkpoint import (
               CHECKPOINT_FORMAT_VERSION, LEGACY_CHECKPOINT_FORMAT_VERSION,
