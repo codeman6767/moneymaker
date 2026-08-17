@@ -48,7 +48,20 @@ jobs:
         run: python -m mypy .
 
       - name: pytest
-        run: python -m pytest -q
+        # `-rf` prints a short summary of failures, and the JUnit XML is uploaded
+        # below so a failure is diagnosable from the run without needing log
+        # download permissions. `always()` on the upload matters: the artifact is
+        # only interesting when the step failed.
+        run: python -m pytest -q -rf --junitxml=pytest-results.xml
+
+      - name: Upload pytest results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-results
+          path: pytest-results.xml
+          if-no-files-found: warn
+          retention-days: 7
 
   wheel-smoke:
     name: Non-editable wheel install smoke (Python 3.11)
