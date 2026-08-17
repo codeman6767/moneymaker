@@ -1,5 +1,35 @@
 # NBA Historical Odds-API Event ↔ Canonical Game Identity — Architecture
 
+> ## ⚠ SUPERSEDED IN PART — read the independent review first
+>
+> `NBA_HISTORICAL_EVENT_CANONICAL_IDENTITY_ARCHITECTURE_INDEPENDENT_REVIEW.md`
+> (2026-08-16) is **authoritative wherever it disagrees with this document**. It
+> upheld all three verdicts below and the central judgements, and found four
+> defects in the details:
+>
+> - **Specification #4 (§9) is impossible as written and is STRUCK.**
+>   `reconstruction_corpus_versions.static_identity_map_digest` is definitionally
+>   the TEAM map digest — composing a second map into it fails TEAM-A closed;
+>   storing the team-only value leaves the event map unbound. Binding must happen
+>   at **row** level via `record_static_crosswalk(attestation_map_digest=...)`,
+>   with `provenance_policy_version` naming the map. Proven by test.
+> - **The `S_final` conditions are insufficient.** Condition 5 verifies pregame
+>   *availability*, not pregame *identifiability*, so `S_final` can still break a
+>   tie no contemporaneous observer could have broken. Repairs S6–S9 add
+>   monotone (reject-only) use, a deterministic procedure, a mandatory
+>   counterfactual re-derivation test, and a separate counter.
+> - **The proposed v20 uniqueness key destroys evidence.** It must include an
+>   `observation_content_hash`, and the table additionally needs `league_id` and
+>   the requested bucket. See the review §8a and §14.
+> - **The completeness contract has a hiding channel.** One reconciliation cannot
+>   distinguish "no market" from "request failed". Three separate
+>   reconciliations are required — acquisition, identity, F1-R eligibility.
+>
+> Also corrected: the `ATTESTED_GENERATIONS` "hard stop" in §9 is a **code-only**
+> guard — direct SQL can forge an accepted secondary-provider audit — and v19
+> places **no format contract on `provider_id`**, so case-flipped and
+> Unicode-lookalike event ids coexist as distinct keys.
+
 **Verdicts.** Three separate questions, three separate answers:
 
 > ### ARCHITECTURE ACCEPTED — SCHEMA CHANGE REQUIRED BEFORE IMPLEMENTATION
