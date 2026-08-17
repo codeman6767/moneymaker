@@ -63,6 +63,38 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+      - name: Annotate pytest failures
+        if: always()
+        # Turns each failure into a GitHub ANNOTATION. Artifacts and job logs
+        # both require authentication to download, but annotations are readable
+        # from the run itself -- so a failure names the test and its assertion
+        # rather than only an exit code. Never changes the job result.
+        run: |
+          python - <<'PY'
+          import pathlib, xml.etree.ElementTree as ET
+          path = pathlib.Path("pytest-results.xml")
+          if not path.exists():
+              print("no pytest-results.xml"); raise SystemExit(0)
+          root = ET.parse(path).getroot()
+          suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+          shown = 0
+          for suite in suites:
+              for case in suite:
+                  for kind in ("failure", "error"):
+                      node = case.find(kind)
+                      if node is None:
+                          continue
+                      shown += 1
+                      if shown > 20:
+                          continue
+                      name = f"{case.get('classname')}::{case.get('name')}"
+                      detail = " ".join(
+                          ((node.get("message") or "") + " " + (node.text or ""))
+                          .split())[:700]
+                      print(f"::error title={kind}: {name}::{detail}")
+          print(f"total failures/errors: {shown}")
+          PY
+
   wheel-smoke:
     name: Non-editable wheel install smoke (Python 3.11)
     runs-on: ubuntu-latest
