@@ -25,7 +25,7 @@ Treated as a set of hypotheses, not as authority.
 | # | Defect | Severity | Status |
 |---|---|---|---|
 | D1 | `REPLACE` silently mutated append-only rows | **High** | repaired (f021) |
-| D2 | A BLOB bypassed the exact event-id format contract | **High** | repaired (f021) |
+| D2 | A BLOB bypassed the event-id format contract (build-dependent) | **High** | repaired (f021) |
 | D3 | A forged `observation_content_hash` was stored and digest-bound | Medium | repaired (verifier) |
 | D4 | `audited_source_tables` defaulted instead of refusing | Medium | repaired (fail-closed) |
 | L1 | An observation may cite an unrelated valid response | — | **retained**, documented |
@@ -129,9 +129,29 @@ stored with `typeof = 'blob'`.
 ### Cause
 
 f020's CHECK is `GLOB '<32 hex classes>' AND length(...) = 32`. Measured against
-that blob: **`GLOB` returns 1, `length()` returns 32, `typeof()` returns
-`'blob'`.** SQLite coerces for GLOB comparison, counts blob bytes for `length()`,
-and **exempts BLOBs from TEXT-affinity conversion**, so the value stays a blob.
+that blob on SQLite 3.50.4: **`GLOB` returns 1, `length()` returns 32, `typeof()`
+returns `'blob'`.** SQLite counts blob bytes for `length()` and **exempts BLOBs
+from TEXT-affinity conversion**, so the value stays a blob.
+
+### The defect is worse than it first looked: it is build-dependent
+
+An early version of this review's illustrative test asserted `GLOB` matches a
+blob. **CI failed it** — on the older SQLite that Ubuntu's Python 3.11 links,
+`blob GLOB '<hex classes>'` returns **0**, so f020's CHECK *would* have rejected
+the blob there. Locally (3.50.4) it returns 1 and the insert succeeded.
+
+That divergence is not a reason to downgrade D2 — it is the strongest argument
+for the repair. A schema whose acceptance of a row depends on which SQLite the
+process happened to link against is worse than one that is uniformly wrong: the
+same corpus is then valid on one machine and invalid on another, and a corpus
+built on a developer box could carry rows that CI would have refused. `length()`
+and `typeof()` are invariant across builds; `GLOB`-on-a-blob is not.
+
+The test now asserts only the build-independent facts, and the finding is
+recorded here rather than smoothed over. It also says something about the
+original v20 test suite: had it exercised a BLOB, the result would have differed
+between the developer machine and CI, which is exactly the kind of latent
+inconsistency that only shows up once someone attacks a storage class.
 
 This matters beyond tidiness. The reviewed contract is exact lowercase ASCII hex
 stored byte-for-byte, and the resolver's guarantee is exact key equality. A blob

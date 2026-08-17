@@ -262,19 +262,28 @@ def test_a_blob_event_id_is_refused(db: sqlite3.Connection) -> None:
         raw_insert(db, provider_event_id=EVENT_A.encode())
 
 
-def test_the_f020_check_alone_would_have_admitted_the_blob(
+def test_the_f020_check_alone_is_not_a_reliable_type_guard(
     db: sqlite3.Connection,
 ) -> None:
-    """Shows precisely why typeof() was required: GLOB and length() both pass."""
+    """Why `typeof()` was required, stated version-independently.
 
-    row = db.execute(
-        "SELECT ? GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]"
-        "[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]"
-        "[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]"
-        "[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]"
-        "[0-9a-f][0-9a-f]' AS globs, length(?) AS len, typeof(?) AS t",
-        (EVENT_A.encode(), EVENT_A.encode(), EVENT_A.encode())).fetchone()
-    assert row["globs"] == 1 and row["len"] == 32 and row["t"] == "blob"
+    f020's CHECK was `GLOB '<32 hex classes>' AND length(...) = 32`. For a BLOB,
+    `length()` returns the byte count (32) and SQLite exempts BLOBs from
+    TEXT-affinity conversion, so the value stays a blob -- both facts are stable
+    across builds and both are asserted here.
+
+    Whether `GLOB` *also* matches a blob is **build-dependent**: it returns 1 on
+    SQLite 3.50 (where the bypass was reproduced) and 0 on the older build CI
+    runs. That divergence is itself the argument for `typeof()`. A schema whose
+    acceptance of a row depends on which SQLite the process linked against is
+    worse than one that is uniformly wrong, because the same corpus is then
+    valid on one machine and invalid on another. `typeof()` is invariant.
+    """
+
+    row = db.execute("SELECT length(?) AS len, typeof(?) AS t",
+                     (EVENT_A.encode(), EVENT_A.encode())).fetchone()
+    assert row["len"] == 32          # the length half of the CHECK passes
+    assert row["t"] == "blob"        # and it is emphatically not TEXT
 
 
 @pytest.mark.parametrize("column", [
