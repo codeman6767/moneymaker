@@ -1,5 +1,33 @@
 # v20 — Historical Market Event Observations: Schema + Repository
 
+> ## ⚠ SUPERSEDED IN PART — read the independent review
+>
+> `V20_HISTORICAL_MARKET_EVENT_OBSERVATIONS_INDEPENDENT_REVIEW.md` (2026-08-17)
+> is **authoritative wherever it disagrees with this document**. Verdict:
+> **ACCEPTED WITH REPAIRS**. It upheld the digest-compatibility argument, the
+> content hash and `observed_at` exclusion, the deterministic id, and the
+> strict-PIT classification — and reproduced **four defects**, repaired in
+> migration **f021** (schema is now **v21 / 21 migrations / 53 tables**):
+>
+> - **D1** `REPLACE INTO` / `INSERT OR REPLACE` silently mutated append-only
+>   rows. §8 of this document overstates the guarantee: f020 guarded only
+>   `BEFORE UPDATE`/`BEFORE DELETE`, and SQLite REPLACE deletes without firing
+>   DELETE triggers. **32 of 33 append-only tables share this; 5 are repaired,
+>   28 remain as a documented pre-existing defect.**
+> - **D2** A BLOB bypassed the event-id format CHECK (`GLOB` matches and
+>   `length()` = 32 for a blob). §6's claim of two-layer enforcement held only
+>   for TEXT. `typeof()` now required.
+> - **D3** A forged `observation_content_hash` was stored and digest-bound;
+>   nothing recomputed. A `verify_observation_content_hashes` verifier now must
+>   pass before a corpus is digested, audited or curated.
+> - **D4** `audited_source_tables` returned the linking set for any unknown
+>   provider. Now fails closed against an empty `REGISTERED_LINKING_PROVIDERS`.
+>
+> Also recorded there: **L1**, an observation may still cite an unrelated valid
+> same-provider 200 response (Stage-A parser must close it), and a **structural
+> finding** that one corpus version cannot bind both an official and a linking
+> audit.
+
 **Starting HEAD:** `34a85a5` (`origin/main` = `34a85a5`, tree clean, schema v19 /
 19 migrations). **Provider requests:** 0. **Credits spent:** 0.
 

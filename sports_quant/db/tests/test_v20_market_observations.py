@@ -90,12 +90,11 @@ def repo(conn: sqlite3.Connection) -> SqliteMarketObservationRepository:
 # --------------------------------------------------------------------------- #
 # Migration
 # --------------------------------------------------------------------------- #
-def test_fresh_init_reaches_v20_with_twenty_migrations(tmp_path: Path) -> None:
+def test_fresh_init_reaches_the_current_version(tmp_path: Path) -> None:
     result = Database(tmp_path / "fresh.db").migrate()
-    assert len(result.applied) == 20
-    assert result.schema_version == 20
-    assert CURRENT_SCHEMA_VERSION == 20
-    assert len(discover_migrations()) == 20
+    assert len(result.applied) == CURRENT_SCHEMA_VERSION
+    assert result.schema_version == CURRENT_SCHEMA_VERSION
+    assert len(discover_migrations()) == CURRENT_SCHEMA_VERSION
 
 
 def test_migration_is_idempotent_on_replay(tmp_path: Path) -> None:
@@ -103,10 +102,10 @@ def test_migration_is_idempotent_on_replay(tmp_path: Path) -> None:
     first = Database(path).migrate()
     second = Database(path).migrate()
     assert second.applied == ()
-    assert second.schema_version == first.schema_version == 20
+    assert second.schema_version == first.schema_version == CURRENT_SCHEMA_VERSION
 
 
-@pytest.mark.parametrize("stop_after", [17, 18, 19])
+@pytest.mark.parametrize("stop_after", [17, 18, 19, 20])
 def test_upgrade_from_an_older_version_preserves_data(
     tmp_path: Path, stop_after: int,
 ) -> None:
@@ -132,9 +131,9 @@ def test_upgrade_from_an_older_version_preserves_data(
     conn.close()
 
     result = Database(path).migrate()
-    assert result.schema_version == 20
+    assert result.schema_version == CURRENT_SCHEMA_VERSION
     assert [m.version for m in result.applied] == list(
-        range(stop_after + 1, 21))
+        range(stop_after + 1, CURRENT_SCHEMA_VERSION + 1))
 
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row

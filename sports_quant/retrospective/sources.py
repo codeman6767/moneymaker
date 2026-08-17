@@ -51,6 +51,7 @@ from .provenance import EntityType, RetrospectiveProvenanceError
 __all__ = [
     "AUDITED_SOURCE_TABLES",
     "LINKING_SOURCE_TABLES",
+    "REGISTERED_LINKING_PROVIDERS",
     "audited_source_tables",
     "digest_columns_for",
     "PROVIDER_LEAGUES",
@@ -159,23 +160,40 @@ _LINKING_DIGEST_COLUMNS: Final[dict[str, tuple[str, ...]]] = {
 LINKING_SOURCE_TABLES: Final[tuple[str, ...]] = tuple(sorted(_LINKING_DIGEST_COLUMNS))
 
 
+#: Linking (secondary, identity-linking) providers whose evidence digests over
+#: `LINKING_SOURCE_TABLES`. **Deliberately empty at v20.** Registering one is the
+#: reviewed decision the identity task must make; until then no provider resolves
+#: to the linking set, and `audited_source_tables` refuses anything it does not
+#: recognize rather than defaulting.
+REGISTERED_LINKING_PROVIDERS: Final[frozenset[str]] = frozenset()
+
+
 def audited_source_tables(provider: str) -> tuple[str, ...]:
-    """Which tables the source digest covers for one provider.
+    """Which tables the source digest covers for one provider. Fails CLOSED.
 
     An official provider keeps exactly the three-table set it was always
     digested under, so every existing corpus digest stays byte-identical under
-    v20. A linking provider digests over its own evidence instead.
+    v20. A *registered* linking provider digests over its own evidence instead.
 
-    No linking provider is registered at v20, so the linking branch is currently
-    unreachable through `source_corpus_digest`, which still refuses any provider
-    absent from `PROVIDER_LEAGUES`. The mechanism exists so that registering one
-    later is a reviewed one-line change rather than a silent global digest
-    change; it authorizes nothing by itself.
+    An unrecognized provider is **refused**, not silently classified. The
+    original v20 form returned the linking set for anything absent from
+    `PROVIDER_LEAGUES`, so ``"banana"``, ``""``, ``"BALLDONTLIE"`` and
+    ``" balldontlie"`` all resolved to a real table set. That is the same
+    fail-OPEN shape G5 repair R4 closed in `ATTESTED_GENERATIONS`, where a typo
+    produced a *verified* namespace: a defaulting classifier turns a typo into a
+    silently different -- and silently smaller -- audited subset.
     """
 
     if provider in PROVIDER_LEAGUES:
         return AUDITED_SOURCE_TABLES
-    return LINKING_SOURCE_TABLES
+    if provider in REGISTERED_LINKING_PROVIDERS:
+        return LINKING_SOURCE_TABLES
+    raise SourceCorpusError(
+        f"provider {provider!r} is in neither PROVIDER_LEAGUES nor "
+        "REGISTERED_LINKING_PROVIDERS, so the audited source set for it is "
+        "undeclared. Refusing rather than defaulting to a set that would "
+        "silently digest the wrong evidence."
+    )
 
 
 def digest_columns_for(table: str) -> tuple[str, ...]:

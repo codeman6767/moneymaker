@@ -43,6 +43,7 @@ EXPECTED_MIGRATIONS = (
     (18, "f018_retrospective_provenance"),
     (19, "f019_retrospective_provenance_repairs"),
     (20, "f020_historical_market_event_observations"),
+    (21, "f021_append_only_replace_and_event_id_type"),
 )
 
 

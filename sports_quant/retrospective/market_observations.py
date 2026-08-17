@@ -32,7 +32,10 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
-from typing import Final, Optional
+from typing import TYPE_CHECKING, Final, Optional
+
+if TYPE_CHECKING:  # pragma: no cover
+    import sqlite3
 
 from streaming.event_envelope import canonical_json
 
@@ -40,6 +43,8 @@ from ..db.ids import HISTORICAL_MARKET_EVENT_PREFIX
 
 __all__ = [
     "EVENT_ID_PATTERN",
+    "ObservationHashMismatch",
+    "verify_observation_content_hashes",
     "OBSERVATION_CONTENT_POLICY_VERSION",
     "MarketEventObservation",
     "ObservationValidationError",
@@ -213,3 +218,85 @@ def observation_id(observation: MarketEventObservation) -> str:
                     observation_content_hash(observation)))
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:24]
     return f"{HISTORICAL_MARKET_EVENT_PREFIX}{digest}"
+
+
+# --------------------------------------------------------------------------- #
+# Verification (independent-review repair D3)
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class ObservationHashMismatch:
+    """One stored row whose content hash does not match its own columns."""
+
+    observation_id: str
+    stored_content_hash: str
+    recomputed_content_hash: str
+    recomputed_observation_id: str
+
+
+def verify_observation_content_hashes(
+    conn: "sqlite3.Connection",
+) -> list[ObservationHashMismatch]:
+    """Recompute every stored observation's hash and id from its own columns.
+
+    Why this exists
+    ---------------
+    ``observation_content_hash`` and ``observation_id`` are written by the
+    caller. Nothing in the database recomputes them, and
+    ``source_corpus_digest`` folds the **stored** hash column rather than a
+    derivation -- so a row inserted by direct SQL with a fabricated hash is
+    digest-bound exactly as if it were genuine, and the repository hands it back
+    unchallenged.
+
+    That is a real gap between "a row exists" and "a row is audit-grade". This
+    verifier closes it deterministically and offline: it re-derives both values
+    from the row's own semantic columns and reports every disagreement. It must
+    pass before an observation corpus is digested, audited or curated.
+
+    Returns an empty list when every row verifies. Never mutates anything.
+    """
+
+    columns = ("observation_id", "league_id", "provider", "namespace_generation",
+               "sport_key", "provider_event_id", "requested_at_bucket",
+               "provider_snapshot_timestamp", "commence_time", "home_team_raw",
+               "away_team_raw", "observation_content_hash")
+    rows = conn.execute(
+        f"SELECT {', '.join(columns)} FROM historical_market_event_observations "  # noqa: S608
+        "ORDER BY observation_id"
+    ).fetchall()
+
+    mismatches: list[ObservationHashMismatch] = []
+    for row in rows:
+        record = (dict(row) if hasattr(row, "keys")
+                  else dict(zip(columns, row, strict=True)))
+        try:
+            rebuilt = MarketEventObservation(
+                league_id=record["league_id"],
+                provider=record["provider"],
+                namespace_generation=record["namespace_generation"],
+                sport_key=record["sport_key"],
+                provider_event_id=record["provider_event_id"],
+                requested_at_bucket=record["requested_at_bucket"],
+                provider_snapshot_timestamp=record["provider_snapshot_timestamp"],
+                commence_time=record["commence_time"],
+                home_team_raw=record["home_team_raw"],
+                away_team_raw=record["away_team_raw"],
+            )
+        except ObservationValidationError:
+            # A row the domain type refuses cannot have a valid hash either.
+            mismatches.append(ObservationHashMismatch(
+                observation_id=str(record["observation_id"]),
+                stored_content_hash=str(record["observation_content_hash"]),
+                recomputed_content_hash="<unrepresentable>",
+                recomputed_observation_id="<unrepresentable>"))
+            continue
+
+        recomputed = observation_content_hash(rebuilt)
+        rebuilt_id = observation_id(rebuilt)
+        if (recomputed != record["observation_content_hash"]
+                or rebuilt_id != record["observation_id"]):
+            mismatches.append(ObservationHashMismatch(
+                observation_id=str(record["observation_id"]),
+                stored_content_hash=str(record["observation_content_hash"]),
+                recomputed_content_hash=recomputed,
+                recomputed_observation_id=rebuilt_id))
+    return mismatches
