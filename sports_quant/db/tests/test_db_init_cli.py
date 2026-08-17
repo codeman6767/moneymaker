@@ -12,6 +12,7 @@ import pytest
 
 from sports_quant.cli import EXIT_DATABASE_ERROR, main, run_db_init
 from sports_quant.config import PRODUCTION_KALSHI_REST_URL, Settings
+from sports_quant.db.schema import CURRENT_SCHEMA_VERSION
 
 API_KEY = "db-init-test-key-do-not-log"
 
@@ -58,7 +59,8 @@ def test_first_run_creates_migrates_and_seeds(db_path: Path) -> None:
     assert "applied migration 017 e017_provider_identity" in output
     assert "applied migration 018 f018_retrospective_provenance" in output
     assert "applied migration 019 f019_retrospective_provenance_repairs" in output
-    assert "Schema version: 19" in output
+    assert ("applied migration 020 f020_historical_market_event_observations" in output)
+    assert f"Schema version: {CURRENT_SCHEMA_VERSION}" in output
     assert "MLB: 30 teams (30 new)" in output
     assert "NBA: 30 teams (30 new)" in output
 

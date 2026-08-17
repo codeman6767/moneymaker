@@ -160,6 +160,14 @@ _ENTRIES: tuple[TableEntry, ...] = (
                  "strict-forward feature: it records what a corpus-scoped G5 audit observed, at "
                  "audit wall-clock, with no availability semantics of its own. Joining it into a "
                  "Lane-L dataset row would import a conclusion reached long after the cutoff."),
+    _unsupported("historical_market_event_observations",
+                 "Lane-R (f020) historical market EVENT observations. Retrospectively acquired "
+                 "secondary-provider evidence that a market existed for an event at a provider "
+                 "snapshot instant: E0 identity/availability evidence, never a predictor, and "
+                 "never a price. Reaching it from a strict-forward dataset row would import a "
+                 "snapshot fetched long after that row's cutoff, which is precisely the lane "
+                 "crossing f018 exists to prevent. It also carries no canonical game id, so it "
+                 "cannot be joined to a dataset row even by accident."),
     _unsupported("identity_audit_records",
                  "Lane-R (f018) identity-audit results, for the same reason as the findings table. "
                  "An accepted audit clears a namespace for RECONSTRUCTION use; it says nothing "

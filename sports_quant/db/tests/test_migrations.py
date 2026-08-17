@@ -14,6 +14,7 @@ from sports_quant.db.engine import (
     discover_migrations,
 )
 from sports_quant.db.schema import (
+    CURRENT_SCHEMA_VERSION,
     PHASE_A_TABLES,
     PHASE_B_TABLES,
     PHASE_C_TABLES,
@@ -41,6 +42,7 @@ EXPECTED_MIGRATIONS = (
     (17, "e017_provider_identity"),
     (18, "f018_retrospective_provenance"),
     (19, "f019_retrospective_provenance_repairs"),
+    (20, "f020_historical_market_event_observations"),
 )
 
 
@@ -290,7 +292,7 @@ def test_migration_003_rebuild_preserves_existing_history_rows(tmp_path: Path) -
     # Now apply the rest: 003 (and b004, which both rebuild game_status_history).
     result = database.migrate()
     assert [m.version for m in result.applied] == [
-        3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+        *range(3, CURRENT_SCHEMA_VERSION + 1)]
 
     with database.connection() as conn:
         rows = conn.execute(
@@ -400,7 +402,7 @@ def test_migration_b006_rebuild_preserves_every_price_snapshot(tmp_path: Path) -
     # adds the Kalshi tables and touches nothing here).
     result = database.migrate()
     assert [m.version for m in result.applied] == [
-        6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+        *range(6, CURRENT_SCHEMA_VERSION + 1)]
 
     with database.connection() as conn:
         after = conn.execute(

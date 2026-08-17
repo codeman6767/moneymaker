@@ -1028,4 +1028,4 @@ def test_schema_version_is_current(output_db: Path) -> None:
     with Database(output_db).connection() as conn:
         version = conn.execute(
             "SELECT MAX(version) FROM schema_versions").fetchone()[0]
-    assert int(version) == CURRENT_SCHEMA_VERSION == 19
+    assert int(version) == CURRENT_SCHEMA_VERSION

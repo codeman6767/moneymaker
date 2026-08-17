@@ -109,7 +109,7 @@ def test_no_v18_table_became_asof_or_immutable() -> None:
 
 def test_schema_is_at_the_current_version(db_path: Path) -> None:
     result = initialize_database(db_path)
-    assert result.schema_version == CURRENT_SCHEMA_VERSION == 19
+    assert result.schema_version == CURRENT_SCHEMA_VERSION
 
 
 # --------------------------------------------------------------------------- #

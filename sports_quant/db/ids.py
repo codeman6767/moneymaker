@@ -67,6 +67,10 @@ PROVIDER_GAME_REF_PREFIX: Final = "pgr_"
 VENUE_PREFIX: Final = "ven_"
 VENUE_ALIAS_PREFIX: Final = "val_"
 MATCH_DECISION_PREFIX: Final = "mtc_"
+
+# Phase F (f020): historical market EVENT observations. Secondary-provider
+# evidence only -- this prefix names no canonical entity and grants no authority.
+HISTORICAL_MARKET_EVENT_PREFIX: Final = "hme_"
 MATCH_CANDIDATE_PREFIX: Final = "mcn_"
 DATA_QUALITY_PREFIX: Final = "dqi_"
 PROVIDER_CAPABILITY_PREFIX: Final = "cap_"

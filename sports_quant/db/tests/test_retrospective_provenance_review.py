@@ -722,12 +722,16 @@ def test_every_enum_value_appears_in_its_sql_check(
 def test_v19_schema_version_and_migration_count(conn: sqlite3.Connection) -> None:
     from sports_quant.db.schema import CURRENT_SCHEMA_VERSION
 
-    assert CURRENT_SCHEMA_VERSION == 19
+    assert CURRENT_SCHEMA_VERSION == 20
     rows = conn.execute(
         "SELECT version, name FROM schema_versions ORDER BY version").fetchall()
-    assert [int(r["version"]) for r in rows] == list(range(1, 20))
-    assert rows[-1]["name"] == "f019_retrospective_provenance_repairs"
-    assert rows[-2]["name"] == "f018_retrospective_provenance"
+    assert [int(r["version"]) for r in rows] == list(
+        range(1, CURRENT_SCHEMA_VERSION + 1))
+    # f018/f019 keep their applied positions: later migrations append, never
+    # renumber or rewrite what was already applied.
+    by_version = {int(r["version"]): r["name"] for r in rows}
+    assert by_version[18] == "f018_retrospective_provenance"
+    assert by_version[19] == "f019_retrospective_provenance_repairs"
 
 
 def test_f018_is_preserved_byte_for_byte() -> None:

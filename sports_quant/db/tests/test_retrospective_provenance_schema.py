@@ -62,7 +62,7 @@ def _upto(path: Path, version: int) -> None:
 # --------------------------------------------------------------------------- #
 def test_fresh_database_initializes_at_the_current_version(db_path: Path) -> None:
     result = initialize_database(db_path)
-    assert result.schema_version == CURRENT_SCHEMA_VERSION == 19
+    assert result.schema_version == CURRENT_SCHEMA_VERSION
     assert result.migrations_applied == CURRENT_SCHEMA_VERSION
 
 
@@ -126,8 +126,13 @@ def test_v17_forward_migration_is_idempotent(tmp_path: Path) -> None:
     assert second.schema_version == CURRENT_SCHEMA_VERSION
 
 
-def test_v18_database_migrates_to_v19(tmp_path: Path) -> None:
-    """The review's repair path: an existing v18 corpus upgrades in one step."""
+def test_v18_database_migrates_to_the_current_version(tmp_path: Path) -> None:
+    """The review's repair path: an existing v18 corpus upgrades cleanly.
+
+    Originally a one-step v18 -> v19 upgrade. Under v20 software it applies the
+    remaining migrations in one call; what the test guards is unchanged -- the
+    older corpus survives with its rows, integrity and foreign keys intact.
+    """
 
     path = tmp_path / "v18.db"
     _upto(path, 18)
@@ -135,8 +140,8 @@ def test_v18_database_migrates_to_v19(tmp_path: Path) -> None:
         assert Database(path).schema_version(conn) == 18
         before = conn.execute("SELECT COUNT(*) FROM teams").fetchone()[0]
     result = initialize_database(path)
-    assert result.migrations_applied == 1
-    assert result.schema_version == 19
+    assert result.migrations_applied == CURRENT_SCHEMA_VERSION - 18
+    assert result.schema_version == CURRENT_SCHEMA_VERSION
     with Database(path).connection() as conn:
         assert conn.execute("SELECT COUNT(*) FROM teams").fetchone()[0] == before
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"

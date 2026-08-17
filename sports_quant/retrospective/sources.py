@@ -50,6 +50,9 @@ from .provenance import EntityType, RetrospectiveProvenanceError
 
 __all__ = [
     "AUDITED_SOURCE_TABLES",
+    "LINKING_SOURCE_TABLES",
+    "audited_source_tables",
+    "digest_columns_for",
     "PROVIDER_LEAGUES",
     "GameObservation",
     "PlayerObservation",
@@ -123,7 +126,64 @@ _DIGEST_COLUMNS: Final[dict[str, tuple[str, ...]]] = {
     ),
 }
 
+#: The audited set for an OFFICIAL provider. This is the historical meaning of
+#: `AUDITED_SOURCE_TABLES` and it is deliberately unchanged by f020.
 AUDITED_SOURCE_TABLES: Final[tuple[str, ...]] = tuple(sorted(_DIGEST_COLUMNS))
+
+#: Columns a LINKING (secondary, identity-linking) provider's evidence digests
+#: over. Kept in a separate mapping from `_DIGEST_COLUMNS` for one measured
+#: reason: `source_corpus_digest` folds ONE ENTRY PER AUDITED TABLE into its
+#: payload, so adding a fourth table to the global set changes the recomputed
+#: digest of a corpus holding ZERO market rows. That was reproduced, not
+#: assumed, and it would invalidate every accepted audit and crosswalk binding
+#: built under v19 -- rows that are append-only historical facts.
+#:
+#: Selecting the set by provider class is not a new concept bolted on; it makes
+#: an existing partition explicit. `source_corpus_digest` already refuses any
+#: provider absent from `PROVIDER_LEAGUES`, and every audited query already
+#: filters `WHERE provider = ?`, so an official-provider digest could never have
+#: contained a linking provider's rows anyway.
+_LINKING_DIGEST_COLUMNS: Final[dict[str, tuple[str, ...]]] = {
+    "historical_market_event_observations": (
+        "league_id", "provider", "namespace_generation", "sport_key",
+        "provider_event_id", "requested_at_bucket", "provider_snapshot_timestamp",
+        "commence_time", "home_team_raw", "away_team_raw",
+        # The PORTABLE identity. `raw_response_id` is database-local and is
+        # deliberately absent: digesting it would make a transported corpus hash
+        # differently from the one it was copied from.
+        "observation_content_hash",
+    ),
+}
+
+#: The audited set for a linking provider.
+LINKING_SOURCE_TABLES: Final[tuple[str, ...]] = tuple(sorted(_LINKING_DIGEST_COLUMNS))
+
+
+def audited_source_tables(provider: str) -> tuple[str, ...]:
+    """Which tables the source digest covers for one provider.
+
+    An official provider keeps exactly the three-table set it was always
+    digested under, so every existing corpus digest stays byte-identical under
+    v20. A linking provider digests over its own evidence instead.
+
+    No linking provider is registered at v20, so the linking branch is currently
+    unreachable through `source_corpus_digest`, which still refuses any provider
+    absent from `PROVIDER_LEAGUES`. The mechanism exists so that registering one
+    later is a reviewed one-line change rather than a silent global digest
+    change; it authorizes nothing by itself.
+    """
+
+    if provider in PROVIDER_LEAGUES:
+        return AUDITED_SOURCE_TABLES
+    return LINKING_SOURCE_TABLES
+
+
+def digest_columns_for(table: str) -> tuple[str, ...]:
+    """The digest columns for one audited table, official or linking."""
+
+    if table in _DIGEST_COLUMNS:
+        return _DIGEST_COLUMNS[table]
+    return _LINKING_DIGEST_COLUMNS[table]
 
 
 def open_source_corpus(path: Path | str) -> sqlite3.Connection:
@@ -367,8 +427,8 @@ def source_corpus_digest(
         "league_id": league_id,
         "provider": provider,
     }
-    for table in AUDITED_SOURCE_TABLES:
-        columns = _DIGEST_COLUMNS[table]
+    for table in audited_source_tables(provider):
+        columns = digest_columns_for(table)
         # `league_id` is not a column of game_schedule_snapshots; that table is
         # already scoped by provider, and the league is bound in the payload.
         where = "WHERE provider = ?"
