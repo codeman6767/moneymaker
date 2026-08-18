@@ -650,9 +650,10 @@ def test_the_composite_gate_scans_every_historical_response(
     put_raw(db, "raw_2", body=body([event(EV_B)]))       # nothing materialized
     store(db, expected_observation(EV_A), rid="raw_1")
 
-    reports = verify_historical_market_event_evidence(db)
-    assert len(reports) == 2
-    by_id = {r.raw_response_id: r for r in reports}
+    result = verify_historical_market_event_evidence(db)
+    assert len(result.reports) == 2
+    assert not result.verified
+    by_id = {r.raw_response_id: r for r in result.reports}
     assert by_id["raw_1"].verified
     # raw_2's event was never materialized: the gate must NOT let it hide.
     assert not by_id["raw_2"].verified
@@ -663,7 +664,9 @@ def test_the_composite_gate_ignores_non_historical_responses(
     db: sqlite3.Connection,
 ) -> None:
     put_raw(db, "raw_odds", endpoint="/v4/sports/basketball_nba/odds")
-    assert verify_historical_market_event_evidence(db) == []
+    result = verify_historical_market_event_evidence(db)
+    assert result.reports == ()
+    assert result.verified          # nothing to check, and nothing orphaned
 
 
 # --------------------------------------------------------------------------- #

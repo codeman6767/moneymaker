@@ -54,7 +54,10 @@ __all__ = [
     "HistoricalEventProjection",
     "ProjectionRejected",
     "RejectionCode",
+    "EvidenceGateResult",
+    "STAGE_A_ALLOWED_REQUEST_PARAMS",
     "VerificationReport",
+    "verify_selected_responses_subset",
     "canonical_instant",
     "project_historical_events_response",
     "verify_historical_event_projections",
@@ -76,6 +79,22 @@ HISTORICAL_EVENTS_ENDPOINTS: Final[dict[str, tuple[str, str, str]]] = {
     "/v4/historical/sports/basketball_nba/events": ("basketball_nba", "lg_nba", "v4"),
 }
 
+#: The ONLY request parameters an audit-grade Stage-A snapshot may carry.
+#:
+#: `date` and `dateFormat` define the snapshot; `apiKey` is the redacted secret
+#: placeholder and selects nothing. Every other documented historical-events
+#: parameter -- `eventIds`, `commenceTimeFrom`, `commenceTimeTo` -- NARROWS the
+#: returned population, and an unknown parameter cannot be proven not to.
+#:
+#: This is the difference between "the provider returned no other events" and
+#: "we asked for fewer events". A filtered response is perfectly self-consistent:
+#: its complete projection is exactly the events it contains, so two-way
+#: completeness passes while the real snapshot population was reduced by the
+#: REQUEST. Population-reducing parameters must therefore be refused here, where
+#: the request is still visible, not later where only the body remains.
+STAGE_A_ALLOWED_REQUEST_PARAMS: Final[frozenset[str]] = frozenset(
+    {"apiKey", "date", "dateFormat"})
+
 #: Which league a provider sport key belongs to. A source-controlled constant,
 #: not an inference: the provider body carries no league, and guessing one would
 #: be exactly the kind of derived identity this lane refuses.
@@ -86,6 +105,30 @@ SUPPORTED_SPORT_LEAGUES: Final[dict[str, str]] = {"basketball_nba": "lg_nba"}
 #: instant (`...:37.000000Z`). Both forms are accepted here and normalized.
 _PROVIDER_INSTANT = re.compile(
     r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,6})?Z")
+
+
+def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject duplicate JSON object keys instead of silently taking the last.
+
+    Python's parser accepts `{"id": A, "id": B}` and yields B. For ordinary
+    provider output that never happens, but a TAMPERED persisted row can contain
+    it -- and then one document has two readings while the verifier silently
+    picks one. Audit-grade proof cannot rest on evidence that says two things.
+    """
+
+    seen: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in seen:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        seen[key] = value
+    return seen
+
+
+def _load_json_strict(text: Any, *, what: str, code: "RejectionCode") -> Any:
+    try:
+        return json.loads(text, object_pairs_hook=_no_duplicate_keys)
+    except ValueError as exc:
+        raise ProjectionRejected(code, f"{what} is not unambiguous JSON: {exc}") from None
 
 
 class RejectionCode(str, enum.Enum):
@@ -104,7 +147,9 @@ class RejectionCode(str, enum.Enum):
     SNAPSHOT_AFTER_REQUEST = "snapshot_after_request"
     BAD_ADJACENT_TIMESTAMP = "bad_adjacent_timestamp"
     ADJACENT_ORDERING = "adjacent_ordering"
+    DATA_MISSING = "data_missing"
     DATA_NOT_LIST = "data_not_list"
+    FILTERED_REQUEST = "filtered_request"
     EVENT_NOT_OBJECT = "event_not_object"
     EVENT_BAD_ID = "event_bad_id"
     EVENT_WRONG_SPORT = "event_wrong_sport"
@@ -230,16 +275,23 @@ def project_historical_events_response(row: Any) -> HistoricalEventProjection:
             f"accepted: {sorted(HISTORICAL_EVENTS_ENDPOINTS)}")
     sport_key, league_id, generation = HISTORICAL_EVENTS_ENDPOINTS[endpoint]
 
-    try:
-        params = json.loads(_require(row, "request_params_json"))
-    except (TypeError, ValueError) as exc:
-        raise ProjectionRejected(
-            RejectionCode.BAD_REQUEST_PARAMS,
-            f"request params are not JSON: {exc}") from None
+    params = _load_json_strict(
+        _require(row, "request_params_json"), what="request params",
+        code=RejectionCode.BAD_REQUEST_PARAMS)
     if not isinstance(params, dict):
         raise ProjectionRejected(
             RejectionCode.BAD_REQUEST_PARAMS,
             f"request params are {type(params).__name__}, expected an object")
+
+    extra = sorted(set(params) - STAGE_A_ALLOWED_REQUEST_PARAMS)
+    if extra:
+        raise ProjectionRejected(
+            RejectionCode.FILTERED_REQUEST,
+            f"request carries parameter(s) {extra} beyond "
+            f"{sorted(STAGE_A_ALLOWED_REQUEST_PARAMS)}. A narrowing parameter "
+            "(eventIds, commenceTimeFrom, commenceTimeTo) reduces the returned "
+            "population, and an unknown one cannot be proven not to -- so the "
+            "response cannot evidence what the full snapshot contained")
 
     date_format = params.get("dateFormat")
     if date_format != "iso":
@@ -258,11 +310,8 @@ def project_historical_events_response(row: Any) -> HistoricalEventProjection:
         requested_raw, field_name="requested date",
         code=RejectionCode.BAD_REQUESTED_BUCKET)
 
-    try:
-        body = json.loads(_require(row, "body"))
-    except (TypeError, ValueError) as exc:
-        raise ProjectionRejected(
-            RejectionCode.BODY_NOT_JSON, f"body is not JSON: {exc}") from None
+    body = _load_json_strict(_require(row, "body"), what="body",
+                             code=RejectionCode.BODY_NOT_JSON)
     if not isinstance(body, dict):
         raise ProjectionRejected(
             RejectionCode.BODY_NOT_OBJECT,
@@ -307,9 +356,22 @@ def project_historical_events_response(row: Any) -> HistoricalEventProjection:
             f"next_timestamp {adjacent['next_timestamp']} is not after the "
             f"snapshot {snapshot}")
 
-    data = body.get("data")
+    # `data` must be PRESENT and a list. Absent or null is NOT an empty
+    # snapshot: an empty list is the provider stating that no events existed at
+    # that instant, whereas a missing or null member is the provider not
+    # returning the shape this projector understands. Treating the second as the
+    # first would let malformed output become the fact "no market existed".
+    if "data" not in body:
+        raise ProjectionRejected(
+            RejectionCode.DATA_MISSING,
+            "wrapper has no data member; an ABSENT data is not evidence of zero "
+            "events, it is a payload-shape deviation")
+    data = body["data"]
     if data is None:
-        data = []
+        raise ProjectionRejected(
+            RejectionCode.DATA_MISSING,
+            "data is null; an explicit null is not the same evidence as an "
+            "empty list and is not collapsed into one")
     if not isinstance(data, list):
         raise ProjectionRejected(
             RejectionCode.DATA_NOT_LIST,
@@ -525,30 +587,78 @@ def verify_historical_event_projections(
         failures=tuple(failures))
 
 
-def verify_historical_market_event_evidence(
-    conn: sqlite3.Connection, *, raw_response_ids: Optional[list[str]] = None,
+def verify_selected_responses_subset(
+    conn: sqlite3.Connection, raw_response_ids: list[str],
 ) -> list[VerificationReport]:
-    """The composite trust gate. Run this before evidence is called verified.
+    """Verify SOME responses. **This is not corpus-level proof.**
+
+    Named to make the distinction hard to lose: a caller who hands in only the
+    convenient ids gets reports that say nothing about the ones omitted.
+    Treating a passing subset as "the corpus is verified" is precisely the
+    completeness error the two-way check exists to prevent, one level up.
+
+    Use :func:`verify_historical_market_event_evidence` for a database-wide gate,
+    and see §V of the independent review for what a true *acquisition*-scoped
+    gate additionally requires.
+    """
+
+    return [verify_historical_event_projections(conn, rid)
+            for rid in raw_response_ids]
+
+
+@dataclass(frozen=True)
+class EvidenceGateResult:
+    """Database-wide result. Verified only when every component is clean."""
+
+    reports: tuple[VerificationReport, ...]
+    #: Observations citing a response that is not a verifiable historical-events
+    #: snapshot -- so no per-response report would ever examine them.
+    orphaned_observation_ids: tuple[str, ...] = ()
+    policy_version: str = PROJECTION_POLICY_VERSION
+
+    @property
+    def verified(self) -> bool:
+        return (not self.orphaned_observation_ids
+                and all(r.verified for r in self.reports))
+
+
+def verify_historical_market_event_evidence(
+    conn: sqlite3.Connection,
+) -> EvidenceGateResult:
+    """The database-wide trust gate. Run this before evidence is called verified.
 
     Equals content-hash integrity AND raw-response projection integrity AND
-    projection completeness. Naming it once, here, is what makes the
-    composition impossible to forget at a call site.
+    projection completeness AND no orphaned observations. Naming the composition
+    once, here, is what makes it impossible to forget at a call site.
 
-    With no explicit ids, every historical-events response in the database is
-    checked -- including any that carries **no** observations, so a response
-    whose events were never materialized cannot hide by having nothing to
-    compare.
+    It scans **every** historical-events response, including ones carrying no
+    observations, so a response whose events were never materialized cannot hide
+    by having nothing to compare. It then separately catches observations citing
+    a response no report covers -- a row that would otherwise be examined by
+    nobody at all.
+
+    Deliberately takes **no** caller-selected ids; see
+    :func:`verify_selected_responses_subset`.
     """
 
     conn.row_factory = sqlite3.Row
-    if raw_response_ids is None:
-        placeholders = ", ".join("?" * len(HISTORICAL_EVENTS_ENDPOINTS))
-        rows = conn.execute(
-            f"SELECT raw_response_id FROM raw_responses WHERE provider = ? "  # noqa: S608
-            f"AND endpoint IN ({placeholders}) AND http_status = 200 "
-            "ORDER BY raw_response_id",
-            (THE_ODDS_API_PROVIDER, *sorted(HISTORICAL_EVENTS_ENDPOINTS))
-        ).fetchall()
-        raw_response_ids = [str(r["raw_response_id"]) for r in rows]
-    return [verify_historical_event_projections(conn, rid)
-            for rid in raw_response_ids]
+    placeholders = ", ".join("?" * len(HISTORICAL_EVENTS_ENDPOINTS))
+    rows = conn.execute(
+        f"SELECT raw_response_id FROM raw_responses WHERE provider = ? "  # noqa: S608
+        f"AND endpoint IN ({placeholders}) AND http_status = 200 "
+        "ORDER BY raw_response_id",
+        (THE_ODDS_API_PROVIDER, *sorted(HISTORICAL_EVENTS_ENDPOINTS))).fetchall()
+    covered = [str(r["raw_response_id"]) for r in rows]
+
+    orphans = [str(r["observation_id"]) for r in conn.execute(
+        "SELECT observation_id FROM historical_market_event_observations "
+        "ORDER BY observation_id").fetchall()
+        if str(conn.execute(
+            "SELECT raw_response_id FROM historical_market_event_observations "
+            "WHERE observation_id = ?", (r["observation_id"],)
+        ).fetchone()["raw_response_id"]) not in set(covered)]
+
+    return EvidenceGateResult(
+        reports=tuple(verify_historical_event_projections(conn, rid)
+                      for rid in covered),
+        orphaned_observation_ids=tuple(orphans))

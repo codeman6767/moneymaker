@@ -1,5 +1,39 @@
 # Stage-A Historical-Events Projection / Body Verifier
 
+> ## ⚠ SUPERSEDED IN PART — read the independent review
+>
+> `STAGE_A_HISTORICAL_EVENTS_PROJECTION_VERIFIER_INDEPENDENT_REVIEW.md`
+> (2026-08-18) is **authoritative wherever it disagrees with this document**.
+> Verdict: **ACCEPTED WITH REPAIRS**. It upheld the design, the two-way
+> completeness idea, exact endpoint admission, snapshot fail-closed, the
+> duplicate-event policy, the missing-key/null adjudication and timestamp
+> normalization — and reproduced **four defects**:
+>
+> - **D2 (severe)** — a **filtered request** (`eventIds`, `commenceTimeFrom`,
+>   `commenceTimeTo`, or any unknown parameter) produced a self-consistent
+>   response whose complete projection **passed** two-way verification while the
+>   real snapshot population had been reduced by the *request*. Completeness was
+>   evadable from outside the body. Now an explicit
+>   `STAGE_A_ALLOWED_REQUEST_PARAMS = {apiKey, date, dateFormat}` allow-list.
+> - **D1** — absent or `null` `data` was admitted as evidence of **zero events**.
+>   §6d of this document claimed `data` must be present and a list; the code did
+>   `body.get("data") or []`. Now refused as `DATA_MISSING`.
+> - **D3** — duplicate JSON keys were silently resolved last-value-wins in both
+>   the request params and the body. Now parsed with a duplicate-rejecting hook.
+> - **D4** — the corpus gate accepted caller-selected `raw_response_ids`, and
+>   observations citing an uncovered response were examined by no report. Now
+>   split into a database-wide `EvidenceGateResult` gate and an explicitly named
+>   `verify_selected_responses_subset`.
+>
+> **Correction to §5 and §9 of this document:** "team labels preserved
+> **byte-for-byte**" overstates the typed layer. `"Boston Celtics"` and
+> `"Boston Celtics"` are byte-distinct JSON that decode identically and project
+> to the same observation. The typed layer preserves the **decoded Unicode
+> string**; the byte-level claim belongs to `raw_responses.body`.
+>
+> Also recorded there: the projection policy version is **not persisted** (a
+> Stage-B requirement), and **no layer currently owns the `observed_at` clock**.
+
 **Starting HEAD:** `d3984d0` (`origin/main` = `d3984d0`, tree clean).
 **Schema:** v21 / 21 migrations / 53 tables — **unchanged**.
 **Provider requests:** 0. **Credits spent:** 0.
