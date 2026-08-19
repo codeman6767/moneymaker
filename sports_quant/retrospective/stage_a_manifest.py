@@ -60,6 +60,20 @@ DEFAULT_DECISION_HORIZON_MINUTES: Final = 60
 DEFAULT_BUCKET_FLOOR_SECONDS: Final = 300
 
 
+#: The exact top-level field set of a stage-a-manifest-v1 body. `plan_digest` is
+#: popped before this check because it is carried alongside the body, not in it.
+_KNOWN_TOP_LEVEL_FIELDS: Final[frozenset[str]] = frozenset({
+    "manifest_format_version", "plan_policy_version", "league_id", "provider",
+    "namespace_generation", "sport_key", "official_source_corpus_digest",
+    "official_target_set_digest", "targets", "buckets",
+    "decision_horizon_minutes", "bucket_floor_seconds", "request_budget",
+    "credit_budget", "acquisition_policy_version", "projection_policy_version",
+    "cost_policy_version"})
+
+_KNOWN_TARGET_FIELDS: Final[frozenset[str]] = frozenset(
+    {"canonical_game_id", "requested_at_bucket"})
+
+
 class StageAManifestError(RuntimeError):
     """A Stage-A manifest is missing, tampered, non-canonical, or unsupported."""
 
@@ -245,6 +259,18 @@ def loads(text: str) -> StageAManifest:
 
     declared: Optional[str] = payload.pop("plan_digest", None)
 
+    # stage-a-manifest-v1 is a CLOSED schema. An unknown top-level field is
+    # REFUSED rather than ignored: a future producer could believe such a field
+    # is load-bearing while this version silently drops it, which would change
+    # the committed artefact's content digest without changing the semantic plan
+    # digest -- two artefacts meaning different things but certifying alike.
+    unknown = sorted(set(payload) - _KNOWN_TOP_LEVEL_FIELDS)
+    if unknown:
+        raise StageAManifestError(
+            f"Stage-A manifest declares unknown top-level field(s) {unknown}; "
+            f"{STAGE_A_MANIFEST_FORMAT_VERSION} is a closed schema, so a field "
+            f"this version cannot interpret is refused rather than ignored")
+
     raw_targets = payload.get("targets")
     if not isinstance(raw_targets, list):
         raise StageAManifestError("Stage-A manifest 'targets' must be a list")
@@ -252,6 +278,12 @@ def loads(text: str) -> StageAManifest:
     for entry in raw_targets:
         if not isinstance(entry, dict):
             raise StageAManifestError("each Stage-A target must be an object")
+        unknown_target = sorted(set(entry) - _KNOWN_TARGET_FIELDS)
+        if unknown_target:
+            raise StageAManifestError(
+                f"Stage-A target declares unknown field(s) {unknown_target}; "
+                f"a target is a closed object in "
+                f"{STAGE_A_MANIFEST_FORMAT_VERSION}")
         try:
             targets.append(StageATarget(
                 canonical_game_id=str(entry["canonical_game_id"]),
@@ -296,6 +328,16 @@ def loads(text: str) -> StageAManifest:
             "content; refusing to read a manifest whose identity disagrees with "
             "what it says")
     return manifest
+
+
+def manifest_content_digest_bytes(raw: bytes) -> str:
+    """Digest the EXACT committed blob bytes.
+
+    This is the load-bearing form. Hashing decoded text would fingerprint a
+    newline-normalized rendering rather than the artefact that was committed.
+    """
+
+    return hashlib.sha256(raw).hexdigest()
 
 
 def manifest_content_digest(text: str) -> str:

@@ -31,7 +31,8 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from dataclasses import dataclass, field
-from typing import Final, Iterable, Mapping, Optional, Sequence
+from pathlib import Path
+from typing import Final, Iterable, Optional, Sequence
 
 from ..db.ids import (
     new_evidence_lane_binding_id,
@@ -50,6 +51,13 @@ from .historical_events_projection import (
 from .market_observations import verify_observation_content_hashes
 from .provenance import G1Variant, ProvenanceClass
 from .stage_a_manifest import StageAManifest, canonical_json
+from .stage_a_plan_binding import (
+    PlanBindingError,
+    committed_manifest_for_plan,
+    load_committed_stage_a_manifest,
+    plan_membership_disagreements,
+    plan_row_disagreements,
+)
 from .stage_a_policies import (
     FrozenDigestPolicy,
     digest_policy_for_lane,
@@ -143,7 +151,35 @@ def lane_evidence_digest(
 # --------------------------------------------------------------------------- #
 # Writes
 # --------------------------------------------------------------------------- #
-def record_plan(
+def record_committed_plan(
+    conn: sqlite3.Connection,
+    *,
+    manifest_commit_sha: str,
+    manifest_path: str,
+    repo_root: Optional[Path] = None,
+) -> str:
+    """Declare a Stage-A plan FROM ITS COMMITTED ARTEFACT. The trusted path (B2).
+
+    The caller supplies only a pointer. This function resolves the commit, loads
+    the manifest blob committed there, derives the content digest from the exact
+    bytes and the plan digest from the canonical semantic body, then persists the
+    plan and its membership atomically.
+
+    That ordering is the point: git resolution and parsing happen BEFORE any
+    scientific row is written, so a plan whose artefact cannot be proven never
+    reaches the database at all.
+    """
+
+    committed = load_committed_stage_a_manifest(
+        manifest_commit_sha, manifest_path, repo_root=repo_root)
+    return _record_plan_unverified(
+        conn, committed.manifest,
+        manifest_commit_sha=committed.commit_sha,
+        manifest_content_digest=committed.content_digest,
+        manifest_path=committed.manifest_path)
+
+
+def _record_plan_unverified(
     conn: sqlite3.Connection,
     manifest: StageAManifest,
     *,
@@ -151,7 +187,13 @@ def record_plan(
     manifest_content_digest: str,
     manifest_path: str,
 ) -> str:
-    """Persist a declared plan with its targets and buckets, all closed together.
+    """Low-level plan writer. NOT the audited declaration path.
+
+    Private by name because it accepts the manifest, its content digest and its
+    commit id as three independent CALLER CLAIMS -- exactly the shape B2 exists to
+    remove. It is retained for synthetic fixtures and for
+    :func:`record_committed_plan` to compose, and rows it writes are still
+    refused by certification unless they match a real committed artefact.
 
     ``manifest_path`` is stored as convenience provenance and is NOT part of any
     digest: the same logical plan checked out under a different filesystem root
@@ -351,8 +393,7 @@ def certify_stage_a(
     conn: sqlite3.Connection,
     *,
     acquisition_id: str,
-    manifest: StageAManifest,
-    manifest_text: Optional[str] = None,
+    repo_root: Optional[Path] = None,
 ) -> StageACertification:
     """Recompute every Stage-A claim from evidence and return a derived verdict.
 
@@ -365,18 +406,22 @@ def certify_stage_a(
     plan = _fetch_plan(conn, acquisition_id)
     plan_id = plan["plan_id"]
 
-    # 1. Manifest integrity: the persisted plan identity must equal the digest
-    #    recomputed from the manifest content.
-    if plan["plan_digest"] != manifest.plan_digest():
-        failures.append(
-            "persisted plan_digest does not match the digest recomputed from the "
-            "committed manifest")
-    if manifest_text is not None:
-        recomputed = _hash(manifest_text)
-        if recomputed != plan["manifest_content_digest"]:
-            failures.append(
-                "committed manifest content digest does not match the persisted "
-                "plan row; the manifest file changed after declaration")
+    # 1. SOURCE-CONTROL BINDING (B2). The manifest is loaded from the commit and
+    #    path the PLAN ROW names -- never supplied by the caller. If the artefact
+    #    cannot be proven, nothing downstream is evaluated, because every later
+    #    comparison would be against an unproven document.
+    try:
+        committed = committed_manifest_for_plan(conn, plan, repo_root=repo_root)
+    except PlanBindingError as exc:
+        return StageACertification(
+            acquisition_id=acquisition_id, certified=False,
+            failures=(str(exc),), counts={})
+    manifest = committed.manifest
+
+    # Every persisted field that derives from the manifest must match it, and so
+    # must the persisted membership.
+    failures.extend(plan_row_disagreements(plan, committed))
+    failures.extend(plan_membership_disagreements(conn, plan_id, committed))
 
     # 2/3. DB target population and mapping == committed manifest.
     db_targets = {
@@ -778,8 +823,7 @@ def enrich_corpus_with_market_lane(
     acquisition_ids: Sequence[str],
     provider: str,
     namespace_generation: str,
-    manifests: Mapping[str, StageAManifest],
-    manifest_texts: Mapping[str, str],
+    repo_root: Optional[Path] = None,
 ) -> tuple[str, str]:
     """Derive the enriched corpus C2 from official corpus C1 plus a certified lane.
 
@@ -817,26 +861,12 @@ def enrich_corpus_with_market_lane(
     # this, an acquisition missing 159 of 160 buckets could still mint a C2 that
     # commits to its market evidence.
     for acquisition_id in members:
-        manifest = manifests.get(acquisition_id)
-        if manifest is None:
-            raise StageAProvenanceError(
-                f"no manifest supplied for member acquisition {acquisition_id!r}; "
-                f"a lane cannot be certified without the declared plan it claims "
-                f"to execute")
-        text = manifest_texts.get(acquisition_id)
-        if text is None:
-            # `manifest_text` is optional on certify_stage_a so a low-level
-            # subset check can run without the file. It is MANDATORY here:
-            # allowing it to be omitted on the corpus-building path would make
-            # "skip the source-control binding" a supported mode of the only
-            # call that creates load-bearing downstream provenance.
-            raise StageAProvenanceError(
-                f"no committed manifest text supplied for acquisition "
-                f"{acquisition_id!r}; the corpus gate must verify the persisted "
-                f"content digest against the committed artefact")
+        # No manifest argument exists any more: certification derives it from the
+        # plan row's commit and path, so "skip the source-control binding" is not
+        # a representable mode on the only call that creates downstream
+        # provenance.
         report = certify_stage_a(
-            conn, acquisition_id=acquisition_id, manifest=manifest,
-            manifest_text=text)
+            conn, acquisition_id=acquisition_id, repo_root=repo_root)
         if not report.certified:
             raise StageAProvenanceError(
                 f"refusing to build an evidence lane from uncertified acquisition "

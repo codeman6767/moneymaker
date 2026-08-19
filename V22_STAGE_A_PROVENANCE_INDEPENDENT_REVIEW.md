@@ -132,6 +132,14 @@ loudly once the binding lands.
 
 ### B2 (HIGH) — the manifest commit SHA is never resolved
 
+> **STATUS: CLOSED.** See `STAGE_A_PLAN_MANIFEST_COMMIT_BINDING_IMPLEMENTATION.md`.
+> Certification now loads the manifest from the commit and path the PLAN ROW
+> names, so a fabricated commit id fails at the first step. Closing it also
+> surfaced two further defects: the content digest was taken over
+> newline-normalized text rather than committed bytes, and `stage-a-manifest-v1`
+> silently ignored unknown fields. Both are repaired. The historical finding
+> below is left unedited.
+
 `manifest_commit_sha` is accepted as any non-empty text; a 40-character
 fabrication is stored and never checked. Supplying `manifest_text` proves the
 *content* digest, but nothing proves the text came from that commit, that the

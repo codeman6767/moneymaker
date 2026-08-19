@@ -12,8 +12,12 @@ opened.
 
 from __future__ import annotations
 
+import itertools
 import json
 import sqlite3
+import subprocess
+import tempfile
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -36,10 +40,11 @@ from sports_quant.retrospective.stage_a_manifest import (
 )
 from sports_quant.retrospective.stage_a_provenance import (
     StageAProvenanceError,
+    _record_plan_unverified,
     certify_stage_a,
     enrich_corpus_with_market_lane,
     record_attempt,
-    record_plan,
+    record_committed_plan,
     register_acquisition,
     register_probe_response,
 )
@@ -52,6 +57,54 @@ EV_B = "111a955795876d50988b15c219ce0796"
 ENDPOINT = "/v4/historical/sports/basketball_nba/events"
 ACQ = "stage-a-acquisition-v1"
 PROJ = "hme-projection-v1"
+
+
+
+# --------------------------------------------------------------------------- #
+# B2: plans are now declared FROM a committed artefact, so these suites commit
+# their synthetic manifests into one scratch repository and declare from it. The
+# repo is module-scoped and append-only, exactly like real plan history.
+# --------------------------------------------------------------------------- #
+_B2_REPO: Path | None = None
+_B2_SEQ = itertools.count()
+
+
+def _b2_repo() -> Path:
+    global _B2_REPO
+    if _B2_REPO is None:
+        repo = Path(tempfile.mkdtemp()) / "plans"
+        repo.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "core.autocrlf", "false"], cwd=repo,
+                       check=True)
+        _B2_REPO = repo
+    return _B2_REPO
+
+
+def _commit_manifest(manifest) -> tuple[str, str]:
+    """Commit a manifest and return (commit_sha, path)."""
+
+    repo = _b2_repo()
+    name = f"plan_{next(_B2_SEQ)}.json"
+    (repo / name).write_text(dumps(manifest), encoding="utf-8")
+    subprocess.run(["git", "add", name], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", name], cwd=repo, check=True)
+    sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                         capture_output=True, text=True, check=True).stdout.strip()
+    return sha, name
+
+
+def _declare_committed(conn, manifest) -> str:
+    sha, name = _commit_manifest(manifest)
+    return record_committed_plan(conn, manifest_commit_sha=sha,
+                                 manifest_path=name, repo_root=_b2_repo())
+
+
+def _certify(conn, acquisition_id):
+    return certify_stage_a(conn, acquisition_id=acquisition_id,
+                           repo_root=_b2_repo())
 
 
 def _event(event_id: str, home: str, away: str) -> dict[str, Any]:
@@ -161,10 +214,7 @@ def _manifest(**over: Any) -> StageAManifest:
 def _declared(conn: sqlite3.Connection, **over: Any) -> tuple[str, StageAManifest]:
     _seed(conn)
     manifest = _manifest(**over)
-    plan_id = record_plan(
-        conn, manifest, manifest_commit_sha="a" * 40,
-        manifest_content_digest=manifest_content_digest(dumps(manifest)),
-        manifest_path="pilots/stage_a/plan.json")
+    plan_id = _declare_committed(conn, manifest)
     acquisition_id = register_acquisition(
         conn, plan_id=plan_id, acquisition_policy_version=ACQ,
         projection_policy_version=PROJ, request_budget=10, credit_budget=10)
@@ -189,7 +239,7 @@ def test_selective_materialization_is_refused(conn):
                    outcome="success_full_snapshot", raw_response_id="raw_1")
     _obs(conn, "raw_1", EV_A, "Boston Celtics", "Miami Heat")
 
-    report = certify_stage_a(conn, acquisition_id=acquisition_id, manifest=manifest)
+    report = _certify(conn, acquisition_id)
     assert not report.certified
     assert any("no stored observation" in f for f in report.failures)
 
@@ -202,7 +252,7 @@ def test_an_invented_observation_is_refused(conn):
     _obs(conn, "raw_1", EV_A, "Boston Celtics", "Miami Heat")
     _obs(conn, "raw_1", EV_B, "Invented FC", "Fabricated United")
 
-    report = certify_stage_a(conn, acquisition_id=acquisition_id, manifest=manifest)
+    report = _certify(conn, acquisition_id)
     assert not report.certified
     assert any("not derivable from its body" in f for f in report.failures)
 
@@ -214,7 +264,7 @@ def test_a_tampered_team_label_is_refused(conn):
                    outcome="success_full_snapshot", raw_response_id="raw_1")
     _obs(conn, "raw_1", EV_A, "TAMPERED FC", "Miami Heat")
 
-    report = certify_stage_a(conn, acquisition_id=acquisition_id, manifest=manifest)
+    report = _certify(conn, acquisition_id)
     assert not report.certified
 
 
@@ -225,7 +275,7 @@ def test_a_forged_content_hash_is_refused(conn):
                    outcome="success_full_snapshot", raw_response_id="raw_1")
     _obs(conn, "raw_1", EV_A, "Boston Celtics", "Miami Heat", content_hash="f" * 64)
 
-    report = certify_stage_a(conn, acquisition_id=acquisition_id, manifest=manifest)
+    report = _certify(conn, acquisition_id)
     assert not report.certified
     assert any("content hash" in f for f in report.failures)
 
@@ -236,7 +286,7 @@ def test_a_malformed_body_cannot_be_recorded_as_a_success(conn):
     record_attempt(conn, acquisition_id=acquisition_id, requested_at_bucket=BUCKET,
                    outcome="success_full_snapshot", raw_response_id="raw_1")
 
-    report = certify_stage_a(conn, acquisition_id=acquisition_id, manifest=manifest)
+    report = _certify(conn, acquisition_id)
     assert not report.certified
 
 
@@ -251,7 +301,7 @@ def test_a_real_event_cannot_be_erased_by_mislabelling_the_outcome(conn):
     record_attempt(conn, acquisition_id=acquisition_id, requested_at_bucket=BUCKET,
                    outcome="success_empty_data", raw_response_id="raw_1")
 
-    report = certify_stage_a(conn, acquisition_id=acquisition_id, manifest=manifest)
+    report = _certify(conn, acquisition_id)
     assert not report.certified
     assert any("success_empty_data" in f for f in report.failures)
 
@@ -264,7 +314,7 @@ def test_a_genuinely_empty_snapshot_still_certifies(conn):
     record_attempt(conn, acquisition_id=acquisition_id, requested_at_bucket=BUCKET,
                    outcome="success_empty_data", raw_response_id="raw_1")
 
-    report = certify_stage_a(conn, acquisition_id=acquisition_id, manifest=manifest)
+    report = _certify(conn, acquisition_id)
     assert report.certified, report.failures
 
 
@@ -274,10 +324,7 @@ def test_a_genuinely_empty_snapshot_still_certifies(conn):
 def test_budgets_that_disagree_with_the_manifest_are_refused(conn):
     _seed(conn)
     manifest = _manifest(request_budget=10, credit_budget=10)
-    plan_id = record_plan(
-        conn, manifest, manifest_commit_sha="b" * 40,
-        manifest_content_digest=manifest_content_digest(dumps(manifest)),
-        manifest_path="p.json")
+    plan_id = _declare_committed(conn, manifest)
     acquisition_id = register_acquisition(
         conn, plan_id=plan_id, acquisition_policy_version=ACQ,
         projection_policy_version=PROJ, request_budget=1, credit_budget=0)
@@ -286,7 +333,7 @@ def test_budgets_that_disagree_with_the_manifest_are_refused(conn):
                    outcome="success_full_snapshot", raw_response_id="raw_1")
     _obs(conn, "raw_1", EV_A, "Boston Celtics", "Miami Heat")
 
-    report = certify_stage_a(conn, acquisition_id=acquisition_id, manifest=manifest)
+    report = _certify(conn, acquisition_id)
     assert not report.certified
     assert any("credit_budget" in f for f in report.failures)
 
@@ -307,10 +354,7 @@ def test_fetch_then_declare_is_refused_through_the_public_api(conn):
     _raw(conn, "raw_pre", _wrapper([_event(EV_A, "Boston Celtics", "Miami Heat")]),
          requested_at="2020-01-01T00:00:00.000000Z")
     manifest = _manifest()
-    plan_id = record_plan(
-        conn, manifest, manifest_commit_sha="c" * 40,
-        manifest_content_digest=manifest_content_digest(dumps(manifest)),
-        manifest_path="p.json")
+    plan_id = _declare_committed(conn, manifest)
     acquisition_id = register_acquisition(
         conn, plan_id=plan_id, acquisition_policy_version=ACQ,
         projection_policy_version=PROJ, request_budget=10, credit_budget=10)
@@ -353,8 +397,7 @@ def test_an_uncertified_acquisition_cannot_be_enriched_into_a_corpus(conn):
                    outcome="success_full_snapshot", raw_response_id="raw_1")
     _obs(conn, "raw_1", EV_A, "Boston Celtics", "Miami Heat")
 
-    assert not certify_stage_a(
-        conn, acquisition_id=acquisition_id, manifest=manifest).certified
+    assert not _certify(conn, acquisition_id).certified
 
     repo, parent = _parent(conn)
     before = conn.execute(
@@ -363,8 +406,7 @@ def test_an_uncertified_acquisition_cannot_be_enriched_into_a_corpus(conn):
         enrich_corpus_with_market_lane(
             conn, repo, parent_corpus_id=parent.corpus_version_id,
             acquisition_ids=[acquisition_id], provider=THE_ODDS_API_PROVIDER,
-            namespace_generation="v4", manifests={acquisition_id: manifest},
-            manifest_texts={acquisition_id: dumps(manifest)})
+            namespace_generation="v4", repo_root=_b2_repo())
     after = conn.execute(
         "SELECT COUNT(*) FROM reconstruction_corpus_versions").fetchone()[0]
     assert after == before
@@ -372,22 +414,37 @@ def test_an_uncertified_acquisition_cannot_be_enriched_into_a_corpus(conn):
         "SELECT COUNT(*) FROM corpus_evidence_lane_bindings").fetchone()[0] == 0
 
 
-def test_enrichment_requires_the_committed_manifest_text(conn):
-    """`manifest_text` is optional for a subset check but MANDATORY here."""
+def test_enrichment_cannot_proceed_without_a_resolvable_committed_manifest(conn):
+    """B2 replaced the old `manifest_text` requirement with something stronger.
 
-    acquisition_id, manifest = _declared(conn)
+    Previously enrichment demanded the caller SUPPLY the committed text, which
+    still placed the caller on the trust path. Now it derives the manifest from
+    the plan row's commit and path, so a plan naming an unresolvable commit
+    cannot build a lane at all -- there is no argument left to get right.
+    """
+
+    _seed(conn)
+    manifest = _manifest()
+    plan_id = _record_plan_unverified(
+        conn, manifest, manifest_commit_sha="a" * 40,      # never committed
+        manifest_content_digest=manifest_content_digest(dumps(manifest)),
+        manifest_path="pilots/stage_a/ghost.json")
+    acquisition_id = register_acquisition(
+        conn, plan_id=plan_id, acquisition_policy_version=ACQ,
+        projection_policy_version=PROJ, request_budget=10, credit_budget=10)
     _raw(conn, "raw_1", _wrapper([_event(EV_A, "Boston Celtics", "Miami Heat")]))
     record_attempt(conn, acquisition_id=acquisition_id, requested_at_bucket=BUCKET,
                    outcome="success_full_snapshot", raw_response_id="raw_1")
     _obs(conn, "raw_1", EV_A, "Boston Celtics", "Miami Heat")
     repo, parent = _parent(conn)
 
-    with pytest.raises(StageAProvenanceError, match="committed manifest text"):
+    with pytest.raises(StageAProvenanceError, match="uncertified acquisition"):
         enrich_corpus_with_market_lane(
             conn, repo, parent_corpus_id=parent.corpus_version_id,
             acquisition_ids=[acquisition_id], provider=THE_ODDS_API_PROVIDER,
-            namespace_generation="v4", manifests={acquisition_id: manifest},
-            manifest_texts={})
+            namespace_generation="v4", repo_root=_b2_repo())
+    assert conn.execute(
+        "SELECT COUNT(*) FROM corpus_evidence_lane_bindings").fetchone()[0] == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -410,8 +467,7 @@ def test_a_failed_enrichment_leaves_no_orphan_corpus(conn):
         enrich_corpus_with_market_lane(
             conn, repo, parent_corpus_id=parent.corpus_version_id,
             acquisition_ids=[acquisition_id], provider="fake_provider",
-            namespace_generation="v4", manifests={acquisition_id: manifest},
-            manifest_texts={acquisition_id: dumps(manifest)})
+            namespace_generation="v4", repo_root=_b2_repo())
 
     after = conn.execute(
         "SELECT COUNT(*) FROM reconstruction_corpus_versions").fetchone()[0]
@@ -432,9 +488,7 @@ def test_duplicate_member_acquisitions_are_refused_not_collapsed(conn):
         enrich_corpus_with_market_lane(
             conn, repo, parent_corpus_id=parent.corpus_version_id,
             acquisition_ids=[acquisition_id, acquisition_id],
-            provider=THE_ODDS_API_PROVIDER, namespace_generation="v4",
-            manifests={acquisition_id: manifest},
-            manifest_texts={acquisition_id: dumps(manifest)})
+            provider=THE_ODDS_API_PROVIDER, namespace_generation="v4", repo_root=_b2_repo())
 
 
 def test_an_empty_member_set_gives_a_domain_refusal(conn):
@@ -446,7 +500,7 @@ def test_an_empty_member_set_gives_a_domain_refusal(conn):
         enrich_corpus_with_market_lane(
             conn, repo, parent_corpus_id=parent.corpus_version_id,
             acquisition_ids=[], provider=THE_ODDS_API_PROVIDER,
-            namespace_generation="v4", manifests={}, manifest_texts={})
+            namespace_generation="v4", repo_root=_b2_repo())
 
 
 # --------------------------------------------------------------------------- #
@@ -462,9 +516,7 @@ def test_a_rejected_plan_leaves_no_partial_declaration(conn):
         targets=(StageATarget("gm_r1", BUCKET), StageATarget("gm_missing", BUCKET)))
     conn.execute("PRAGMA foreign_keys = ON")
     with pytest.raises(sqlite3.IntegrityError):
-        record_plan(conn, manifest, manifest_commit_sha="d" * 40,
-                    manifest_content_digest=manifest_content_digest(dumps(manifest)),
-                    manifest_path="p.json")
+        _declare_committed(conn, manifest)
 
     assert conn.execute("SELECT COUNT(*) FROM stage_a_plans").fetchone()[0] == 0
     assert conn.execute(
@@ -497,10 +549,7 @@ def test_probe_registration_is_now_content_bound(conn):
         probe_report_path="does/not/exist.md",
         probe_policy_version="stage-a-probe-v1")
     manifest = _manifest()
-    plan_id = record_plan(
-        conn, manifest, manifest_commit_sha="e" * 40,
-        manifest_content_digest=manifest_content_digest(dumps(manifest)),
-        manifest_path="p.json")
+    plan_id = _declare_committed(conn, manifest)
     acquisition_id = register_acquisition(
         conn, plan_id=plan_id, acquisition_policy_version=ACQ,
         projection_policy_version=PROJ, request_budget=10, credit_budget=10)
@@ -508,33 +557,38 @@ def test_probe_registration_is_now_content_bound(conn):
                    outcome="reused_probe_response", raw_response_id="raw_old")
     _obs(conn, "raw_old", EV_A, "Boston Celtics", "Miami Heat")
 
-    report = certify_stage_a(conn, acquisition_id=acquisition_id, manifest=manifest)
+    report = _certify(conn, acquisition_id)
     assert not report.certified
     assert any("does not bind to committed evidence" in f for f in report.failures),         report.failures
 
 
-def test_retained_manifest_commit_sha_is_never_resolved(conn):
-    """RETAINED BLOCKER: the commit SHA is stored but never resolved.
+def test_manifest_commit_sha_is_now_resolved(conn):
+    """B2 CLOSED. This test previously PINNED the blocker; it now proves the fix.
 
-    The architecture required the verifier to load the committed manifest at the
-    named commit. Supplying `manifest_text` proves the CONTENT digest, but
-    nothing proves the text came from that commit, that the commit exists, or
-    that it is a commit object rather than a blob or tag.
+    At `e98363d` a fabricated 40-character commit id was stored and never
+    checked, so a plan certified while its alleged source-control provenance was
+    imaginary. Certification now resolves the commit named by the PLAN ROW and
+    loads the manifest from it, so the fabrication fails at the first step.
     """
 
-    acquisition_id, manifest = _declared(conn)
-    _raw(conn, "raw_1", _wrapper([_event(EV_A, "Boston Celtics", "Miami Heat")]))
-    record_attempt(conn, acquisition_id=acquisition_id, requested_at_bucket=BUCKET,
-                   outcome="success_full_snapshot", raw_response_id="raw_1")
-    _obs(conn, "raw_1", EV_A, "Boston Celtics", "Miami Heat")
+    _seed(conn)
+    manifest = _manifest()
+    plan_id = _record_plan_unverified(
+        conn, manifest, manifest_commit_sha="a" * 40,      # fabricated
+        manifest_content_digest=manifest_content_digest(dumps(manifest)),
+        manifest_path="pilots/stage_a/ghost.json")
+    acquisition_id = register_acquisition(
+        conn, plan_id=plan_id, acquisition_policy_version=ACQ,
+        projection_policy_version=PROJ, request_budget=10, credit_budget=10)
 
     stored = conn.execute(
-        "SELECT manifest_commit_sha FROM stage_a_plans").fetchone()[0]
-    assert stored == "a" * 40, "a fabricated commit SHA is accepted at write time"
-    report = certify_stage_a(
-        conn, acquisition_id=acquisition_id, manifest=manifest,
-        manifest_text=dumps(manifest))
-    assert report.certified
+        "SELECT manifest_commit_sha FROM stage_a_plans WHERE plan_id=?",
+        (plan_id,)).fetchone()[0]
+    assert stored == "a" * 40, "the row still stores whatever it was given"
+
+    report = _certify(conn, acquisition_id)
+    assert not report.certified
+    assert any("not bound to source control" in f for f in report.failures),         report.failures
 
 
 def test_retained_receipt_ordering_is_second_granularity(conn):

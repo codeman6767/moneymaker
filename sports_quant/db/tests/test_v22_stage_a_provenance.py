@@ -7,8 +7,12 @@ never consumed into production provenance.
 
 from __future__ import annotations
 
+import itertools
 import json
 import sqlite3
+import subprocess
+import tempfile
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -43,11 +47,12 @@ from sports_quant.retrospective.stage_a_policies import (
 )
 from sports_quant.retrospective.stage_a_provenance import (
     StageAProvenanceError,
+    _record_plan_unverified,
     acquisition_set_digest,
     certify_stage_a,
     enrich_corpus_with_market_lane,
     record_attempt,
-    record_plan,
+    record_committed_plan,
     register_acquisition,
     register_probe_response,
     verify_lane_binding,
@@ -66,6 +71,54 @@ ENDPOINT = "/v4/historical/sports/basketball_nba/events"
 # --------------------------------------------------------------------------- #
 # Fixtures
 # --------------------------------------------------------------------------- #
+
+# --------------------------------------------------------------------------- #
+# B2: plans are now declared FROM a committed artefact, so these suites commit
+# their synthetic manifests into one scratch repository and declare from it. The
+# repo is module-scoped and append-only, exactly like real plan history.
+# --------------------------------------------------------------------------- #
+_B2_REPO: Path | None = None
+_B2_SEQ = itertools.count()
+
+
+def _b2_repo() -> Path:
+    global _B2_REPO
+    if _B2_REPO is None:
+        repo = Path(tempfile.mkdtemp()) / "plans"
+        repo.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "core.autocrlf", "false"], cwd=repo,
+                       check=True)
+        _B2_REPO = repo
+    return _B2_REPO
+
+
+def _commit_manifest(manifest) -> tuple[str, str]:
+    """Commit a manifest and return (commit_sha, path)."""
+
+    repo = _b2_repo()
+    name = f"plan_{next(_B2_SEQ)}.json"
+    (repo / name).write_text(dumps(manifest), encoding="utf-8")
+    subprocess.run(["git", "add", name], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", name], cwd=repo, check=True)
+    sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                         capture_output=True, text=True, check=True).stdout.strip()
+    return sha, name
+
+
+def _declare_committed(conn, manifest) -> str:
+    sha, name = _commit_manifest(manifest)
+    return record_committed_plan(conn, manifest_commit_sha=sha,
+                                 manifest_path=name, repo_root=_b2_repo())
+
+
+def _certify(conn, acquisition_id):
+    return certify_stage_a(conn, acquisition_id=acquisition_id,
+                           repo_root=_b2_repo())
+
+
 def _seed(conn: sqlite3.Connection) -> None:
     conn.row_factory = sqlite3.Row
     if conn.execute("SELECT 1 FROM leagues WHERE league_id='lg_nba'").fetchone() is None:
@@ -176,10 +229,7 @@ def _lane_args(acquisition_id: str, manifest: StageAManifest) -> dict[str, Any]:
 def _declared(conn: sqlite3.Connection) -> tuple[str, str, StageAManifest]:
     _seed(conn)
     manifest = _manifest()
-    plan_id = record_plan(
-        conn, manifest, manifest_commit_sha="c0ffee",
-        manifest_content_digest=manifest_content_digest(dumps(manifest)),
-        manifest_path="pilots/stage_a/x.json")
+    plan_id = _declare_committed(conn, manifest)
     acquisition_id = register_acquisition(
         conn, plan_id=plan_id, acquisition_policy_version=ACQ_POLICY,
         projection_policy_version=PROJ_POLICY, request_budget=10, credit_budget=10)
@@ -425,9 +475,7 @@ def test_fetch_then_declare_is_refused_for_an_ordinary_success(conn):
     _raw_response(conn, "raw_pre", requested_at="2026-01-01T00:00:00.000000Z",
                   received_at="2026-01-01T00:00:01.000000Z")
     manifest = _manifest()
-    plan_id = record_plan(conn, manifest, manifest_commit_sha="c",
-                          manifest_content_digest=manifest_content_digest(dumps(manifest)),
-                          manifest_path="p")
+    plan_id = _declare_committed(conn, manifest)
     acquisition_id = register_acquisition(
         conn, plan_id=plan_id, acquisition_policy_version=ACQ_POLICY,
         projection_policy_version=PROJ_POLICY, request_budget=10, credit_budget=10)
@@ -442,9 +490,7 @@ def test_unregistered_response_cannot_be_reused_as_a_probe(conn):
     _raw_response(conn, "raw_pre2", requested_at="2026-01-01T00:00:00.000000Z",
                   received_at="2026-01-01T00:00:01.000000Z")
     manifest = _manifest()
-    plan_id = record_plan(conn, manifest, manifest_commit_sha="c",
-                          manifest_content_digest=manifest_content_digest(dumps(manifest)),
-                          manifest_path="p")
+    plan_id = _declare_committed(conn, manifest)
     acquisition_id = register_acquisition(
         conn, plan_id=plan_id, acquisition_policy_version=ACQ_POLICY,
         projection_policy_version=PROJ_POLICY, request_budget=10, credit_budget=10)
@@ -465,9 +511,7 @@ def test_registered_probe_may_be_reused(conn):
         probe_report_path="ODDS_API_HISTORICAL_ENTITLEMENT_PROBE.md",
         probe_policy_version=PROBE_POLICY)
     manifest = _manifest()
-    plan_id = record_plan(conn, manifest, manifest_commit_sha="c",
-                          manifest_content_digest=manifest_content_digest(dumps(manifest)),
-                          manifest_path="p")
+    plan_id = _declare_committed(conn, manifest)
     acquisition_id = register_acquisition(
         conn, plan_id=plan_id, acquisition_policy_version=ACQ_POLICY,
         projection_policy_version=PROJ_POLICY, request_budget=10, credit_budget=10)
@@ -486,15 +530,13 @@ def test_filtered_probe_request_is_refused_by_the_gate(conn):
         conn, raw_response_id="raw_filtered", probe_report_commit_sha="abc",
         probe_report_path="p.md", probe_policy_version=PROBE_POLICY)
     manifest = _manifest()
-    plan_id = record_plan(conn, manifest, manifest_commit_sha="c",
-                          manifest_content_digest=manifest_content_digest(dumps(manifest)),
-                          manifest_path="p")
+    plan_id = _declare_committed(conn, manifest)
     acquisition_id = register_acquisition(
         conn, plan_id=plan_id, acquisition_policy_version=ACQ_POLICY,
         projection_policy_version=PROJ_POLICY, request_budget=10, credit_budget=10)
     record_attempt(conn, acquisition_id=acquisition_id, requested_at_bucket=BUCKET_A,
                    outcome="reused_probe_response", raw_response_id="raw_filtered")
-    report = certify_stage_a(conn, acquisition_id=acquisition_id, manifest=manifest)
+    report = _certify(conn, acquisition_id)
     assert not report.certified
     assert any("filtered request parameters" in f for f in report.failures)
 
@@ -579,7 +621,7 @@ def _complete_acquisition(conn: sqlite3.Connection) -> tuple[str, StageAManifest
 
 def test_a_complete_acquisition_certifies(conn):
     acquisition_id, manifest = _complete_acquisition(conn)
-    report = certify_stage_a(conn, acquisition_id=acquisition_id, manifest=manifest)
+    report = _certify(conn, acquisition_id)
     assert report.certified, report.failures
     assert report.counts["planned_buckets"] == 1
 
@@ -589,9 +631,7 @@ def test_missing_bucket_keeps_the_acquisition_incomplete(conn):
     manifest = _manifest(
         buckets=(BUCKET_A, BUCKET_B),
         targets=(StageATarget("gm_v1", BUCKET_A), StageATarget("gm_v2", BUCKET_B)))
-    plan_id = record_plan(conn, manifest, manifest_commit_sha="c",
-                          manifest_content_digest=manifest_content_digest(dumps(manifest)),
-                          manifest_path="p")
+    plan_id = _declare_committed(conn, manifest)
     acquisition_id = register_acquisition(
         conn, plan_id=plan_id, acquisition_policy_version=ACQ_POLICY,
         projection_policy_version=PROJ_POLICY, request_budget=10, credit_budget=10)
@@ -599,17 +639,37 @@ def test_missing_bucket_keeps_the_acquisition_incomplete(conn):
     record_attempt(conn, acquisition_id=acquisition_id, requested_at_bucket=BUCKET_A,
                    outcome="success_full_snapshot", raw_response_id="raw_only")
     _observation(conn, "hme_only", "raw_only")
-    report = certify_stage_a(conn, acquisition_id=acquisition_id, manifest=manifest)
+    report = _certify(conn, acquisition_id)
     assert not report.certified
     assert any("never requested" in f for f in report.failures)
 
 
 def test_manifest_target_omission_is_detected(conn):
-    acquisition_id, manifest = _complete_acquisition(conn)
-    tampered = _manifest(targets=(StageATarget("gm_v1", BUCKET_A),))
-    report = certify_stage_a(conn, acquisition_id=acquisition_id, manifest=tampered)
+    """A plan whose DB membership is richer than its committed artefact.
+
+    Since B2 the caller cannot hand certification a convenient manifest, so the
+    omission is expressed the only way that is now possible: the persisted plan
+    carries two targets while the artefact it names carries one.
+    """
+
+    _seed(conn)
+    full = _manifest()
+    short = _manifest(targets=(StageATarget("gm_v1", BUCKET_A),))
+    sha, name = _commit_manifest(short)
+    plan_id = _record_plan_unverified(
+        conn, full,                       # two targets persisted
+        manifest_commit_sha=sha,
+        manifest_content_digest=manifest_content_digest(dumps(short)),
+        manifest_path=name)               # artefact declares one
+    acquisition_id = register_acquisition(
+        conn, plan_id=plan_id, acquisition_policy_version=ACQ_POLICY,
+        projection_policy_version=PROJ_POLICY, request_budget=10,
+        credit_budget=10)
+
+    report = _certify(conn, acquisition_id)
     assert not report.certified
-    assert any("target population differs" in f for f in report.failures)
+    assert any("target population differs" in f for f in report.failures), \
+        report.failures
 
 
 def test_a_full_snapshot_with_no_observations_fails(conn):
@@ -617,7 +677,7 @@ def test_a_full_snapshot_with_no_observations_fails(conn):
     _raw_response(conn, "raw_empty")
     record_attempt(conn, acquisition_id=acquisition_id, requested_at_bucket=BUCKET_A,
                    outcome="success_full_snapshot", raw_response_id="raw_empty")
-    report = certify_stage_a(conn, acquisition_id=acquisition_id, manifest=manifest)
+    report = _certify(conn, acquisition_id)
     assert not report.certified
     assert any("projected no observations" in f for f in report.failures)
 
@@ -629,7 +689,7 @@ def test_empty_data_success_is_valid_zero_event_evidence(conn):
     _raw_response(conn, "raw_zero", body=_wrapper([]))
     record_attempt(conn, acquisition_id=acquisition_id, requested_at_bucket=BUCKET_A,
                    outcome="success_empty_data", raw_response_id="raw_zero")
-    report = certify_stage_a(conn, acquisition_id=acquisition_id, manifest=manifest)
+    report = _certify(conn, acquisition_id)
     assert report.certified, report.failures
 
 
@@ -638,7 +698,7 @@ def test_failed_request_never_becomes_no_market(conn):
     _raw_response(conn, "raw_500", status=500)
     record_attempt(conn, acquisition_id=acquisition_id, requested_at_bucket=BUCKET_A,
                    outcome="http_or_provider_failure", raw_response_id="raw_500")
-    report = certify_stage_a(conn, acquisition_id=acquisition_id, manifest=manifest)
+    report = _certify(conn, acquisition_id)
     # The bucket was requested, so it is not "not_requested" -- but a failure is
     # not projecting evidence either, so it cannot masquerade as zero events.
     assert report.counts["attempts"] == 1
@@ -696,8 +756,7 @@ def test_enriched_corpus_is_a_distinct_superseding_row(conn):
     new_id, lane_id = enrich_corpus_with_market_lane(
         conn, repo, parent_corpus_id=parent.corpus_version_id,
         acquisition_ids=[acquisition_id], provider=THE_ODDS_API_PROVIDER,
-        namespace_generation="v4",
-        **_lane_args(acquisition_id, manifest))
+        namespace_generation="v4", repo_root=_b2_repo())
 
     assert new_id != parent.corpus_version_id
     child = conn.execute(
@@ -724,8 +783,7 @@ def test_lane_cannot_attach_to_a_corpus_with_different_official_provenance(conn)
         enrich_corpus_with_market_lane(
             conn, repo, parent_corpus_id=wrong.corpus_version_id,
             acquisition_ids=[acquisition_id], provider=THE_ODDS_API_PROVIDER,
-            namespace_generation="v4",
-        **_lane_args(acquisition_id, manifest))
+            namespace_generation="v4", repo_root=_b2_repo())
 
 
 def test_lane_cannot_attach_to_a_corpus_with_a_different_target_set(conn):
@@ -735,8 +793,7 @@ def test_lane_cannot_attach_to_a_corpus_with_a_different_target_set(conn):
         enrich_corpus_with_market_lane(
             conn, repo, parent_corpus_id=wrong.corpus_version_id,
             acquisition_ids=[acquisition_id], provider=THE_ODDS_API_PROVIDER,
-            namespace_generation="v4",
-        **_lane_args(acquisition_id, manifest))
+            namespace_generation="v4", repo_root=_b2_repo())
 
 
 def test_market_lane_cannot_be_bound_to_a_corpus_that_does_not_commit_to_it(conn):
@@ -761,8 +818,7 @@ def test_forged_acquisition_set_digest_is_detected(conn):
     _, lane_id = enrich_corpus_with_market_lane(
         conn, repo, parent_corpus_id=parent.corpus_version_id,
         acquisition_ids=[acquisition_id], provider=THE_ODDS_API_PROVIDER,
-        namespace_generation="v4",
-        **_lane_args(acquisition_id, manifest))
+        namespace_generation="v4", repo_root=_b2_repo())
     # Add a second acquisition to the lane WITHOUT updating the set digest.
     plan_id = conn.execute("SELECT plan_id FROM stage_a_plans").fetchone()[0]
     second = register_acquisition(
@@ -818,8 +874,7 @@ def test_audit_citing_a_lane_for_another_provider_is_refused(conn):
     _, lane_id = enrich_corpus_with_market_lane(
         conn, repo, parent_corpus_id=parent.corpus_version_id,
         acquisition_ids=[acquisition_id], provider=THE_ODDS_API_PROVIDER,
-        namespace_generation="v4",
-        **_lane_args(acquisition_id, manifest))
+        namespace_generation="v4", repo_root=_b2_repo())
     with pytest.raises(sqlite3.IntegrityError, match="lane for a different provider"):
         _audit(conn, "ida_wrong", "balldontlie", lane_binding_id=lane_id)
 
@@ -830,8 +885,7 @@ def test_audit_digest_must_equal_its_cited_lane_digest(conn):
     _, lane_id = enrich_corpus_with_market_lane(
         conn, repo, parent_corpus_id=parent.corpus_version_id,
         acquisition_ids=[acquisition_id], provider=THE_ODDS_API_PROVIDER,
-        namespace_generation="v4",
-        **_lane_args(acquisition_id, manifest))
+        namespace_generation="v4", repo_root=_b2_repo())
     with pytest.raises(sqlite3.IntegrityError, match="does not equal its cited lane"):
         _audit(conn, "ida_forged", THE_ODDS_API_PROVIDER, lane_binding_id=lane_id,
                digest="FORGED")
@@ -880,8 +934,7 @@ def test_replace_cannot_mutate_a_lane_digest(conn):
     _, lane_id = enrich_corpus_with_market_lane(
         conn, repo, parent_corpus_id=parent.corpus_version_id,
         acquisition_ids=[acquisition_id], provider=THE_ODDS_API_PROVIDER,
-        namespace_generation="v4",
-        **_lane_args(acquisition_id, manifest))
+        namespace_generation="v4", repo_root=_b2_repo())
     lane = conn.execute(
         "SELECT * FROM corpus_evidence_lane_bindings WHERE lane_binding_id = ?",
         (lane_id,)).fetchone()
@@ -907,9 +960,7 @@ def test_one_response_cannot_serve_two_buckets_in_one_acquisition(conn):
     manifest = _manifest(
         buckets=(BUCKET_A, BUCKET_B),
         targets=(StageATarget("gm_v1", BUCKET_A), StageATarget("gm_v2", BUCKET_B)))
-    plan_id = record_plan(conn, manifest, manifest_commit_sha="c",
-                          manifest_content_digest=manifest_content_digest(dumps(manifest)),
-                          manifest_path="p")
+    plan_id = _declare_committed(conn, manifest)
     acquisition_id = register_acquisition(
         conn, plan_id=plan_id, acquisition_policy_version=ACQ_POLICY,
         projection_policy_version=PROJ_POLICY, request_budget=10, credit_budget=10)

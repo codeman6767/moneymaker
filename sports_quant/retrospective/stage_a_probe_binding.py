@@ -124,6 +124,44 @@ class GitObjectError(ProbeBindingError):
 # --------------------------------------------------------------------------- #
 # Git object resolution (probe reports only -- B2 remains open)
 # --------------------------------------------------------------------------- #
+#: Path shapes refused before they ever reach git. `git show` uses `<rev>:<path>`,
+#: so a path containing ':' could re-specify the revision; '..' could escape the
+#: declared tree; an absolute path is not a repository path at all; and a
+#: backslash is ambiguous between a Windows separator and a literal name.
+_UNSAFE_PATH_CHARS = (":", chr(92), chr(0))
+
+
+def validate_repo_path(path: str) -> str:
+    """Validate a repository-relative path, or refuse.
+
+    Defines the supported contract explicitly rather than relying on git to
+    reject a bad shape incidentally.
+    """
+
+    if not isinstance(path, str) or not path.strip():
+        raise ProbeBindingError("committed artefact path is empty")
+    if path != path.strip():
+        raise ProbeBindingError(f"committed artefact path {path!r} has outer whitespace")
+    if path.startswith("/") or (len(path) > 1 and path[1] == ":"):
+        raise ProbeBindingError(
+            f"committed artefact path {path!r} is absolute; a repository path is "
+            f"required")
+    for bad in _UNSAFE_PATH_CHARS:
+        if bad in path:
+            raise ProbeBindingError(
+                f"committed artefact path {path!r} contains an unsupported "
+                f"character {bad!r}")
+    if any(ch < " " for ch in path):
+        raise ProbeBindingError(
+            f"committed artefact path {path!r} contains a control character")
+    parts = path.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        raise ProbeBindingError(
+            f"committed artefact path {path!r} must be a normalized "
+            f"repository-relative path (no empty, '.' or '..' segments)")
+    return path
+
+
 def _git(*args: str, repo_root: Optional[Path] = None) -> subprocess.CompletedProcess[str]:
     """Run a read-only local git command. No network, ever.
 
@@ -164,21 +202,48 @@ def resolve_commit(commit_sha: str, *, repo_root: Optional[Path] = None) -> str:
     return commit_sha
 
 
-def load_committed_text(commit_sha: str, path: str, *,
-                        repo_root: Optional[Path] = None) -> str:
-    """Load ``path`` exactly as committed at ``commit_sha``.
+def load_committed_bytes(commit_sha: str, path: str, *,
+                         repo_root: Optional[Path] = None) -> bytes:
+    """Load the EXACT committed blob bytes for ``path`` at ``commit_sha``.
 
-    The working-tree copy is never consulted: a probe report that has since been
-    edited locally must not be able to change a historical verification result.
+    Binary, deliberately. An earlier text-mode reader applied Python universal
+    newline translation, so a file committed with CRLF came back with LF and any
+    SHA-256 taken over it did NOT fingerprint the committed blob -- two different
+    committed artefacts could produce one digest. `git cat-file blob` with no
+    text decoding is the only form that yields the real bytes.
+
+    The working-tree copy is never consulted: an artefact edited locally must not
+    be able to change a historical verification result.
     """
 
     resolved = resolve_commit(commit_sha, repo_root=repo_root)
-    blob = _git("show", f"{resolved}:{path}", repo_root=repo_root)
+    safe = validate_repo_path(path)
+    blob = subprocess.run(
+        ["git", "--no-optional-locks", "-C", str(repo_root or REPO_ROOT),
+         "cat-file", "blob", f"{resolved}:{safe}"],
+        capture_output=True, check=False)
     if blob.returncode != 0:
         raise GitObjectError(
-            f"path {path!r} does not exist at commit {resolved!r}; "
-            f"{blob.stderr.strip()[:120]}")
+            f"path {safe!r} does not exist at commit {resolved!r}; "
+            f"{blob.stderr.decode('utf-8', 'replace').strip()[:120]}")
     return blob.stdout
+
+
+def load_committed_text(commit_sha: str, path: str, *,
+                        repo_root: Optional[Path] = None) -> str:
+    """The committed blob decoded as UTF-8. Refuses invalid UTF-8.
+
+    Built on :func:`load_committed_bytes`, so it inherits exact-byte retrieval;
+    the decode is explicit rather than an accident of text-mode subprocess I/O.
+    """
+
+    raw = load_committed_bytes(commit_sha, path, repo_root=repo_root)
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise GitObjectError(
+            f"committed artefact {path!r} at {commit_sha!r} is not valid UTF-8: "
+            f"{exc}") from None
 
 
 # --------------------------------------------------------------------------- #
