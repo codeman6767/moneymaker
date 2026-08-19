@@ -137,6 +137,14 @@ _ENTRIES: tuple[TableEntry, ...] = (
           "DQ timeline; active-at-cutoff via detected_at<=cutoff AND (resolved_at IS NULL OR "
           "resolved_at>cutoff). Read via SqliteDataQualityRepository.list_active_at, not "
           "latest_as_of; no content_hash column.", observed_at="detected_at", content_column=None),
+    _unsupported("corpus_evidence_lane_acquisitions",
+                 "Lane-R (f022) membership of an evidence lane. Provenance bookkeeping naming "
+                 "which acquisitions compose a lane; carries no observation, no canonical game "
+                 "id and no value that could be a predictor."),
+    _unsupported("corpus_evidence_lane_bindings",
+                 "Lane-R (f022) per-lane evidence digest and policy versions. Manifest-level "
+                 "provenance describing a whole reconstruction lane, exactly like "
+                 "reconstruction_corpus_versions; not a per-row fact."),
     _asof("entity_match_decisions", "match_id",
           "Append-only except review columns; as-of via decided_at<=cutoff. Read via "
           "decisions_for_source, not latest_as_of; no content_hash column. Review columns are "
@@ -261,6 +269,32 @@ _ENTRIES: tuple[TableEntry, ...] = (
     _asof("sportsbook_price_snapshots", "snapshot_id",
           "Price observations, as-of (feature: price as of cutoff). The closing-line query over "
           "this table is isolated in the evaluation_only module."),
+    # f022 Stage-A acquisition provenance. Every one of these is ACQUISITION
+    # bookkeeping -- what we planned to request, what we requested, and what came
+    # back. None of them is an observation about a game, none carries a feature
+    # value, and none may ever become a Lane-L feature source. Stage A is
+    # identity-free by construction, so none carries a provider->canonical link
+    # either. `stage_a_plan_targets` does name canonical games, but only as a
+    # DECLARED POPULATION -- "these are the games this plan is about" -- which is
+    # a statement about the plan, not a fact knowable at any decision time.
+    _unsupported("stage_a_acquisitions",
+                 "Lane-R (f022) one execution of a Stage-A plan. Run bookkeeping."),
+    _unsupported("stage_a_plan_targets",
+                 "Lane-R (f022) declared target population and target->bucket mapping. Names "
+                 "canonical games as a plan-scope declaration only; it is not an observation "
+                 "and holds nothing that was knowable at a forward decision time."),
+    _unsupported("stage_a_planned_buckets",
+                 "Lane-R (f022) the closed set of authorized request buckets. A request bucket "
+                 "is what WE asked for, never a provider observation."),
+    _unsupported("stage_a_plans",
+                 "Lane-R (f022) Stage-A plan identity and its manifest binding. Manifest-level "
+                 "provenance; not a per-row fact and not a predictor."),
+    _unsupported("stage_a_probe_registrations",
+                 "Lane-R (f022) capability-probe reuse eligibility. Grants no identity semantics "
+                 "and holds no observation."),
+    _unsupported("stage_a_request_attempts",
+                 "Lane-R (f022) per-attempt request outcome ledger. Records whether a request "
+                 "succeeded or failed -- acquisition bookkeeping, never evidence about a game."),
     _unsupported("static_crosswalk_provenance",
                  "Lane-R (f018) provider->canonical static crosswalk. Same reasoning as "
                  "team_aliases and the e017 identity tables: a RESOLVER input, never a predictor. "

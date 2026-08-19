@@ -130,6 +130,14 @@ def put_raw(conn: sqlite3.Connection, rid: str = "raw_1", **over: Any) -> str:
     return rid
 
 
+
+def _received_at(conn: sqlite3.Connection, raw_response_id: str) -> str:
+    row = conn.execute(
+        "SELECT received_at FROM raw_responses WHERE raw_response_id = ?",
+        (raw_response_id,)).fetchone()
+    return str(row[0]) if row is not None else utc_now_iso()
+
+
 def store(conn: sqlite3.Connection, obs: MarketEventObservation, *,
           rid: str = "raw_1", **override: Any) -> str:
     now = utc_now_iso()
@@ -142,7 +150,11 @@ def store(conn: sqlite3.Connection, obs: MarketEventObservation, *,
         "commence_time": obs.commence_time, "home_team_raw": obs.home_team_raw,
         "away_team_raw": obs.away_team_raw,
         "observation_content_hash": observation_content_hash(obs),
-        "raw_response_id": rid, "observed_at": now, "created_at": now}
+        # Since f022, `observed_at` MUST equal the cited response's `received_at`
+        # (it records when WE possessed the evidence). Deriving it here keeps
+        # every test below aimed at what it actually claims to test.
+        "raw_response_id": rid, "observed_at": _received_at(conn, rid),
+        "created_at": now}
     values.update(override)
     conn.execute(
         f"INSERT INTO historical_market_event_observations "  # noqa: S608

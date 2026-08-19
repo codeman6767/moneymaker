@@ -186,17 +186,37 @@ def test_null_commence_time_hashes_distinctly_from_any_string() -> None:
 def test_the_hash_excludes_our_clocks_and_db_local_ids(
     db: sqlite3.Connection,
 ) -> None:
-    """Same provider statement, different observed_at -> same hash, one row."""
+    """Same provider statement, different observed_at -> same hash, one row.
+
+    Since f022 the caller cannot choose `observed_at` -- it is owned by the cited
+    response's `received_at`. So the two clocks are varied the only way that is
+    now truthful: by citing two DIFFERENT preserved exchanges, received a month
+    apart. The provider's statement is identical in both, so the content hash and
+    therefore the observation id are identical, and the second is a replay that
+    writes nothing and does not refresh when we first learned it.
+    """
+
+    now = utc_now_iso()
+    db.execute(
+        "INSERT INTO raw_responses (raw_response_id, run_id, provider, endpoint, "
+        "request_params_json, http_status, response_headers_json, body, "
+        "body_bytes, body_hash, content_hash, requested_at, received_at, "
+        "elapsed_ns, created_at) VALUES ('raw_later','run_1', ?, "
+        "'/v4/historical/sports/basketball_nba/events', '{}', 200, '{}', '[]', "
+        "2, 'raw_later', 'c', '2026-09-01T00:00:00.000000Z', "
+        "'2026-09-01T00:00:00.000000Z', 1, ?)", (ODDS, now))
+    db.commit()
+    receipt_first = db.execute(
+        "SELECT received_at FROM raw_responses WHERE raw_response_id = 'raw_ok'"
+    ).fetchone()[0]
 
     obs = observation()
-    first = repo(db).record(obs, raw_response_id="raw_ok",
-                            observed_at="2026-08-01T00:00:00.000000Z")
-    second = repo(db).record(obs, raw_response_id="raw_ok",
-                             observed_at="2026-09-01T00:00:00.000000Z")
+    first = repo(db).record(obs, raw_response_id="raw_ok")
+    second = repo(db).record(obs, raw_response_id="raw_later")
     assert first.created is True
     assert second.created is False
     assert first.row.observation_content_hash == second.row.observation_content_hash
-    assert second.row.observed_at == "2026-08-01T00:00:00.000000Z"
+    assert second.row.observed_at == receipt_first
 
 
 @pytest.mark.parametrize("field,value", [
@@ -347,6 +367,12 @@ def test_direct_sql_refuses_a_malformed_snapshot_timestamp(
     db: sqlite3.Connection,
 ) -> None:
     now = utc_now_iso()
+    # observed_at is set to the cited response's received_at so that the
+    # MALFORMED SNAPSHOT TIMESTAMP is what this test actually exercises, rather
+    # than tripping the f022 observed_at guard first.
+    receipt = db.execute(
+        "SELECT received_at FROM raw_responses WHERE raw_response_id = 'raw_ok'"
+    ).fetchone()[0]
     with pytest.raises(sqlite3.IntegrityError, match="real instant"):
         db.execute(
             "INSERT INTO historical_market_event_observations (observation_id, "
@@ -356,7 +382,7 @@ def test_direct_sql_refuses_a_malformed_snapshot_timestamp(
             "observation_content_hash, raw_response_id, observed_at, created_at) "
             "VALUES ('hme_x','lg_nba',?,?, 'basketball_nba', ?, ?, "
             "'2026-02-30T23:05:00.000000Z', NULL, 'H','A','hash','raw_ok', ?, ?)",
-            (ODDS, GEN, EVENT_A, BUCKET, now, now))
+            (ODDS, GEN, EVENT_A, BUCKET, receipt, now))
 
 
 def test_the_requested_bucket_and_the_snapshot_instant_stay_distinct(

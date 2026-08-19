@@ -22,12 +22,18 @@ Nothing here imports a provider client or opens a socket.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Optional
 
+from ..db.schema import THE_ODDS_API_PROVIDER
 from ..request_control import EndpointCostPolicy, RequestUnit
-from .cost_policies import build_balldontlie_policy, build_mlb_policy
+from .cost_policies import (
+    build_balldontlie_policy,
+    build_mlb_policy,
+    build_odds_api_policy,
+)
 
 PLAN_VERSION = "f1a-plan-v1"
 
@@ -234,8 +240,50 @@ class RequestPlan:
         return self.credits_max()
 
 
+class UnknownProviderError(ValueError):
+    """Raised when no cost policy is registered for a provider.
+
+    This fails CLOSED by design. The previous implementation was
+    ``build_balldontlie_policy() if provider == "balldontlie" else build_mlb_policy()``
+    -- a binary fallback in which EVERY unknown provider silently inherited MLB's
+    model. The v22 architecture review proved the consequence: a Stage-A plan for
+    The Odds API resolved to ``mlb-cost-v1``, which is keyless and reports credits
+    as *not applicable*, so a credit-metered provider would have been planned and
+    budgeted as if its requests were free -- and the emitted
+    ``cost_policy_version`` was a real registered version, so it passed the
+    manifest's supported-version check rather than being rejected.
+    """
+
+
+#: Exact provider -> cost-policy builder. Membership is explicit: adding a
+#: provider is an edit here, never an accident of falling off the end of an
+#: if/else. Spelling is exact, because a near-miss is a different provider.
+_COST_POLICY_BUILDERS: dict[str, Callable[[], EndpointCostPolicy]] = {
+    "mlb_statsapi": build_mlb_policy,
+    "balldontlie": build_balldontlie_policy,
+    THE_ODDS_API_PROVIDER: build_odds_api_policy,
+}
+
+
 def _policy_for(provider: str) -> EndpointCostPolicy:
-    return build_balldontlie_policy() if provider == "balldontlie" else build_mlb_policy()
+    """Resolve a provider's cost policy, or refuse.
+
+    No normalization is applied. A case variant, a padded string or a misspelling
+    is a DIFFERENT provider identifier and is refused rather than repaired into
+    one that happens to exist -- repairing it would reintroduce the same class of
+    silent mis-costing this function was hardened against.
+    """
+
+    try:
+        builder = _COST_POLICY_BUILDERS[provider]
+    except (KeyError, TypeError):
+        known = ", ".join(sorted(_COST_POLICY_BUILDERS))
+        raise UnknownProviderError(
+            f"no cost policy is registered for provider {provider!r}; "
+            f"known providers are: {known}. Refusing to estimate cost under "
+            f"another provider's model."
+        ) from None
+    return builder()
 
 
 def _days_in_range(from_date: str, to_date: Optional[str]) -> int:

@@ -127,6 +127,14 @@ def put_raw(conn: sqlite3.Connection, rid: str, *, body: str = wrapper(),
     return rid
 
 
+
+def _received_at(conn: sqlite3.Connection, raw_response_id: str) -> str:
+    row = conn.execute(
+        "SELECT received_at FROM raw_responses WHERE raw_response_id = ?",
+        (raw_response_id,)).fetchone()
+    return str(row[0]) if row is not None else utc_now_iso()
+
+
 def store(conn: sqlite3.Connection, obs: MarketEventObservation, *,
           rid: str = "raw_1", **override: Any) -> str:
     now = utc_now_iso()
@@ -139,7 +147,11 @@ def store(conn: sqlite3.Connection, obs: MarketEventObservation, *,
         "commence_time": obs.commence_time, "home_team_raw": obs.home_team_raw,
         "away_team_raw": obs.away_team_raw,
         "observation_content_hash": observation_content_hash(obs),
-        "raw_response_id": rid, "observed_at": now, "created_at": now}
+        # Since f022, `observed_at` MUST equal the cited response's `received_at`
+        # (it records when WE possessed the evidence). Deriving it here keeps
+        # every test below aimed at what it actually claims to test.
+        "raw_response_id": rid, "observed_at": _received_at(conn, rid),
+        "created_at": now}
     values.update(override)
     conn.execute(
         f"INSERT INTO historical_market_event_observations "  # noqa: S608
@@ -452,20 +464,31 @@ def test_a_removed_sport_title_does_not_break_v1() -> None:
 # --------------------------------------------------------------------------- #
 # observed_at ownership (P)
 # --------------------------------------------------------------------------- #
-def test_observed_at_is_not_constrained_by_this_verifier(
+def test_observed_at_is_now_owned_by_the_database_not_by_this_verifier(
     db: sqlite3.Connection,
 ) -> None:
-    """RECORDED BOUNDARY, not a defect of this layer.
+    """The handed-forward requirement, now DISCHARGED by f022.
 
-    `observed_at` is our materialization clock and is deliberately outside the
-    semantic content hash (v20 review). It is also not derivable from the body,
-    so this verifier cannot and does not constrain it: an arbitrary value still
-    passes. Whichever layer owns acquisition provenance must own that clock --
-    it is not owned here, and the review hands that requirement forward.
+    This layer still does not constrain `observed_at`: it is not derivable from
+    the response body, and it remains outside the semantic content hash (the v20
+    decision, unchanged). The review handed the clock forward to whichever layer
+    owns acquisition provenance -- and f022 is that layer.
+
+    So the boundary is unchanged but the hole is closed: an arbitrary value no
+    longer passes, because the DATABASE now requires `observed_at` to equal the
+    cited response's `received_at`. Both halves are asserted here.
     """
 
     put_raw(db, "raw_1", body=wrapper(f"[{EVENT_A_TEXT}]"))
-    store(db, obs_a(), observed_at="2030-01-01T00:00:00.000000Z")
+
+    # 1. The database owns the clock: an arbitrary value is refused outright.
+    with pytest.raises(sqlite3.IntegrityError,
+                       match="must equal the cited raw response"):
+        store(db, obs_a(), observed_at="2030-01-01T00:00:00.000000Z")
+
+    # 2. This verifier's remit is unchanged -- a correctly-clocked row projects
+    #    and verifies exactly as before, and the verifier examines the BODY.
+    store(db, obs_a())
     assert verify_historical_market_event_evidence(db).verified
 
 

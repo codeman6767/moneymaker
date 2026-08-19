@@ -72,16 +72,36 @@ def db(tmp_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _receipt(conn: sqlite3.Connection, raw_response_id: str = "raw_ok") -> str:
+    """The cited response's `received_at`, which f022 requires `observed_at` to equal.
+
+    Used so a REPLACE-mutation test still trips the APPEND-ONLY guard rather than
+    the observed_at guard, keeping each test aimed at what it claims to prove.
+    """
+
+    return str(conn.execute(
+        "SELECT received_at FROM raw_responses WHERE raw_response_id = ?",
+        (raw_response_id,)).fetchone()[0])
+
+
 def raw_insert(conn: sqlite3.Connection, **over: object) -> None:
     now = utc_now_iso()
+    cited = str(over.get("raw_response_id", "raw_ok"))
+    # Since f022, `observed_at` MUST equal the cited response's `received_at`:
+    # it records when WE possessed the evidence, and tying it to the preserved
+    # exchange removes a second independently-writable clock. Defaulting it here
+    # keeps every test below expressing its original intent.
+    receipt = conn.execute(
+        "SELECT received_at FROM raw_responses WHERE raw_response_id = ?",
+        (cited,)).fetchone()
     values: dict[str, object] = dict(
         observation_id="hme_probe", league_id="lg_nba", provider=ODDS,
         namespace_generation=GEN, sport_key="basketball_nba",
         provider_event_id=EVENT_A, requested_at_bucket=BUCKET,
         provider_snapshot_timestamp=SNAP, commence_time=None,
         home_team_raw="Boston Celtics", away_team_raw="Miami Heat",
-        observation_content_hash="hash", raw_response_id="raw_ok",
-        observed_at=now, created_at=now)
+        observation_content_hash="hash", raw_response_id=cited,
+        observed_at=(receipt[0] if receipt is not None else now), created_at=now)
     values.update(over)
     conn.execute(
         f"INSERT INTO historical_market_event_observations ({', '.join(_COLS)}) "  # noqa: S608
@@ -118,7 +138,7 @@ def test_replace_into_cannot_mutate_an_observation(db: sqlite3.Connection) -> No
             f"REPLACE INTO historical_market_event_observations "  # noqa: S608
             f"({', '.join(_COLS)}) VALUES ('hme_probe','lg_nba',?,?, "
             "'basketball_nba', ?, ?, ?, NULL, 'PWNED','A','h','raw_ok',?,?)",
-            (ODDS, GEN, EVENT_A, BUCKET, SNAP, utc_now_iso(), utc_now_iso()))
+            (ODDS, GEN, EVENT_A, BUCKET, SNAP, _receipt(db), utc_now_iso()))
     assert db.execute(
         "SELECT home_team_raw FROM historical_market_event_observations"
     ).fetchone()["home_team_raw"] == "Boston Celtics"
@@ -133,7 +153,7 @@ def test_insert_or_replace_cannot_mutate_an_observation(
             f"INSERT OR REPLACE INTO historical_market_event_observations "  # noqa: S608
             f"({', '.join(_COLS)}) VALUES ('hme_probe','lg_nba',?,?, "
             "'basketball_nba', ?, ?, ?, NULL, 'PWNED','A','h','raw_ok',?,?)",
-            (ODDS, GEN, EVENT_A, BUCKET, SNAP, utc_now_iso(), utc_now_iso()))
+            (ODDS, GEN, EVENT_A, BUCKET, SNAP, _receipt(db), utc_now_iso()))
 
 
 def test_replace_cannot_swap_the_cited_raw_response_body(
@@ -584,22 +604,29 @@ def test_f020_is_preserved_byte_for_byte() -> None:
 
 
 def test_f021_adds_no_table(tmp_path: Path) -> None:
-    """Triggers only: the table count is unchanged from v20."""
+    """Triggers only: the table count is unchanged from v20 to v21.
+
+    Pinned to v21 explicitly rather than to "the current version": f022 DOES add
+    tables, so migrating to HEAD would no longer test what this asserts.
+    """
 
     from sports_quant.db.engine import discover_migrations
 
-    partial = tmp_path / "mig20"
-    partial.mkdir()
-    for migration in discover_migrations():
-        if migration.version <= 20:
-            (partial / f"{migration.name}.sql").write_text(
-                migration.sql, encoding="utf-8")
+    def _dir_through(version: int, name: str) -> Path:
+        directory = tmp_path / name
+        directory.mkdir()
+        for migration in discover_migrations():
+            if migration.version <= version:
+                (directory / f"{migration.name}.sql").write_text(
+                    migration.sql, encoding="utf-8")
+        return directory
+
     at20 = tmp_path / "at20.db"
-    Database(at20, migrations_dir=partial).migrate()
+    Database(at20, migrations_dir=_dir_through(20, "mig20")).migrate()
     count20 = sqlite3.connect(at20).execute(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table'").fetchone()[0]
 
-    Database(at20).migrate()
+    Database(at20, migrations_dir=_dir_through(21, "mig21")).migrate()
     count21 = sqlite3.connect(at20).execute(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table'").fetchone()[0]
     assert count20 == count21 == 53

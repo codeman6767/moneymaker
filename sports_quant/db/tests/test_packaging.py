@@ -73,7 +73,7 @@ def test_wheel_includes_every_migration(built_wheel: tuple[list[str], str]) -> N
     assert "sports_quant/db/migrations/d009_provider_infra.sql" in names
     assert "sports_quant/db/migrations/e017_provider_identity.sql" in names
     assert "sports_quant/db/migrations/f018_retrospective_provenance.sql" in names
-    assert migrations[-1] == "f021_append_only_replace_and_event_id_type.sql"
+    assert migrations[-1] == "f022_stage_a_provenance_and_evidence_lanes.sql"
 
 
 def test_wheel_declares_console_entry_point(built_wheel: tuple[list[str], str]) -> None:

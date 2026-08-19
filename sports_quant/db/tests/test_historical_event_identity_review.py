@@ -91,6 +91,7 @@ def _seed(conn: sqlite3.Connection) -> None:
 
 def _corpus(conn: sqlite3.Connection, *, map_digest: str | None,
             source_digest: str = "SRC_DIGEST_A",
+            market_digest: str | None = None,
             corpus_id: str = "rcv_test") -> str:
     now = utc_now_iso()
     conn.execute(
@@ -98,29 +99,73 @@ def _corpus(conn: sqlite3.Connection, *, map_digest: str | None,
         "provenance_class, league_id, reconstruction_policy_version, "
         "cutoff_policy_id, cutoff_policy_version, source_corpus_digest, "
         "target_set_digest, static_identity_map_digest, g1_variant, code_version, "
-        "semantic_digest, created_at) VALUES (?, 'reconstructed_research', "
-        "'lg_nba', 'p-v1', 'cut', 'v1', ?, 'TGT', ?, 'g1_b_core', 'rev', ?, ?)",
-        (corpus_id, source_digest, map_digest, f"SEM_{corpus_id}", now))
+        "market_evidence_digest, semantic_digest, created_at) VALUES "
+        "(?, 'reconstructed_research', "
+        "'lg_nba', 'p-v1', 'cut', 'v1', ?, 'TGT', ?, 'g1_b_core', 'rev', ?, ?, ?)",
+        (corpus_id, source_digest, map_digest,
+         source_digest if market_digest is None else market_digest,
+         f"SEM_{corpus_id}", now))
     conn.commit()
     return corpus_id
+
+
+def _lane(conn: sqlite3.Connection, *, corpus: str, provider: str,
+          generation: str, digest: str = "SRC_DIGEST_A",
+          lane_id: str = "eln_test", league: str = "lg_nba") -> str:
+    """Create the f022 evidence-lane binding a secondary-provider audit needs.
+
+    Since v22 a non-official-provider audit MUST cite a lane: the corpus-level
+    source-digest path is reserved for legacy official audits. The parent corpus
+    must also commit to the lane digest in `market_evidence_digest`, which is why
+    `_corpus` writes it.
+    """
+
+    conn.execute(
+        "INSERT INTO corpus_evidence_lane_bindings (lane_binding_id, "
+        "corpus_version_id, evidence_lane, provider, namespace_generation, "
+        "league_id, digest_policy_version, lane_evidence_digest, "
+        "acquisition_set_digest, projection_policy_version, created_at) "
+        "VALUES (?, ?, 'market_events_e0', ?, ?, ?, 'market-events-e0-v1', ?, "
+        "'ACQSET', 'hme-projection-v1', ?)",
+        (lane_id, corpus, provider, generation, league, digest, utc_now_iso()))
+    conn.commit()
+    return lane_id
 
 
 def _audit(conn: sqlite3.Connection, *, provider: str, generation: str,
            verified: int, verdict: str = "accepted",
            source_digest: str = "SRC_DIGEST_A",
-           audit_id: str = "ida_forged", league: str = "lg_nba") -> tuple[str, str]:
-    """Insert an identity audit by DIRECT SQL, bypassing every code-level check."""
+           audit_id: str = "ida_forged", league: str = "lg_nba",
+           lane_binding_id: str | None = None,
+           auto_lane: bool = True) -> tuple[str, str]:
+    """Insert an identity audit by DIRECT SQL, bypassing every code-level check.
+
+    Since v22 a non-official provider must cite an evidence lane, so one is
+    minted automatically when the parent corpus exists and commits to this
+    digest. Pass ``auto_lane=False`` to exercise the refusal itself.
+    """
 
     digest = f"SEMDIG_{audit_id}"
+    if (auto_lane and lane_binding_id is None
+            and provider not in ("balldontlie", "mlb_statsapi")):
+        committed = conn.execute(
+            "SELECT corpus_version_id FROM reconstruction_corpus_versions "
+            "WHERE market_evidence_digest = ? AND league_id = ?",
+            (source_digest, league)).fetchone()
+        if committed is not None:
+            lane_binding_id = _lane(
+                conn, corpus=str(committed[0]), provider=provider,
+                generation=generation, digest=source_digest,
+                lane_id=f"eln_{audit_id}", league=league)
     conn.execute(
         "INSERT INTO identity_audit_records (identity_audit_id, league_id, "
         "provider, namespace_generation, namespace_verified, entity_type, "
         "source_corpus_digest, audit_policy_version, distinct_ids, "
         "total_observations, collision_count, flagged_count, verdict, "
-        "semantic_digest, created_at) VALUES (?,?,?,?,?, 'game', ?, 'pol-v1', "
-        "2, 8, 0, 0, ?, ?, ?)",
+        "semantic_digest, created_at, lane_binding_id) VALUES (?,?,?,?,?, 'game', "
+        "?, 'pol-v1', 2, 8, 0, 0, ?, ?, ?, ?)",
         (audit_id, league, provider, generation, verified, source_digest,
-         verdict, digest, utc_now_iso()))
+         verdict, digest, utc_now_iso(), lane_binding_id))
     conn.commit()
     return audit_id, digest
 
@@ -236,18 +281,27 @@ def test_an_unverified_audit_still_cannot_be_accepted(db: sqlite3.Connection) ->
 def test_direct_sql_can_forge_an_accepted_secondary_provider_audit(
     db: sqlite3.Connection,
 ) -> None:
-    """DEFECT D2: the DB does not know which generations are attested.
+    """DEFECT D2, now CLOSED by f022.
 
-    ``ida_accepted_is_clean`` checks only ``namespace_verified = 1`` -- a
-    caller-asserted integer. ``ATTESTED_GENERATIONS`` lives in Python alone.
+    At v19-v21 this forge succeeded: ``ida_accepted_is_clean`` checked only
+    ``namespace_verified = 1`` -- a caller-asserted integer -- while
+    ``ATTESTED_GENERATIONS`` lived in Python alone, so direct SQL produced an
+    ACCEPTED secondary-provider audit.
+
+    Since f022 a non-official-provider audit MUST cite an evidence lane binding,
+    and the corpus-level source-digest path is reserved for legacy official
+    audits. The forge is refused at the DATABASE, with no lane to cite.
+
+    ``namespace_verified`` remains caller-asserted; what changed is that
+    asserting it is no longer sufficient to land an accepted secondary audit.
     """
 
-    audit_id, _ = _audit(db, provider=ODDS, generation=ODDS_GEN, verified=1)
-    row = db.execute(
-        "SELECT verdict, namespace_verified FROM identity_audit_records "
-        "WHERE identity_audit_id = ?", (audit_id,)).fetchone()
-    assert row["verdict"] == "accepted"
-    assert row["namespace_verified"] == 1
+    with pytest.raises(sqlite3.IntegrityError,
+                       match="must cite an evidence lane binding"):
+        _audit(db, provider=ODDS, generation=ODDS_GEN, verified=1,
+               auto_lane=False)
+    assert db.execute(
+        "SELECT COUNT(*) FROM identity_audit_records").fetchone()[0] == 0
 
 
 def test_a_forged_audit_admits_a_secondary_provider_game_crosswalk(
@@ -346,12 +400,25 @@ def test_an_audit_over_a_different_source_corpus_is_refused(
 ) -> None:
     """G5 point 8 enforced in SQL: a narrower audit never transfers."""
 
-    corpus = _corpus(db, map_digest=attestation_map_digest(),
-                     source_digest="SRC_DIGEST_A")
-    audit_id, digest = _audit(db, provider=ODDS, generation=ODDS_GEN, verified=1,
-                              source_digest="SRC_DIGEST_B")
+    _corpus(db, map_digest=attestation_map_digest(), source_digest="SRC_DIGEST_A")
+    # f022 moves this refusal EARLIER for a secondary provider: the audit cites
+    # evidence (SRC_DIGEST_B) that no corpus in this database commits to, so
+    # there is no lane it can legitimately bind, and the audit itself is refused
+    # rather than surviving to be caught at crosswalk time. The invariant is
+    # unchanged -- a narrower audit never transfers to a wider reconstruction.
+    with pytest.raises(sqlite3.IntegrityError,
+                       match="must cite an evidence lane binding"):
+        _audit(db, provider=ODDS, generation=ODDS_GEN, verified=1,
+               source_digest="SRC_DIGEST_B", auto_lane=False)
+
+    # The legacy OFFICIAL path still enforces it at the crosswalk, unchanged.
+    corpus_b = _corpus(db, map_digest=attestation_map_digest(),
+                       source_digest="SRC_DIGEST_A", corpus_id="rcv_official")
+    audit_id, digest = _audit(db, provider="balldontlie", generation="v1",
+                              verified=1, source_digest="SRC_DIGEST_B",
+                              audit_id="ida_official")
     with pytest.raises(sqlite3.IntegrityError, match="different source corpus"):
-        _crosswalk(db, corpus=corpus, provider=ODDS, generation=ODDS_GEN,
+        _crosswalk(db, corpus=corpus_b, provider="balldontlie", generation="v1",
                    provider_id=EVENT_A, canonical="gm_nba_1",
                    audit_id=audit_id, audit_digest=digest)
 

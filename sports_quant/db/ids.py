@@ -112,6 +112,18 @@ IDENTITY_FINDING_PREFIX: Final = "idf_"
 STATIC_CROSSWALK_PREFIX: Final = "xwk_"
 RECONSTRUCTED_INPUT_PREFIX: Final = "rip_"
 
+# Phase F (f022): Stage-A acquisition provenance and corpus evidence lanes. All
+# surrogate, for the same reason as f018's: a plan is identified by its
+# `plan_digest` and a lane by its evidence digest, so deriving the row id from
+# the digest would only create two spellings of one identity. An acquisition is
+# deliberately NOT derived from the plan digest -- one plan may be executed more
+# than once, and a derived id would make independent re-execution unrepresentable.
+STAGE_A_PLAN_PREFIX: Final = "sap_"
+STAGE_A_ACQUISITION_PREFIX: Final = "sga_"
+STAGE_A_ATTEMPT_PREFIX: Final = "sat_"
+STAGE_A_PROBE_REGISTRATION_PREFIX: Final = "spr_"
+EVIDENCE_LANE_BINDING_PREFIX: Final = "eln_"
+
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
 
 
@@ -412,3 +424,24 @@ def new_static_crosswalk_id() -> str:
 
 def new_reconstructed_input_id() -> str:
     return prefixed_id(RECONSTRUCTED_INPUT_PREFIX)
+
+
+# Phase F (f022) Stage-A provenance factories.
+def new_stage_a_plan_id() -> str:
+    return prefixed_id(STAGE_A_PLAN_PREFIX)
+
+
+def new_stage_a_acquisition_id() -> str:
+    return prefixed_id(STAGE_A_ACQUISITION_PREFIX)
+
+
+def new_stage_a_attempt_id() -> str:
+    return prefixed_id(STAGE_A_ATTEMPT_PREFIX)
+
+
+def new_stage_a_probe_registration_id() -> str:
+    return prefixed_id(STAGE_A_PROBE_REGISTRATION_PREFIX)
+
+
+def new_evidence_lane_binding_id() -> str:
+    return prefixed_id(EVIDENCE_LANE_BINDING_PREFIX)

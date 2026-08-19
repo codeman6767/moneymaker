@@ -22,6 +22,7 @@ fail closed on an unclassifiable one.
 
 from __future__ import annotations
 
+from ..db.schema import THE_ODDS_API_PROVIDER
 from ..request_control import (
     RATE_BASIS_PROJECT_COURTESY,
     EndpointCostPolicy,
@@ -124,6 +125,49 @@ def build_balldontlie_policy() -> EndpointCostPolicy:
         costs={},
         classifier=_classify_balldontlie,
         known_families=BALLDONTLIE_FAMILIES,
+    )
+
+
+# --- THE ODDS API (credit metered) ----------------------------------------- #
+# Unlike the two F1 providers, this one IS credit metered: the account carries a
+# finite historical quota and each historical request consumes from it. The cost
+# model must therefore be explicit rather than inherited, which is precisely the
+# fail-open the v22 architecture review proved (`_policy_for` previously fell
+# through to MLB for every unknown provider, so a Stage-A plan would have been
+# costed under a keyless provider's model and would have reported credits as
+# "not applicable" while spending real quota).
+#
+# Cost basis: the historical EVENTS endpoint. The entitlement probe measured a
+# quota decrement of exactly 1 for one such request, which is the only cost this
+# policy claims. Other Odds endpoints (odds, scores) are deliberately ABSENT:
+# with ``credit_applicable`` True, a family absent from ``costs`` has an UNKNOWN
+# cost and any credit-capped plan reaching it fails closed rather than assuming 1.
+ODDS_API_FAMILIES: frozenset[str] = frozenset({"historical_events"})
+
+#: Planned credit cost of one historical EVENTS request.
+ODDS_HISTORICAL_EVENTS_CREDIT_COST: int = 1
+
+ODDS_COST_POLICY_VERSION = "odds-cost-v1"
+
+
+def _classify_odds_api(path: str) -> str:
+    p = path.lower()
+    # Exact endpoint shape only. A historical ODDS or SCORES path must NOT be
+    # classified as the events family: they are separately priced and are not
+    # authorized here.
+    if "/historical/" in p and p.rstrip("/").endswith("/events"):
+        return "historical_events"
+    return "unknown"
+
+
+def build_odds_api_policy() -> EndpointCostPolicy:
+    return EndpointCostPolicy(
+        provider=THE_ODDS_API_PROVIDER,
+        version=ODDS_COST_POLICY_VERSION,
+        credit_applicable=True,
+        costs={"historical_events": ODDS_HISTORICAL_EVENTS_CREDIT_COST},
+        classifier=_classify_odds_api,
+        known_families=ODDS_API_FAMILIES,
     )
 
 

@@ -114,13 +114,36 @@ class SqliteMarketObservationRepository:
             return RecordedObservation(row=existing, created=False)
 
         now = utc_now_iso()
+        # Since f022 the caller does NOT choose `observed_at`: it MUST equal the
+        # cited response's `received_at`. Deriving it here rather than accepting
+        # a parameter removes a second independently-writable clock, which is
+        # what made the value unfalsifiable before. The DB enforces the same
+        # equality, so a direct-SQL writer cannot route around this.
+        receipt = self._conn.execute(
+            "SELECT received_at FROM raw_responses WHERE raw_response_id = ?",
+            (raw_response_id,),
+        ).fetchone()
+        if receipt is None:
+            raise RepositoryError(
+                f"refused to record observation {oid!r}: it cites raw response "
+                f"{raw_response_id!r}, which is not preserved in this database."
+            )
+        derived_observed_at = str(receipt[0])
+        if observed_at is not None and observed_at != derived_observed_at:
+            raise RepositoryError(
+                f"refused to record observation {oid!r}: observed_at "
+                f"{observed_at!r} does not equal the cited raw response's "
+                f"received_at {derived_observed_at!r}. observed_at records when "
+                f"WE possessed the evidence and is owned by the preserved "
+                f"exchange, not by the caller."
+            )
         values = (
             oid, observation.league_id, observation.provider,
             observation.namespace_generation, observation.sport_key,
             observation.provider_event_id, observation.requested_at_bucket,
             observation.provider_snapshot_timestamp, observation.commence_time,
             observation.home_team_raw, observation.away_team_raw, content_hash,
-            raw_response_id, observed_at or now, now,
+            raw_response_id, derived_observed_at, now,
         )
         placeholders = ", ".join("?" * len(_COLUMNS))
         try:
