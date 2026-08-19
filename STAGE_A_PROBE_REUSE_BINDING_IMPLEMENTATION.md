@@ -187,6 +187,36 @@ The previously pinned `test_retained_probe_registration_is_not_content_bound` is
 records what `8703239` did, and requires the failure to name
 `"does not bind to committed evidence"`.
 
+## 10a. A defect this task introduced, and how it was fixed
+
+The first push (`65ba376`) **failed CI #125**. Six B1 tests resolved
+`d3984d0` against this repository, and `actions/checkout@v4` defaults to a
+**depth-1 clone**, so that object does not exist on the runner. The tests passed
+locally only because a development clone has full history — an
+environment-dependent test defect, introduced here.
+
+It was reproduced deliberately rather than guessed at: a local
+`git clone --depth 1` showed `commits in clone: 1` and
+`d3984d0 … could not get object info`, then the same six failures.
+
+Two changes, in that order of importance:
+
+1. **The suite is now correct in any checkout.** Blob-as-commit,
+   tree-as-commit and missing-path tests build their own throwaway git
+   repository, so they exercise the MECHANISM unconditionally — and they are
+   better tests for it, since they no longer depend on one specific historical
+   commit. Only the four EVIDENCE tests about `d3984d0` itself are conditional,
+   skipping with an explicit reason when the object is absent (a shallow clone or
+   an exported tree genuinely cannot evaluate them). Verified in the shallow
+   clone: **29 passed, 4 skipped, 0 failed.**
+2. **CI now fetches full history** (`fetch-depth: 0`), so those four run rather
+   than silently skipping. The verdict-B claim is load-bearing for the next
+   task's credit budget, so it should be enforced by CI, not assumed.
+
+The skip guard alone would have turned a red build green while quietly dropping
+the claim; the CI change alone would have left the suite broken for anyone with a
+shallow clone. Both were needed.
+
 ## 11. Non-regression
 
 `REGISTERED_LINKING_PROVIDERS` empty · `ATTESTED_GENERATIONS` unchanged ·

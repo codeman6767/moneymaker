@@ -42,6 +42,47 @@ def _git(*args: str) -> str:
     return out.stdout.strip()
 
 
+def _real_history_available() -> bool:
+    """Whether this checkout contains the probe report commit.
+
+    A shallow clone (``actions/checkout`` defaults to depth 1) or a source
+    tarball has no such object, and cannot evaluate claims about this
+    repository's own history. The MECHANISM tests below never depend on it --
+    they build their own throwaway repository -- so only the EVIDENCE tests
+    about `d3984d0` are conditional.
+    """
+
+    out = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "cat-file", "-t", REAL_PROBE_COMMIT],
+        capture_output=True, text=True, check=False)
+    return out.returncode == 0 and out.stdout.strip() == "commit"
+
+
+requires_real_history = pytest.mark.skipif(
+    not _real_history_available(),
+    reason=f"probe report commit {REAL_PROBE_COMMIT[:7]} is not present in this "
+           f"checkout (shallow clone or exported tree); the probe-binding "
+           f"MECHANISM is covered by the synthetic-repository tests")
+
+
+def _scratch_repo(tmp_path: Path, name: str, text: str) -> tuple[str, Path]:
+    """Commit ``text`` as ``name`` in a throwaway repo; return (sha, repo root)."""
+
+    repo = tmp_path / "scratch_repo"
+    if not repo.exists():
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "t@example.com"],
+                       cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    (repo / name).write_text(text, encoding="utf-8")
+    subprocess.run(["git", "add", name], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", name], cwd=repo, check=True)
+    sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                         capture_output=True, text=True, check=True).stdout.strip()
+    return sha, repo
+
+
 def _events(count: int, seed: int = 0) -> list[dict[str, Any]]:
     return [{"id": "%032x" % (0xa11ce000 + seed + i),
              "sport_key": "basketball_nba",
@@ -125,29 +166,38 @@ def test_malformed_or_short_commit_ids_are_refused(bad):
         resolve_commit(bad)
 
 
+@requires_real_history
 def test_a_real_commit_resolves():
     assert resolve_commit(REAL_PROBE_COMMIT) == REAL_PROBE_COMMIT
 
 
-def test_a_blob_object_is_refused_as_a_commit():
-    blob = _git("rev-parse", f"{REAL_PROBE_COMMIT}:{REAL_PROBE_REPORT}")
+def test_a_blob_object_is_refused_as_a_commit(tmp_path):
+    """A blob id EXISTS, so only an object-type check distinguishes it."""
+
+    sha, repo = _scratch_repo(tmp_path, "r.md", "x")
+    blob = subprocess.run(["git", "-C", str(repo), "rev-parse", f"{sha}:r.md"],
+                          capture_output=True, text=True, check=True).stdout.strip()
     assert len(blob) == 40
     with pytest.raises(GitObjectError, match="is a 'blob' object"):
-        resolve_commit(blob)
+        resolve_commit(blob, repo_root=repo)
 
 
-def test_a_tree_object_is_refused_as_a_commit():
-    tree = _git("rev-parse", f"{REAL_PROBE_COMMIT}^{{tree}}")
+def test_a_tree_object_is_refused_as_a_commit(tmp_path):
+    sha, repo = _scratch_repo(tmp_path, "r.md", "x")
+    tree = subprocess.run(["git", "-C", str(repo), "rev-parse", f"{sha}^{{tree}}"],
+                          capture_output=True, text=True, check=True).stdout.strip()
     assert len(tree) == 40
     with pytest.raises(GitObjectError, match="is a 'tree' object"):
-        resolve_commit(tree)
+        resolve_commit(tree, repo_root=repo)
 
 
-def test_a_nonexistent_report_path_is_refused():
+def test_a_nonexistent_report_path_is_refused(tmp_path):
+    sha, repo = _scratch_repo(tmp_path, "r.md", "x")
     with pytest.raises(GitObjectError, match="does not exist at commit"):
-        load_committed_text(REAL_PROBE_COMMIT, "does/not/exist.md")
+        load_committed_text(sha, "does/not/exist.md", repo_root=repo)
 
 
+@requires_real_history
 def test_the_report_is_loaded_from_the_commit_not_the_working_tree(tmp_path):
     """A local edit must not change a historical verification result."""
 
@@ -366,6 +416,7 @@ def test_a_unique_match_binds_and_the_caller_cannot_nominate_another(conn, tmp_p
 # --------------------------------------------------------------------------- #
 # The real d3984d0 probe -- verdict B
 # --------------------------------------------------------------------------- #
+@requires_real_history
 def test_the_real_probe_report_is_not_bindable(conn):
     """VERDICT B, enforced in code.
 
@@ -387,6 +438,7 @@ def test_the_real_probe_report_is_not_bindable(conn):
         parse_probe_report(committed)
 
 
+@requires_real_history
 def test_the_real_report_commits_no_response_fingerprint():
     committed = load_committed_text(REAL_PROBE_COMMIT, REAL_PROBE_REPORT)
     # The real provider event ids observed in the preserved scratch response.

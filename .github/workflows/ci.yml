@@ -29,6 +29,13 @@ jobs:
     steps:
       - name: Check out the repository
         uses: actions/checkout@v4
+        with:
+          # Full history. The Stage-A probe-reuse binding (B1) resolves a real
+          # commit object and loads a committed report from it, so the evidence
+          # tests about this repository's own history need more than the default
+          # depth-1 clone. Those tests SKIP rather than fail without it, so this
+          # is what makes them actually run in CI instead of silently skipping.
+          fetch-depth: 0
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
