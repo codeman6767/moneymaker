@@ -34,13 +34,22 @@ SPECIFICATION, not a preimage-resistant fingerprint. Binding on them would let a
 curator fabricate a response that passes, which is the same class of failure the
 review reported, merely harder to notice.
 
-So the frozen policy requires the report to precommit at least one value a forger
-cannot produce without the provider's actual answer:
+So the frozen policy requires the report to precommit the exact **SHA-256 of the
+preserved response body**. That is MANDATORY, and it is the only value that works.
 
-* the exact SHA-256 of the preserved response body, and/or
-* the exact set of provider-assigned event ids (opaque 32-hex values).
+An earlier form of this policy also accepted the exact set of provider-assigned
+event ids as an alternative fingerprint. The independent review proved that
+insufficient: **the report publishes those ids**, so anyone who reads it can build
+a body containing them with entirely fabricated team names and commence times,
+and it bound successfully. A published identifier is a KNOWN value, not a
+preimage-resistant one -- the same mistake as binding on descriptive facts, one
+level subtler.
 
-A report lacking both is REFUSED as non-bindable. That is a fail-closed outcome,
+A SHA-256 is different precisely because publishing it grants no ability to
+produce a matching body. `event_ids` is retained as an ADDITIONAL cross-check
+when a report supplies it, but it can never substitute for the hash.
+
+A report without `body_sha256` is REFUSED as non-bindable. That is a fail-closed outcome,
 not a defect: the correct remedy is to request that bucket again as an ordinary
 Stage-A acquisition for one credit. Saving a credit is not worth accepting
 evidence whose identity was never committed.
@@ -183,14 +192,13 @@ class ProbeReportFacts:
     endpoint: str
     requested_bucket: str
     http_status: int
-    #: At least one of these two must be present -- see the module docstring.
-    body_sha256: Optional[str]
+    #: MANDATORY. The only preimage-resistant fingerprint; see the module
+    #: docstring for why the published event-id set cannot substitute.
+    body_sha256: str
     event_ids: tuple[str, ...]
 
     def fingerprint_kind(self) -> str:
-        if self.body_sha256 and self.event_ids:
-            return "body_sha256+event_ids"
-        return "body_sha256" if self.body_sha256 else "event_ids"
+        return "body_sha256+event_ids" if self.event_ids else "body_sha256"
 
 
 def _single_value(text: str, field: str) -> Optional[str]:
@@ -244,12 +252,13 @@ def parse_probe_report(text: str) -> ProbeReportFacts:
             f"this contract cannot be bound, because the prose facts it does "
             f"state are reproducible by construction and therefore forgeable.")
 
-    if body_sha is None and ids_raw is None:
+    if body_sha is None:
         raise ProbeBindingError(
-            "probe report declares no preimage-resistant response fingerprint "
-            "(neither body_sha256 nor event_ids). Every other fact a probe report "
-            "states can be satisfied by a fabricated body, so binding on them "
-            "alone would admit forged evidence. Refusing.")
+            "probe report declares no body_sha256, which is the only "
+            "preimage-resistant response fingerprint this policy accepts. Every "
+            "other fact a report states -- including its published event_ids -- "
+            "can be reproduced by a fabricated body, so binding without the hash "
+            "would admit forged evidence. Refusing.")
 
     if body_sha is not None and not _SHA256.match(body_sha):
         raise ProbeBindingError(
@@ -290,7 +299,7 @@ def parse_probe_report(text: str) -> ProbeReportFacts:
     return ProbeReportFacts(
         provider=str(provider), endpoint=str(endpoint),
         requested_bucket=str(bucket), http_status=http_status,
-        body_sha256=body_sha, event_ids=event_ids)
+        body_sha256=str(body_sha), event_ids=event_ids)
 
 
 # --------------------------------------------------------------------------- #
@@ -326,9 +335,9 @@ def _response_matches(row: object, facts: ProbeReportFacts) -> bool:
         return False
 
     body = _body_bytes(record["body"])  # type: ignore[index]
-    if facts.body_sha256 is not None:
-        if hashlib.sha256(body).hexdigest() != facts.body_sha256:
-            return False
+    # Mandatory: only the real body hashes to the committed value.
+    if hashlib.sha256(body).hexdigest() != facts.body_sha256:
+        return False
     if facts.event_ids:
         try:
             payload = json.loads(body.decode("utf-8"))

@@ -60,13 +60,23 @@ precommits a **specification**, not a preimage-resistant fingerprint. Binding on
 it would admit fabricated evidence — the same failure class the review reported,
 merely harder to notice.
 
+> **SUPERSEDED IN PART by the independent review**
+> (`STAGE_A_PROBE_REUSE_BINDING_INDEPENDENT_REVIEW.md`). The policy below
+> originally accepted the event-id set as an ALTERNATIVE to the body hash. That
+> was a defect: the report *publishes* its own event ids, so a body carrying them
+> with fabricated team names and commence times bound successfully. **`body_sha256`
+> is now mandatory**; `event_ids` is an additional cross-check only. The
+> real-probe verdict is unchanged and independently confirmed — the `d3984d0`
+> report contains no 64-hex and no 32-hex value at all.
+
 ## 3. The frozen policy: `stage-a-probe-v1`
 
 A report is bindable only if it precommits at least one value a forger cannot
 produce without the provider's actual answer:
 
-- the exact **SHA-256 of the preserved response body**, and/or
-- the exact **set of provider-assigned event ids** (opaque 32-hex values).
+- the exact **SHA-256 of the preserved response body** — **MANDATORY**;
+- the exact set of provider-assigned event ids — **additional cross-check only**
+  (see the superseding note above).
 
 Plus, all required: provider (∈ `{the_odds_api}`), endpoint (∈ the single
 historical-events path), requested bucket, HTTP status (must be 200).

@@ -229,8 +229,68 @@ def test_a_report_with_no_fingerprint_is_refused():
     """The heart of B1: description is not identity."""
 
     body = _body(_events(3))
-    with pytest.raises(ProbeBindingError, match="no preimage-resistant"):
+    with pytest.raises(ProbeBindingError, match="no body_sha256"):
         parse_probe_report(_report(body, include_hash=False, include_ids=False))
+
+
+def test_event_ids_alone_are_not_a_fingerprint():
+    """INDEPENDENT REVIEW defect: the report PUBLISHES its own event ids.
+
+    An earlier form of the policy accepted the id set as an alternative
+    fingerprint. Reproduced against `ac36cc9`: a body carrying those same ids but
+    entirely fabricated team names and commence times BOUND successfully, because
+    a published identifier is a KNOWN value -- anyone who reads the report can
+    construct a body containing it. A SHA-256 is different: publishing it grants
+    no ability to produce a matching body.
+    """
+
+    body = _body(_events(3))
+    with pytest.raises(ProbeBindingError, match="no body_sha256"):
+        parse_probe_report(_report(body, include_hash=False, include_ids=True))
+
+
+def test_the_published_id_forgery_is_refused_end_to_end(conn, tmp_path):
+    """The full reproduction: same ids, fabricated everything else."""
+
+    real = _body(_events(4, seed=0))
+    forged = json.dumps({
+        "timestamp": "2026-03-01T16:55:37Z",
+        "previous_timestamp": "2026-03-01T16:50:37Z",
+        "next_timestamp": "2026-03-01T17:00:38Z",
+        "data": [{"id": e["id"], "sport_key": "basketball_nba",
+                  "commence_time": "2026-03-01T23:59:00Z",
+                  "home_team": "FORGED FC", "away_team": "FORGED UTD"}
+                 for e in json.loads(real)["data"]]})
+    assert forged != real
+    _seed(conn)
+    _raw(conn, "raw_forged", forged)
+
+    # A report that (now illegally) omits the hash is refused outright.
+    sha, repo = _scratch_repo(tmp_path, "probe_report.md",
+                              _report(real, include_hash=False))
+    with pytest.raises(ProbeBindingError, match="no body_sha256"):
+        bind_probe_response(
+            conn, probe_report_commit_sha=sha,
+            probe_report_path="probe_report.md",
+            probe_policy_version=STAGE_A_PROBE_POLICY_V1, repo_root=repo)
+
+    # And with the hash present, the forgery simply does not match.
+    sha2, repo2 = _scratch_repo(tmp_path, "probe_report2.md", _report(real))
+    with pytest.raises(ProbeBindingError, match="no preserved response matches"):
+        bind_probe_response(
+            conn, probe_report_commit_sha=sha2,
+            probe_report_path="probe_report2.md",
+            probe_policy_version=STAGE_A_PROBE_POLICY_V1, repo_root=repo2)
+
+
+def test_event_ids_remain_an_additional_cross_check():
+    """Retained as a secondary check when supplied -- never a substitute."""
+
+    body = _body(_events(3))
+    facts = parse_probe_report(_report(body))
+    assert facts.body_sha256
+    assert facts.event_ids
+    assert facts.fingerprint_kind() == "body_sha256+event_ids"
 
 
 def test_a_non_200_report_is_refused():
@@ -258,7 +318,7 @@ def test_malformed_fingerprints_are_refused():
 def test_duplicate_event_ids_in_a_report_are_refused():
     body = _body(_events(2))
     ids = sorted(e["id"] for e in json.loads(body)["data"])
-    text = _report(body, include_hash=False).replace(
+    text = _report(body).replace(
         "event_ids = " + ",".join(ids), "event_ids = " + ",".join([ids[0], ids[0]]))
     with pytest.raises(ProbeBindingError, match="duplicate id"):
         parse_probe_report(text)
@@ -363,7 +423,7 @@ def test_a_fabricated_body_with_different_event_ids_never_matches():
     real = _body(_events(11, seed=0))
     forged = _body(_events(11, seed=5000))       # same shape, different ids
     assert len(real.encode()) == len(forged.encode())
-    facts = parse_probe_report(_report(real, include_hash=False))
+    facts = parse_probe_report(_report(real))
     row = {"provider": THE_ODDS_API_PROVIDER, "endpoint": ENDPOINT,
            "http_status": 200, "body": forged,
            "request_params_json": json.dumps(
