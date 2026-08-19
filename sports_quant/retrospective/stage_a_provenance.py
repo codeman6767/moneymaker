@@ -31,7 +31,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from dataclasses import dataclass, field
-from typing import Final, Iterable, Optional, Sequence
+from typing import Final, Iterable, Mapping, Optional, Sequence
 
 from ..db.ids import (
     new_evidence_lane_binding_id,
@@ -44,7 +44,10 @@ from ..db.schema import utc_now_iso
 from .historical_events_projection import (
     HISTORICAL_EVENTS_ENDPOINTS,
     STAGE_A_ALLOWED_REQUEST_PARAMS,
+    project_historical_events_response,
+    verify_historical_event_projections,
 )
+from .market_observations import verify_observation_content_hashes
 from .provenance import G1Variant, ProvenanceClass
 from .stage_a_manifest import StageAManifest, canonical_json
 from .stage_a_policies import (
@@ -159,6 +162,35 @@ def record_plan(
 
     now = utc_now_iso()
     plan_id = new_stage_a_plan_id()
+    # ATOMIC: the plan row, its bucket set and its target set are ONE declaration
+    # that the architecture requires to be "closed together". Sequential writes
+    # without a savepoint can leave a partial plan -- a declared plan whose target
+    # population is truncated -- which is precisely the selection-bias shape the
+    # target binding exists to prevent.
+    conn.execute("SAVEPOINT record_stage_a_plan")
+    try:
+        _write_plan(conn, manifest, plan_id=plan_id, now=now,
+                    manifest_commit_sha=manifest_commit_sha,
+                    manifest_content_digest=manifest_content_digest,
+                    manifest_path=manifest_path)
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT record_stage_a_plan")
+        raise
+    finally:
+        conn.execute("RELEASE SAVEPOINT record_stage_a_plan")
+    return plan_id
+
+
+def _write_plan(
+    conn: sqlite3.Connection,
+    manifest: StageAManifest,
+    *,
+    plan_id: str,
+    now: str,
+    manifest_commit_sha: str,
+    manifest_content_digest: str,
+    manifest_path: str,
+) -> None:
     conn.execute(
         "INSERT INTO stage_a_plans (plan_id, plan_digest, manifest_commit_sha,"
         " manifest_content_digest, manifest_path, manifest_format_version,"
@@ -187,7 +219,6 @@ def record_plan(
             "INSERT INTO stage_a_plan_targets (plan_id, canonical_game_id,"
             " requested_at_bucket, created_at) VALUES (?,?,?,?)",
             (plan_id, target.canonical_game_id, target.requested_at_bucket, now))
-    return plan_id
 
 
 def register_acquisition(
@@ -198,12 +229,20 @@ def register_acquisition(
     projection_policy_version: str,
     request_budget: int,
     credit_budget: int,
-    registered_at: Optional[str] = None,
 ) -> str:
     """Open ONE execution of a plan, before any transport.
 
     A plan may be executed more than once, so this deliberately does not derive
     the acquisition id from the plan.
+
+    ``registered_at`` is NOT a parameter. The reconciled architecture deleted
+    the caller-supplied ``declared_at`` precisely because it was backdatable,
+    and re-exposing the replacement clock would restore the same
+    fetch-then-declare bypass through the trusted API: acquire a response, then
+    register an acquisition dated before it, then record it as an ordinary
+    success. The clock is taken from ``utc_now_iso()`` here so the ONLY way to
+    produce a backdated acquisition is direct SQL, which is the stated
+    tamper-evidence boundary rather than a supported feature.
     """
 
     require_acquisition_policy(acquisition_policy_version)
@@ -215,8 +254,7 @@ def register_acquisition(
         " acquisition_policy_version, projection_policy_version, request_budget,"
         " credit_budget, registered_at, created_at) VALUES (?,?,?,?,?,?,?,?)",
         (acquisition_id, plan_id, acquisition_policy_version,
-         projection_policy_version, request_budget, credit_budget,
-         registered_at or now, now),
+         projection_policy_version, request_budget, credit_budget, now, now),
     )
     return acquisition_id
 
@@ -353,6 +391,42 @@ def certify_stage_a(
     elif db_targets != manifest_targets:
         failures.append(
             "target -> bucket mapping in the database differs from the manifest")
+
+    # 3b. Budgets and policy versions are stored provenance and must AGREE with
+    #     the declared manifest, or the recorded hard budget is decorative: an
+    #     acquisition could claim credit_budget=0 for a 160-request Odds plan and
+    #     still certify.
+    acquisition = conn.execute(
+        "SELECT request_budget, credit_budget, acquisition_policy_version"
+        " FROM stage_a_acquisitions WHERE acquisition_id = ?",
+        (acquisition_id,)).fetchone()
+    if int(acquisition["request_budget"]) != int(manifest.request_budget):
+        failures.append(
+            f"acquisition request_budget {acquisition['request_budget']} does not "
+            f"equal the declared manifest budget {manifest.request_budget}")
+    if int(acquisition["credit_budget"]) != int(manifest.credit_budget):
+        failures.append(
+            f"acquisition credit_budget {acquisition['credit_budget']} does not "
+            f"equal the declared manifest budget {manifest.credit_budget}")
+    if str(acquisition["acquisition_policy_version"]) != \
+            manifest.acquisition_policy_version:
+        failures.append(
+            "acquisition policy version does not equal the manifest's")
+    if str(plan["acq_projection_policy"]) != manifest.projection_policy_version:
+        failures.append(
+            "acquisition projection policy version does not equal the manifest's")
+    for field_name, declared_value in (
+            ("provider", manifest.provider),
+            ("namespace_generation", manifest.namespace_generation),
+            ("sport_key", manifest.sport_key),
+            ("league_id", manifest.league_id),
+            ("cost_policy_version", manifest.cost_policy_version),
+            ("official_source_corpus_digest",
+             manifest.official_source_corpus_digest),
+            ("official_target_set_digest", manifest.official_target_set_digest)):
+        if str(plan[field_name]) != str(declared_value):
+            failures.append(
+                f"persisted plan {field_name} does not equal the manifest's")
 
     # 4. Planned bucket set.
     db_buckets = {
@@ -574,6 +648,102 @@ def _observation_failures(
         failures.append(
             f"observation(s) exist for response(s) not recorded as projecting "
             f"evidence: {sorted(unexpected)[:3]}")
+
+    # ---------------------------------------------------------------------
+    # COMPOSE the independently accepted projection / body verifier.
+    #
+    # Everything above is bookkeeping ABOUT observations; none of it opens the
+    # preserved body. Without this block a response whose body lists N events
+    # can be recorded with a single convenient observation and still certify --
+    # which is exactly the L1 selective-materialization defect the projection
+    # verifier was accepted to close. Reimplementing a weaker copy here would
+    # reintroduce it, so the accepted verifier is CALLED.
+    # ---------------------------------------------------------------------
+    for raw_id in sorted(should_project):
+        report = verify_historical_event_projections(conn, raw_id)
+        if not report.verified:
+            detail = report.detail or (report.rejection_code.value
+                                       if report.rejection_code else "")
+            if report.missing:
+                failures.append(
+                    f"response {raw_id!r} body contains {len(report.missing)} "
+                    f"event(s) with no stored observation: "
+                    f"{list(report.missing)[:3]}")
+            if report.unexpected:
+                failures.append(
+                    f"response {raw_id!r} has {len(report.unexpected)} stored "
+                    f"observation(s) not derivable from its body: "
+                    f"{list(report.unexpected)[:3]}")
+            if report.hash_mismatches:
+                failures.append(
+                    f"response {raw_id!r} has {len(report.hash_mismatches)} "
+                    f"observation(s) whose content hash or id disagrees with "
+                    f"their own columns")
+            if not (report.missing or report.unexpected or report.hash_mismatches):
+                failures.append(
+                    f"response {raw_id!r} failed body projection verification: "
+                    f"{detail or report.verdict}")
+
+    # The outcome label is a CALLER CLAIM. Derive full-vs-empty from the body so
+    # a real market event cannot be erased by mislabelling the ledger, and a
+    # malformed body cannot be recorded as a success.
+    failures.extend(_outcome_claim_failures(conn, attempts))
+
+    # Content-hash integrity across the whole observation set, using the
+    # accepted verifier rather than a local re-derivation.
+    mismatches = verify_observation_content_hashes(conn)
+    scoped = [m for m in mismatches if _observation_is_in(conn, m.observation_id,
+                                                          acquisition_response_ids)]
+    if scoped:
+        failures.append(
+            f"{len(scoped)} observation(s) in this acquisition have a forged or "
+            f"stale content hash (first: {scoped[0].observation_id!r})")
+    return failures
+
+
+def _observation_is_in(
+    conn: sqlite3.Connection, observation_id: str, response_ids: set[str]
+) -> bool:
+    row = conn.execute(
+        "SELECT raw_response_id FROM historical_market_event_observations"
+        " WHERE observation_id = ?", (observation_id,)).fetchone()
+    return row is not None and str(row["raw_response_id"]) in response_ids
+
+
+def _outcome_claim_failures(
+    conn: sqlite3.Connection, attempts: Sequence[sqlite3.Row]
+) -> list[str]:
+    """Verify each recorded outcome against what the preserved body actually is."""
+
+    failures: list[str] = []
+    for attempt in attempts:
+        outcome = str(attempt["outcome"])
+        if outcome not in PROJECTING_OUTCOMES:
+            continue
+        raw_id = str(attempt["raw_response_id"])
+        row = conn.execute(
+            "SELECT * FROM raw_responses WHERE raw_response_id = ?",
+            (raw_id,)).fetchone()
+        if row is None:
+            continue
+        try:
+            projection = project_historical_events_response(row)
+        except Exception as exc:  # noqa: BLE001 - any projection failure is a refusal
+            failures.append(
+                f"response {raw_id!r} is recorded as {outcome!r} but its body does "
+                f"not project as a valid historical events snapshot: "
+                f"{type(exc).__name__}: {str(exc)[:120]}")
+            continue
+        event_count = len(projection.observation_ids)
+        if outcome == "success_empty_data" and event_count:
+            failures.append(
+                f"response {raw_id!r} is recorded as success_empty_data but its "
+                f"body contains {event_count} event(s); a real market event "
+                f"cannot be erased by the ledger label")
+        if outcome == "success_full_snapshot" and not event_count:
+            failures.append(
+                f"response {raw_id!r} is recorded as success_full_snapshot but "
+                f"its body contains no events")
     return failures
 
 
@@ -588,6 +758,8 @@ def enrich_corpus_with_market_lane(
     acquisition_ids: Sequence[str],
     provider: str,
     namespace_generation: str,
+    manifests: Mapping[str, StageAManifest],
+    manifest_texts: Mapping[str, str],
 ) -> tuple[str, str]:
     """Derive the enriched corpus C2 from official corpus C1 plus a certified lane.
 
@@ -602,17 +774,59 @@ def enrich_corpus_with_market_lane(
     """
 
     conn.row_factory = sqlite3.Row
+    members = list(dict.fromkeys(acquisition_ids))
+    if len(members) != len(list(acquisition_ids)):
+        # Silently collapsing a duplicate would mask an upstream bug that built
+        # the member list wrongly.
+        raise StageAProvenanceError(
+            "acquisition_ids contains a duplicate; pass each member exactly once")
+    if not members:
+        raise StageAProvenanceError(
+            "refusing to build an evidence lane with no member acquisitions")
+
     parent = conn.execute(
         "SELECT * FROM reconstruction_corpus_versions WHERE corpus_version_id = ?",
         (parent_corpus_id,)).fetchone()
     if parent is None:
         raise StageAProvenanceError(f"unknown parent corpus {parent_corpus_id!r}")
 
+    # EVERY member must pass the full deterministic gate first. "Certification is
+    # derived, never stored" is only true if the consumer that creates
+    # load-bearing downstream provenance actually INVOKES the gate -- a derived
+    # verdict nobody is required to call is not a trust gate at all. Without
+    # this, an acquisition missing 159 of 160 buckets could still mint a C2 that
+    # commits to its market evidence.
+    for acquisition_id in members:
+        manifest = manifests.get(acquisition_id)
+        if manifest is None:
+            raise StageAProvenanceError(
+                f"no manifest supplied for member acquisition {acquisition_id!r}; "
+                f"a lane cannot be certified without the declared plan it claims "
+                f"to execute")
+        text = manifest_texts.get(acquisition_id)
+        if text is None:
+            # `manifest_text` is optional on certify_stage_a so a low-level
+            # subset check can run without the file. It is MANDATORY here:
+            # allowing it to be omitted on the corpus-building path would make
+            # "skip the source-control binding" a supported mode of the only
+            # call that creates load-bearing downstream provenance.
+            raise StageAProvenanceError(
+                f"no committed manifest text supplied for acquisition "
+                f"{acquisition_id!r}; the corpus gate must verify the persisted "
+                f"content digest against the committed artefact")
+        report = certify_stage_a(
+            conn, acquisition_id=acquisition_id, manifest=manifest,
+            manifest_text=text)
+        if not report.certified:
+            raise StageAProvenanceError(
+                f"refusing to build an evidence lane from uncertified acquisition "
+                f"{acquisition_id!r}:\n  - " + "\n  - ".join(report.failures))
+
     # Every member acquisition must have been planned against THIS parent's
     # official provenance, or the lane would be attachable to an unrelated corpus.
     projection_versions: set[str] = set()
     response_ids: list[str] = []
-    for acquisition_id in acquisition_ids:
+    for acquisition_id in members:
         plan = _fetch_plan(conn, acquisition_id)
         if plan["official_source_corpus_digest"] != parent["source_corpus_digest"]:
             raise StageAProvenanceError(
@@ -640,8 +854,42 @@ def enrich_corpus_with_market_lane(
         conn, policy=policy, provider=provider,
         namespace_generation=namespace_generation,
         raw_response_ids=sorted(set(response_ids)))
-    set_digest = acquisition_set_digest(acquisition_ids)
+    set_digest = acquisition_set_digest(members)
 
+    # ATOMIC. The three writes below (corpus, lane, membership) are one
+    # provenance construction. Without a savepoint, a failure at the membership
+    # step leaves an ORPHAN C2 -- a content-addressed corpus committing to market
+    # evidence with no lane provenance to reconstruct it from, which is worse
+    # than no corpus at all because the commitment is unfalsifiable.
+    conn.execute("SAVEPOINT enrich_corpus_with_market_lane")
+    try:
+        return _write_lane(
+            conn, repository, parent=parent, parent_corpus_id=parent_corpus_id,
+            members=members, provider=provider,
+            namespace_generation=namespace_generation, policy=policy,
+            digest=digest, set_digest=set_digest,
+            projection_policy_version=projection_policy_version)
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT enrich_corpus_with_market_lane")
+        raise
+    finally:
+        conn.execute("RELEASE SAVEPOINT enrich_corpus_with_market_lane")
+
+
+def _write_lane(
+    conn: sqlite3.Connection,
+    repository: object,
+    *,
+    parent: sqlite3.Row,
+    parent_corpus_id: str,
+    members: Sequence[str],
+    provider: str,
+    namespace_generation: str,
+    policy: FrozenDigestPolicy,
+    digest: str,
+    set_digest: str,
+    projection_policy_version: str,
+) -> tuple[str, str]:
     enriched = repository.record_corpus_version(  # type: ignore[attr-defined]
         # The parent's stored values are the raw enum VALUES; the repository
         # takes the enum members, so they are rehydrated rather than passed
@@ -678,7 +926,7 @@ def enrich_corpus_with_market_lane(
          provider, namespace_generation, parent["league_id"], policy.version,
          digest, set_digest, projection_policy_version, now),
     )
-    for acquisition_id in sorted(set(acquisition_ids)):
+    for acquisition_id in sorted(members):
         conn.execute(
             "INSERT INTO corpus_evidence_lane_acquisitions (lane_binding_id,"
             " acquisition_id, created_at) VALUES (?,?,?)",

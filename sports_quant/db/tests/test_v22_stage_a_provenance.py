@@ -7,6 +7,7 @@ never consumed into production provenance.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from typing import Any
 
@@ -19,6 +20,11 @@ from sports_quant.db.schema import THE_ODDS_API_PROVIDER, utc_now_iso
 from sports_quant.ingest.cost_policies import ODDS_COST_POLICY_VERSION
 from sports_quant.ingest.planning import UnknownProviderError, _policy_for
 from sports_quant.retrospective import sources
+from sports_quant.retrospective.market_observations import (
+    MarketEventObservation,
+    observation_content_hash,
+    observation_id,
+)
 from sports_quant.retrospective.provenance import G1Variant, ProvenanceClass
 from sports_quant.retrospective.stage_a_manifest import (
     StageAManifest,
@@ -26,6 +32,7 @@ from sports_quant.retrospective.stage_a_manifest import (
     StageATarget,
     dumps,
     loads,
+    manifest_content_digest,
 )
 from sports_quant.retrospective.stage_a_policies import (
     MARKET_EVENTS_E0_DIGEST_POLICY_V1,
@@ -92,18 +99,49 @@ def _seed(conn: sqlite3.Connection) -> None:
         " 'v',?)", (THE_ODDS_API_PROVIDER, NOW, NOW, NOW))
 
 
+def _wrapper(events: list[dict[str, Any]]) -> str:
+    """A valid historical-events snapshot body.
+
+    Real bodies matter now: the certification gate composes the accepted
+    projection verifier, so a placeholder payload would fail for the wrong
+    reason (or, worse, let a test claim a guard it never exercised).
+    """
+
+    return json.dumps({
+        "timestamp": "2026-03-01T16:55:37Z",
+        "previous_timestamp": "2026-03-01T16:50:37Z",
+        "next_timestamp": "2026-03-01T17:00:37Z",
+        "data": events})
+
+
+def _event(event_id: str = EVENT_ID) -> dict[str, Any]:
+    return {"id": event_id, "sport_key": "basketball_nba",
+            "commence_time": "2026-03-01T18:10:00Z",
+            "home_team": "Boston Celtics", "away_team": "Miami Heat"}
+
+
 def _raw_response(
-    conn: sqlite3.Connection, raw_id: str, *, requested_at: str, received_at: str,
+    conn: sqlite3.Connection, raw_id: str, *,
+    requested_at: str | None = None, received_at: str | None = None,
     endpoint: str = ENDPOINT, status: int = 200,
-    params: str = '{"apiKey":"x","date":"d","dateFormat":"iso"}',
+    body: str | None = None,
+    params: str | None = None,
 ) -> None:
+    if params is None:
+        params = json.dumps({"apiKey": "x", "date": BUCKET_A, "dateFormat": "iso"})
+    if body is None:
+        body = _wrapper([_event()])
     conn.execute(
         "INSERT INTO raw_responses (raw_response_id, run_id, provider, endpoint,"
         " request_params_json, http_status, response_headers_json, body, body_bytes,"
         " body_hash, content_hash, requested_at, received_at, elapsed_ns, created_at)"
-        " VALUES (?, 'run_v22', ?, ?, ?, ?, '{}', '[]', 2, ?, ?, ?, ?, 1, ?)",
-        (raw_id, THE_ODDS_API_PROVIDER, endpoint, params, status, raw_id, raw_id,
-         requested_at, received_at, NOW))
+        " VALUES (?, 'run_v22', ?, ?, ?, ?, '{}', ?, ?, ?, ?, ?, ?, 1, ?)",
+        (raw_id, THE_ODDS_API_PROVIDER, endpoint, params, status, body,
+         len(body), raw_id, raw_id,
+         # Call-time clocks: an acquisition registers at utc_now_iso(), so a
+         # module-level constant would look like a pre-registration response.
+         requested_at or utc_now_iso(), received_at or utc_now_iso(),
+         utc_now_iso()))
 
 
 def _manifest(**overrides: Any) -> StageAManifest:
@@ -128,16 +166,23 @@ def _manifest(**overrides: Any) -> StageAManifest:
     return StageAManifest(**base)
 
 
+def _lane_args(acquisition_id: str, manifest: StageAManifest) -> dict[str, Any]:
+    """Manifest inputs the corpus gate now requires for every lane member."""
+
+    return {"manifests": {acquisition_id: manifest},
+            "manifest_texts": {acquisition_id: dumps(manifest)}}
+
+
 def _declared(conn: sqlite3.Connection) -> tuple[str, str, StageAManifest]:
     _seed(conn)
     manifest = _manifest()
     plan_id = record_plan(
         conn, manifest, manifest_commit_sha="c0ffee",
-        manifest_content_digest="deadbeef", manifest_path="pilots/stage_a/x.json")
+        manifest_content_digest=manifest_content_digest(dumps(manifest)),
+        manifest_path="pilots/stage_a/x.json")
     acquisition_id = register_acquisition(
         conn, plan_id=plan_id, acquisition_policy_version=ACQ_POLICY,
-        projection_policy_version=PROJ_POLICY, request_budget=10, credit_budget=10,
-        registered_at=NOW)
+        projection_policy_version=PROJ_POLICY, request_budget=10, credit_budget=10)
     return plan_id, acquisition_id, manifest
 
 
@@ -305,7 +350,7 @@ def test_unknown_projection_policy_fails_closed(version):
 # --------------------------------------------------------------------------- #
 def test_bucket_cannot_be_added_after_an_attempt_exists(conn):
     _, acquisition_id, _ = _declared(conn)
-    _raw_response(conn, "raw_ok", requested_at=NOW, received_at=NOW)
+    _raw_response(conn, "raw_ok")
     record_attempt(conn, acquisition_id=acquisition_id, requested_at_bucket=BUCKET_A,
                    outcome="success_full_snapshot", raw_response_id="raw_ok")
     plan_id = conn.execute("SELECT plan_id FROM stage_a_plans").fetchone()[0]
@@ -317,7 +362,7 @@ def test_bucket_cannot_be_added_after_an_attempt_exists(conn):
 
 def test_target_cannot_be_added_after_an_attempt_exists(conn):
     _, acquisition_id, _ = _declared(conn)
-    _raw_response(conn, "raw_ok2", requested_at=NOW, received_at=NOW)
+    _raw_response(conn, "raw_ok2")
     record_attempt(conn, acquisition_id=acquisition_id, requested_at_bucket=BUCKET_A,
                    outcome="success_full_snapshot", raw_response_id="raw_ok2")
     plan_id = conn.execute("SELECT plan_id FROM stage_a_plans").fetchone()[0]
@@ -351,7 +396,7 @@ def test_target_cannot_map_to_two_buckets(conn):
 
 def test_attempt_on_an_undeclared_bucket_is_refused(conn):
     _, acquisition_id, _ = _declared(conn)
-    _raw_response(conn, "raw_bad", requested_at=NOW, received_at=NOW)
+    _raw_response(conn, "raw_bad")
     with pytest.raises(sqlite3.IntegrityError, match="outside the declared plan"):
         record_attempt(conn, acquisition_id=acquisition_id,
                        requested_at_bucket=BUCKET_B,
@@ -360,8 +405,8 @@ def test_attempt_on_an_undeclared_bucket_is_refused(conn):
 
 def test_first_pass_forbids_a_retry(conn):
     _, acquisition_id, _ = _declared(conn)
-    _raw_response(conn, "raw_r1", requested_at=NOW, received_at=NOW)
-    _raw_response(conn, "raw_r2", requested_at=NOW, received_at=NOW)
+    _raw_response(conn, "raw_r1")
+    _raw_response(conn, "raw_r2")
     record_attempt(conn, acquisition_id=acquisition_id, requested_at_bucket=BUCKET_A,
                    outcome="http_or_provider_failure", raw_response_id="raw_r1")
     with pytest.raises(sqlite3.IntegrityError, match="forbids retries"):
@@ -381,11 +426,11 @@ def test_fetch_then_declare_is_refused_for_an_ordinary_success(conn):
                   received_at="2026-01-01T00:00:01.000000Z")
     manifest = _manifest()
     plan_id = record_plan(conn, manifest, manifest_commit_sha="c",
-                          manifest_content_digest="d", manifest_path="p")
+                          manifest_content_digest=manifest_content_digest(dumps(manifest)),
+                          manifest_path="p")
     acquisition_id = register_acquisition(
         conn, plan_id=plan_id, acquisition_policy_version=ACQ_POLICY,
-        projection_policy_version=PROJ_POLICY, request_budget=10, credit_budget=10,
-        registered_at="2026-08-01T00:00:00.000000Z")
+        projection_policy_version=PROJ_POLICY, request_budget=10, credit_budget=10)
     with pytest.raises(sqlite3.IntegrityError, match="before the acquisition was registered"):
         record_attempt(conn, acquisition_id=acquisition_id,
                        requested_at_bucket=BUCKET_A,
@@ -398,11 +443,11 @@ def test_unregistered_response_cannot_be_reused_as_a_probe(conn):
                   received_at="2026-01-01T00:00:01.000000Z")
     manifest = _manifest()
     plan_id = record_plan(conn, manifest, manifest_commit_sha="c",
-                          manifest_content_digest="d", manifest_path="p")
+                          manifest_content_digest=manifest_content_digest(dumps(manifest)),
+                          manifest_path="p")
     acquisition_id = register_acquisition(
         conn, plan_id=plan_id, acquisition_policy_version=ACQ_POLICY,
-        projection_policy_version=PROJ_POLICY, request_budget=10, credit_budget=10,
-        registered_at="2026-08-01T00:00:00.000000Z")
+        projection_policy_version=PROJ_POLICY, request_budget=10, credit_budget=10)
     with pytest.raises(sqlite3.IntegrityError, match="no probe registration"):
         record_attempt(conn, acquisition_id=acquisition_id,
                        requested_at_bucket=BUCKET_A,
@@ -421,11 +466,11 @@ def test_registered_probe_may_be_reused(conn):
         probe_policy_version=PROBE_POLICY)
     manifest = _manifest()
     plan_id = record_plan(conn, manifest, manifest_commit_sha="c",
-                          manifest_content_digest="d", manifest_path="p")
+                          manifest_content_digest=manifest_content_digest(dumps(manifest)),
+                          manifest_path="p")
     acquisition_id = register_acquisition(
         conn, plan_id=plan_id, acquisition_policy_version=ACQ_POLICY,
-        projection_policy_version=PROJ_POLICY, request_budget=10, credit_budget=10,
-        registered_at="2026-08-01T00:00:00.000000Z")
+        projection_policy_version=PROJ_POLICY, request_budget=10, credit_budget=10)
     attempt_id = record_attempt(
         conn, acquisition_id=acquisition_id, requested_at_bucket=BUCKET_A,
         outcome="reused_probe_response", raw_response_id="raw_probe")
@@ -442,11 +487,11 @@ def test_filtered_probe_request_is_refused_by_the_gate(conn):
         probe_report_path="p.md", probe_policy_version=PROBE_POLICY)
     manifest = _manifest()
     plan_id = record_plan(conn, manifest, manifest_commit_sha="c",
-                          manifest_content_digest="d", manifest_path="p")
+                          manifest_content_digest=manifest_content_digest(dumps(manifest)),
+                          manifest_path="p")
     acquisition_id = register_acquisition(
         conn, plan_id=plan_id, acquisition_policy_version=ACQ_POLICY,
-        projection_policy_version=PROJ_POLICY, request_budget=10, credit_budget=10,
-        registered_at="2026-08-01T00:00:00.000000Z")
+        projection_policy_version=PROJ_POLICY, request_budget=10, credit_budget=10)
     record_attempt(conn, acquisition_id=acquisition_id, requested_at_bucket=BUCKET_A,
                    outcome="reused_probe_response", raw_response_id="raw_filtered")
     report = certify_stage_a(conn, acquisition_id=acquisition_id, manifest=manifest)
@@ -473,7 +518,7 @@ def test_impossible_calendar_receipt_instant_is_refused(conn):
 
 def test_observed_at_must_equal_the_cited_received_at(conn):
     _seed(conn)
-    _raw_response(conn, "raw_obs", requested_at=NOW, received_at=NOW)
+    _raw_response(conn, "raw_obs")
     with pytest.raises(sqlite3.IntegrityError, match="must equal the cited raw response"):
         conn.execute(
             "INSERT INTO historical_market_event_observations (observation_id,"
@@ -491,6 +536,23 @@ def test_observed_at_must_equal_the_cited_received_at(conn):
 # --------------------------------------------------------------------------- #
 def _observation(conn: sqlite3.Connection, obs_id: str, raw_id: str,
                  event_id: str = EVENT_ID) -> None:
+    """Persist exactly the observation the fixture body projects to.
+
+    ``obs_id`` is now only a label for readability: the stored id and content
+    hash are computed with the PRODUCTION helpers. Since the certification gate
+    composes the accepted projection and content-hash verifiers, an invented id
+    or placeholder hash would be rejected as a forgery -- correctly -- and every
+    test would fail for a reason it was not written to exercise.
+    """
+
+    assert obs_id  # keeps call sites self-documenting
+    observation = MarketEventObservation(
+        league_id="lg_nba", provider=THE_ODDS_API_PROVIDER,
+        namespace_generation="v4", sport_key="basketball_nba",
+        provider_event_id=event_id, requested_at_bucket=BUCKET_A,
+        provider_snapshot_timestamp="2026-03-01T16:55:37.000000Z",
+        commence_time="2026-03-01T18:10:00.000000Z",
+        home_team_raw="Boston Celtics", away_team_raw="Miami Heat")
     received = conn.execute(
         "SELECT received_at FROM raw_responses WHERE raw_response_id = ?",
         (raw_id,)).fetchone()[0]
@@ -500,14 +562,15 @@ def _observation(conn: sqlite3.Connection, obs_id: str, raw_id: str,
         " requested_at_bucket, provider_snapshot_timestamp, commence_time,"
         " home_team_raw, away_team_raw, observation_content_hash, raw_response_id,"
         " observed_at, created_at) VALUES (?, 'lg_nba', ?, 'v4','basketball_nba',"
-        " ?, ?, ?, NULL,'H','A', ?, ?, ?, ?)",
-        (obs_id, THE_ODDS_API_PROVIDER, event_id, BUCKET_A, BUCKET_A, obs_id,
-         raw_id, received, NOW))
+        " ?, ?, ?, ?, 'Boston Celtics','Miami Heat', ?, ?, ?, ?)",
+        (observation_id(observation), THE_ODDS_API_PROVIDER, event_id, BUCKET_A,
+         "2026-03-01T16:55:37.000000Z", "2026-03-01T18:10:00.000000Z",
+         observation_content_hash(observation), raw_id, received, utc_now_iso()))
 
 
 def _complete_acquisition(conn: sqlite3.Connection) -> tuple[str, StageAManifest]:
     _, acquisition_id, manifest = _declared(conn)
-    _raw_response(conn, "raw_c1", requested_at=NOW, received_at=NOW)
+    _raw_response(conn, "raw_c1")
     record_attempt(conn, acquisition_id=acquisition_id, requested_at_bucket=BUCKET_A,
                    outcome="success_full_snapshot", raw_response_id="raw_c1")
     _observation(conn, "hme_c1", "raw_c1")
@@ -527,12 +590,12 @@ def test_missing_bucket_keeps_the_acquisition_incomplete(conn):
         buckets=(BUCKET_A, BUCKET_B),
         targets=(StageATarget("gm_v1", BUCKET_A), StageATarget("gm_v2", BUCKET_B)))
     plan_id = record_plan(conn, manifest, manifest_commit_sha="c",
-                          manifest_content_digest="d", manifest_path="p")
+                          manifest_content_digest=manifest_content_digest(dumps(manifest)),
+                          manifest_path="p")
     acquisition_id = register_acquisition(
         conn, plan_id=plan_id, acquisition_policy_version=ACQ_POLICY,
-        projection_policy_version=PROJ_POLICY, request_budget=10, credit_budget=10,
-        registered_at=NOW)
-    _raw_response(conn, "raw_only", requested_at=NOW, received_at=NOW)
+        projection_policy_version=PROJ_POLICY, request_budget=10, credit_budget=10)
+    _raw_response(conn, "raw_only")
     record_attempt(conn, acquisition_id=acquisition_id, requested_at_bucket=BUCKET_A,
                    outcome="success_full_snapshot", raw_response_id="raw_only")
     _observation(conn, "hme_only", "raw_only")
@@ -542,7 +605,7 @@ def test_missing_bucket_keeps_the_acquisition_incomplete(conn):
 
 
 def test_manifest_target_omission_is_detected(conn):
-    acquisition_id, _ = _complete_acquisition(conn)
+    acquisition_id, manifest = _complete_acquisition(conn)
     tampered = _manifest(targets=(StageATarget("gm_v1", BUCKET_A),))
     report = certify_stage_a(conn, acquisition_id=acquisition_id, manifest=tampered)
     assert not report.certified
@@ -551,7 +614,7 @@ def test_manifest_target_omission_is_detected(conn):
 
 def test_a_full_snapshot_with_no_observations_fails(conn):
     _, acquisition_id, manifest = _declared(conn)
-    _raw_response(conn, "raw_empty", requested_at=NOW, received_at=NOW)
+    _raw_response(conn, "raw_empty")
     record_attempt(conn, acquisition_id=acquisition_id, requested_at_bucket=BUCKET_A,
                    outcome="success_full_snapshot", raw_response_id="raw_empty")
     report = certify_stage_a(conn, acquisition_id=acquisition_id, manifest=manifest)
@@ -563,7 +626,7 @@ def test_empty_data_success_is_valid_zero_event_evidence(conn):
     """HTTP 200 + valid wrapper + data=[] is evidence, not a failure."""
 
     _, acquisition_id, manifest = _declared(conn)
-    _raw_response(conn, "raw_zero", requested_at=NOW, received_at=NOW)
+    _raw_response(conn, "raw_zero", body=_wrapper([]))
     record_attempt(conn, acquisition_id=acquisition_id, requested_at_bucket=BUCKET_A,
                    outcome="success_empty_data", raw_response_id="raw_zero")
     report = certify_stage_a(conn, acquisition_id=acquisition_id, manifest=manifest)
@@ -572,7 +635,7 @@ def test_empty_data_success_is_valid_zero_event_evidence(conn):
 
 def test_failed_request_never_becomes_no_market(conn):
     _, acquisition_id, manifest = _declared(conn)
-    _raw_response(conn, "raw_500", requested_at=NOW, received_at=NOW, status=500)
+    _raw_response(conn, "raw_500", status=500)
     record_attempt(conn, acquisition_id=acquisition_id, requested_at_bucket=BUCKET_A,
                    outcome="http_or_provider_failure", raw_response_id="raw_500")
     report = certify_stage_a(conn, acquisition_id=acquisition_id, manifest=manifest)
@@ -626,14 +689,15 @@ def _corpus(conn: sqlite3.Connection, **overrides: Any):
 
 
 def test_enriched_corpus_is_a_distinct_superseding_row(conn):
-    acquisition_id, _ = _complete_acquisition(conn)
+    acquisition_id, manifest = _complete_acquisition(conn)
     repo, parent = _corpus(conn)
     parent_digest = parent.semantic_digest
 
     new_id, lane_id = enrich_corpus_with_market_lane(
         conn, repo, parent_corpus_id=parent.corpus_version_id,
         acquisition_ids=[acquisition_id], provider=THE_ODDS_API_PROVIDER,
-        namespace_generation="v4")
+        namespace_generation="v4",
+        **_lane_args(acquisition_id, manifest))
 
     assert new_id != parent.corpus_version_id
     child = conn.execute(
@@ -654,23 +718,25 @@ def test_enriched_corpus_is_a_distinct_superseding_row(conn):
 
 
 def test_lane_cannot_attach_to_a_corpus_with_different_official_provenance(conn):
-    acquisition_id, _ = _complete_acquisition(conn)
+    acquisition_id, manifest = _complete_acquisition(conn)
     repo, wrong = _corpus(conn, source_corpus_digest="SOMETHING_ELSE")
     with pytest.raises(StageAProvenanceError, match="different official source corpus"):
         enrich_corpus_with_market_lane(
             conn, repo, parent_corpus_id=wrong.corpus_version_id,
             acquisition_ids=[acquisition_id], provider=THE_ODDS_API_PROVIDER,
-            namespace_generation="v4")
+            namespace_generation="v4",
+        **_lane_args(acquisition_id, manifest))
 
 
 def test_lane_cannot_attach_to_a_corpus_with_a_different_target_set(conn):
-    acquisition_id, _ = _complete_acquisition(conn)
+    acquisition_id, manifest = _complete_acquisition(conn)
     repo, wrong = _corpus(conn, target_set_digest="OTHER_TARGETS")
     with pytest.raises(StageAProvenanceError, match="different official target set"):
         enrich_corpus_with_market_lane(
             conn, repo, parent_corpus_id=wrong.corpus_version_id,
             acquisition_ids=[acquisition_id], provider=THE_ODDS_API_PROVIDER,
-            namespace_generation="v4")
+            namespace_generation="v4",
+        **_lane_args(acquisition_id, manifest))
 
 
 def test_market_lane_cannot_be_bound_to_a_corpus_that_does_not_commit_to_it(conn):
@@ -690,18 +756,18 @@ def test_market_lane_cannot_be_bound_to_a_corpus_that_does_not_commit_to_it(conn
 
 
 def test_forged_acquisition_set_digest_is_detected(conn):
-    acquisition_id, _ = _complete_acquisition(conn)
+    acquisition_id, manifest = _complete_acquisition(conn)
     repo, parent = _corpus(conn)
     _, lane_id = enrich_corpus_with_market_lane(
         conn, repo, parent_corpus_id=parent.corpus_version_id,
         acquisition_ids=[acquisition_id], provider=THE_ODDS_API_PROVIDER,
-        namespace_generation="v4")
+        namespace_generation="v4",
+        **_lane_args(acquisition_id, manifest))
     # Add a second acquisition to the lane WITHOUT updating the set digest.
     plan_id = conn.execute("SELECT plan_id FROM stage_a_plans").fetchone()[0]
     second = register_acquisition(
         conn, plan_id=plan_id, acquisition_policy_version=ACQ_POLICY,
-        projection_policy_version=PROJ_POLICY, request_budget=10, credit_budget=10,
-        registered_at=NOW)
+        projection_policy_version=PROJ_POLICY, request_budget=10, credit_budget=10)
     conn.execute(
         "INSERT INTO corpus_evidence_lane_acquisitions (lane_binding_id,"
         " acquisition_id, created_at) VALUES (?,?,?)", (lane_id, second, NOW))
@@ -747,23 +813,25 @@ def test_legacy_official_audit_with_a_null_lane_remains_accepted(conn):
 
 
 def test_audit_citing_a_lane_for_another_provider_is_refused(conn):
-    acquisition_id, _ = _complete_acquisition(conn)
+    acquisition_id, manifest = _complete_acquisition(conn)
     repo, parent = _corpus(conn)
     _, lane_id = enrich_corpus_with_market_lane(
         conn, repo, parent_corpus_id=parent.corpus_version_id,
         acquisition_ids=[acquisition_id], provider=THE_ODDS_API_PROVIDER,
-        namespace_generation="v4")
+        namespace_generation="v4",
+        **_lane_args(acquisition_id, manifest))
     with pytest.raises(sqlite3.IntegrityError, match="lane for a different provider"):
         _audit(conn, "ida_wrong", "balldontlie", lane_binding_id=lane_id)
 
 
 def test_audit_digest_must_equal_its_cited_lane_digest(conn):
-    acquisition_id, _ = _complete_acquisition(conn)
+    acquisition_id, manifest = _complete_acquisition(conn)
     repo, parent = _corpus(conn)
     _, lane_id = enrich_corpus_with_market_lane(
         conn, repo, parent_corpus_id=parent.corpus_version_id,
         acquisition_ids=[acquisition_id], provider=THE_ODDS_API_PROVIDER,
-        namespace_generation="v4")
+        namespace_generation="v4",
+        **_lane_args(acquisition_id, manifest))
     with pytest.raises(sqlite3.IntegrityError, match="does not equal its cited lane"):
         _audit(conn, "ida_forged", THE_ODDS_API_PROVIDER, lane_binding_id=lane_id,
                digest="FORGED")
@@ -791,7 +859,7 @@ def test_new_tables_reject_update_and_delete(conn, table, key_column):
 def test_replace_cannot_mutate_a_recorded_attempt(conn):
     """SQLite REPLACE performs an implicit DELETE that skips DELETE triggers."""
 
-    acquisition_id, _ = _complete_acquisition(conn)
+    acquisition_id, manifest = _complete_acquisition(conn)
     attempt = conn.execute("SELECT * FROM stage_a_request_attempts").fetchone()
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
@@ -807,12 +875,13 @@ def test_replace_cannot_mutate_a_recorded_attempt(conn):
 
 
 def test_replace_cannot_mutate_a_lane_digest(conn):
-    acquisition_id, _ = _complete_acquisition(conn)
+    acquisition_id, manifest = _complete_acquisition(conn)
     repo, parent = _corpus(conn)
     _, lane_id = enrich_corpus_with_market_lane(
         conn, repo, parent_corpus_id=parent.corpus_version_id,
         acquisition_ids=[acquisition_id], provider=THE_ODDS_API_PROVIDER,
-        namespace_generation="v4")
+        namespace_generation="v4",
+        **_lane_args(acquisition_id, manifest))
     lane = conn.execute(
         "SELECT * FROM corpus_evidence_lane_bindings WHERE lane_binding_id = ?",
         (lane_id,)).fetchone()
@@ -839,12 +908,12 @@ def test_one_response_cannot_serve_two_buckets_in_one_acquisition(conn):
         buckets=(BUCKET_A, BUCKET_B),
         targets=(StageATarget("gm_v1", BUCKET_A), StageATarget("gm_v2", BUCKET_B)))
     plan_id = record_plan(conn, manifest, manifest_commit_sha="c",
-                          manifest_content_digest="d", manifest_path="p")
+                          manifest_content_digest=manifest_content_digest(dumps(manifest)),
+                          manifest_path="p")
     acquisition_id = register_acquisition(
         conn, plan_id=plan_id, acquisition_policy_version=ACQ_POLICY,
-        projection_policy_version=PROJ_POLICY, request_budget=10, credit_budget=10,
-        registered_at=NOW)
-    _raw_response(conn, "raw_shared", requested_at=NOW, received_at=NOW)
+        projection_policy_version=PROJ_POLICY, request_budget=10, credit_budget=10)
+    _raw_response(conn, "raw_shared")
     record_attempt(conn, acquisition_id=acquisition_id, requested_at_bucket=BUCKET_A,
                    outcome="success_full_snapshot", raw_response_id="raw_shared")
     with pytest.raises(sqlite3.IntegrityError):

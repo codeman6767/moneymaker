@@ -10,6 +10,22 @@ two disagree.
 
 ---
 
+> **SUPERSEDED IN PART.** The independent review
+> (`V22_STAGE_A_PROVENANCE_INDEPENDENT_REVIEW.md`) reproduced nine defects against
+> `46f1725`, two critical: the certification gate did **not** compose the accepted
+> projection/body verifier, and an **uncertified** acquisition could be enriched
+> into a superseding corpus. Six are repaired; three are retained blockers. In
+> particular:
+>
+> - §13's "projection completeness" claim was **not** implemented at `46f1725`;
+>   it is now, by calling the accepted verifier rather than a local copy.
+> - The lane-backed crosswalk described in §12 is **structurally impossible**:
+>   f019's trigger still fires, so f022's new trigger is unreachable today.
+> - Probe registration is **not** content-bound, so `REUSED_PROBE_RESPONSE`
+>   remains generalizable until that is closed.
+>
+> The review is authoritative wherever the two differ.
+
 ## 1. The central correction this is built around
 
 `reconstruction_corpus_versions` is **content-addressed**. f018 declares
@@ -308,4 +324,6 @@ set root or v23 work exists in this change.
 | P1 (28 legacy tables) performed | **NO** |
 | Provider requests / credits | **0 / 0** |
 
-**v22 is ready for independent adversarial implementation review.**
+**v22 was reviewed; see `V22_STAGE_A_PROVENANCE_INDEPENDENT_REVIEW.md` for the
+verdict (ACCEPTED WITH REPAIRS) and the three retained blockers that gate the
+real probe registration and plan declaration.**
