@@ -476,16 +476,17 @@ def test_a_rejected_plan_leaves_no_partial_declaration(conn):
 # --------------------------------------------------------------------------- #
 # RETAINED BLOCKERS -- documented, deliberately NOT repaired here
 # --------------------------------------------------------------------------- #
-def test_retained_probe_registration_is_not_content_bound(conn):
-    """RETAINED BLOCKER: probe reuse is still not fully machine-verifiable.
+def test_probe_registration_is_now_content_bound(conn):
+    """B1 CLOSED. This test previously PINNED the blocker; it now proves the fix.
 
-    A registration row binds a commit SHA and a path, but nothing resolves that
-    commit, loads the report, or proves the report names this response. An
-    arbitrary pre-plan response can therefore still be blessed after the fact, so
-    long as its body genuinely projects.
+    At `8703239` the sequence below CERTIFIED: an arbitrary 2020 response, an
+    all-zero commit SHA and a nonexistent report path were enough, because the
+    registration row was the only thing consulted.
 
-    This test PINS the gap so it cannot be forgotten, and must be replaced by a
-    refusal when the probe-registration task binds report content.
+    Certification now re-resolves the commit, loads the committed report, parses
+    the frozen contract and re-derives the UNIQUE matching response. The all-zero
+    SHA fails at the first step, so the registration is a dead pointer rather than
+    a grant of eligibility.
     """
 
     _seed(conn)
@@ -508,9 +509,8 @@ def test_retained_probe_registration_is_not_content_bound(conn):
     _obs(conn, "raw_old", EV_A, "Boston Celtics", "Miami Heat")
 
     report = certify_stage_a(conn, acquisition_id=acquisition_id, manifest=manifest)
-    assert report.certified, (
-        "if this now FAILS, the probe-report content binding has been implemented "
-        "and this retained-blocker pin should be replaced by a refusal assertion")
+    assert not report.certified
+    assert any("does not bind to committed evidence" in f for f in report.failures),         report.failures
 
 
 def test_retained_manifest_commit_sha_is_never_resolved(conn):

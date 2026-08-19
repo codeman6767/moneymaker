@@ -57,6 +57,7 @@ from .stage_a_policies import (
     require_probe_policy,
     require_projection_policy,
 )
+from .stage_a_probe_binding import probe_binding_failures
 
 MARKET_EVENTS_E0_LANE: Final = "market_events_e0"
 
@@ -266,9 +267,12 @@ def register_probe_response(
     probe_report_commit_sha: str,
     probe_report_path: str,
     probe_policy_version: str,
-    registered_at: Optional[str] = None,
 ) -> str:
     """Register a documented capability probe response as reuse-eligible.
+
+    ``registered_at`` is NOT a parameter, for the same reason it was removed from
+    :func:`register_acquisition`: a trusted API must not offer backdating as a
+    supported feature. The clock comes from the repository.
 
     This grants NO identity semantics whatsoever: not that an audit was accepted,
     not that the event id is stable, not that any event maps to a canonical game,
@@ -285,7 +289,7 @@ def register_probe_response(
         " raw_response_id, probe_policy_version, probe_report_commit_sha,"
         " probe_report_path, registered_at, created_at) VALUES (?,?,?,?,?,?,?)",
         (registration_id, raw_response_id, probe_policy_version,
-         probe_report_commit_sha, probe_report_path, registered_at or now, now),
+         probe_report_commit_sha, probe_report_path, now, now),
     )
     return registration_id
 
@@ -541,6 +545,22 @@ def _probe_reuse_failures(
                     f"reused probe {raw_id!r} used filtered request parameters: {extra}")
         except (ValueError, TypeError):
             failures.append(f"reused probe {raw_id!r} has unreadable request params")
+
+        # B1: the registration row is only a POINTER. Re-resolve the commit,
+        # re-load the committed report, re-parse the frozen contract, and
+        # re-derive the UNIQUE matching response. A registration forged by
+        # direct SQL, or one naming a response its own report does not uniquely
+        # identify, is refused here rather than trusted.
+        registration = conn.execute(  # type: ignore[union-attr]
+            "SELECT probe_report_commit_sha, probe_report_path,"
+            " probe_policy_version FROM stage_a_probe_registrations"
+            " WHERE raw_response_id = ?", (raw_id,)).fetchone()
+        if registration is None:
+            failures.append(
+                f"reused probe {raw_id!r} has no probe registration")
+        else:
+            failures.extend(probe_binding_failures(
+                conn, raw_response_id=raw_id, registration=registration))
 
     # At most one eligible reused probe per bucket -- otherwise a curator could
     # silently select the convenient candidate.

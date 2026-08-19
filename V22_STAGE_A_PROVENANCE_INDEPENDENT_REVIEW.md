@@ -112,6 +112,13 @@ rather than the intended guard. Both now raise explicit domain refusals.
 
 ### B1 (HIGH) — probe registration is not content-bound; D9 is **not** closed
 
+> **STATUS: CLOSED.** See `STAGE_A_PROBE_REUSE_BINDING_IMPLEMENTATION.md`. The
+> binding requires the report to precommit a preimage-resistant fingerprint,
+> because the facts a report merely *describes* were measured to be satisfiable
+> by a fabricated body. Consequence: the real `d3984d0` probe is **NOT reusable**
+> and its bucket must be acquired normally for one credit. The historical finding
+> below is left unedited.
+
 `stage_a_probe_registrations` stores a commit SHA and a path, but nothing
 resolves the commit, loads the report, or proves the report names that response.
 Reproduced: an arbitrary 2020 response, registered *after* inspection with an
