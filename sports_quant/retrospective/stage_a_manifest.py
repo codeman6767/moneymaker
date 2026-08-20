@@ -93,6 +93,61 @@ def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return seen
 
 
+
+def _exact_str(payload: dict[str, Any], field: str, *, where: str = "manifest") -> str:
+    """A JSON string, exactly. No coercion.
+
+    `str(...)` would turn the number ``12345`` into ``"12345"``, ``true`` into
+    ``"True"`` and ``null`` into the literal string ``"None"`` -- the committed
+    artefact would then assert something the frozen parser silently rewrote,
+    which is the same defect class as an ignored unknown field.
+    """
+
+    value = payload.get(field)
+    if not isinstance(value, str):
+        raise StageAManifestError(
+            f"Stage-A {where} field {field!r} must be a JSON string, got "
+            f"{type(value).__name__}; {STAGE_A_MANIFEST_FORMAT_VERSION} does not "
+            f"coerce types")
+    if not value or value != value.strip():
+        raise StageAManifestError(
+            f"Stage-A {where} field {field!r} must be non-empty and free of outer "
+            f"whitespace")
+    return value
+
+
+def _exact_int(payload: dict[str, Any], field: str, *, minimum: int = 0) -> int:
+    """A JSON integer, exactly. No floats, no numeric strings, no booleans.
+
+    ``bool`` is an ``int`` subclass in Python, so ``True`` would otherwise pass an
+    ``isinstance(value, int)`` check and become ``1``. ``int(60.9)`` would
+    silently truncate a committed ``60.9`` to ``60``.
+    """
+
+    value = payload.get(field)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise StageAManifestError(
+            f"Stage-A manifest field {field!r} must be a JSON integer, got "
+            f"{type(value).__name__}; {STAGE_A_MANIFEST_FORMAT_VERSION} does not "
+            f"coerce types")
+    if value < minimum:
+        raise StageAManifestError(
+            f"Stage-A manifest field {field!r} must be >= {minimum}, got {value}")
+    # SQLite stores a signed 64-bit integer; a larger value would round-trip
+    # differently than the committed artefact states.
+    if value > 2 ** 63 - 1:
+        raise StageAManifestError(
+            f"Stage-A manifest field {field!r} exceeds the exactly storable "
+            f"integer range")
+    return value
+
+
+def _reject_non_standard(value: str) -> float:
+    raise StageAManifestError(
+        f"Stage-A manifest contains the non-standard JSON constant {value!r}; "
+        f"only strict JSON is accepted")
+
+
 def canonical_json(payload: dict[str, Any]) -> str:
     """Stable canonical JSON: sorted keys, no insignificant whitespace, UTF-8."""
 
@@ -251,7 +306,8 @@ def loads(text: str) -> StageAManifest:
     """
 
     try:
-        payload = json.loads(text, object_pairs_hook=_no_duplicate_keys)
+        payload = json.loads(text, object_pairs_hook=_no_duplicate_keys,
+                             parse_constant=_reject_non_standard)
     except json.JSONDecodeError as exc:
         raise StageAManifestError(f"Stage-A manifest is not valid JSON: {exc}") from exc
     if not isinstance(payload, dict):
@@ -284,37 +340,55 @@ def loads(text: str) -> StageAManifest:
                 f"Stage-A target declares unknown field(s) {unknown_target}; "
                 f"a target is a closed object in "
                 f"{STAGE_A_MANIFEST_FORMAT_VERSION}")
-        try:
-            targets.append(StageATarget(
-                canonical_game_id=str(entry["canonical_game_id"]),
-                requested_at_bucket=str(entry["requested_at_bucket"])))
-        except KeyError as exc:
-            raise StageAManifestError(
-                f"Stage-A target is missing required field {exc}") from None
+        for required in ("canonical_game_id", "requested_at_bucket"):
+            if required not in entry:
+                raise StageAManifestError(
+                    f"Stage-A target is missing required field {required!r}")
+        targets.append(StageATarget(
+            canonical_game_id=_exact_str(entry, "canonical_game_id",
+                                         where="target"),
+            requested_at_bucket=_exact_str(entry, "requested_at_bucket",
+                                           where="target")))
 
     raw_buckets = payload.get("buckets")
     if not isinstance(raw_buckets, list):
         raise StageAManifestError("Stage-A manifest 'buckets' must be a list")
 
     try:
+        for required in sorted(_KNOWN_TOP_LEVEL_FIELDS):
+            if required not in payload:
+                raise StageAManifestError(
+                    f"Stage-A manifest is missing required field {required!r}")
+        for index, bucket in enumerate(raw_buckets):
+            if not isinstance(bucket, str) or not bucket or bucket != bucket.strip():
+                raise StageAManifestError(
+                    f"Stage-A manifest bucket #{index} must be a non-empty JSON "
+                    f"string without outer whitespace, got "
+                    f"{type(bucket).__name__}")
         manifest = StageAManifest(
-            league_id=str(payload["league_id"]),
-            provider=str(payload["provider"]),
-            namespace_generation=str(payload["namespace_generation"]),
-            sport_key=str(payload["sport_key"]),
-            official_source_corpus_digest=str(payload["official_source_corpus_digest"]),
-            official_target_set_digest=str(payload["official_target_set_digest"]),
+            league_id=_exact_str(payload, "league_id"),
+            provider=_exact_str(payload, "provider"),
+            namespace_generation=_exact_str(payload, "namespace_generation"),
+            sport_key=_exact_str(payload, "sport_key"),
+            official_source_corpus_digest=_exact_str(
+                payload, "official_source_corpus_digest"),
+            official_target_set_digest=_exact_str(
+                payload, "official_target_set_digest"),
             targets=tuple(targets),
-            buckets=tuple(str(b) for b in raw_buckets),
-            decision_horizon_minutes=int(payload["decision_horizon_minutes"]),
-            bucket_floor_seconds=int(payload["bucket_floor_seconds"]),
-            request_budget=int(payload["request_budget"]),
-            credit_budget=int(payload["credit_budget"]),
-            acquisition_policy_version=str(payload["acquisition_policy_version"]),
-            projection_policy_version=str(payload["projection_policy_version"]),
-            cost_policy_version=str(payload["cost_policy_version"]),
-            manifest_format_version=str(payload["manifest_format_version"]),
-            plan_policy_version=str(payload["plan_policy_version"]),
+            buckets=tuple(raw_buckets),
+            decision_horizon_minutes=_exact_int(
+                payload, "decision_horizon_minutes", minimum=1),
+            bucket_floor_seconds=_exact_int(
+                payload, "bucket_floor_seconds", minimum=1),
+            request_budget=_exact_int(payload, "request_budget"),
+            credit_budget=_exact_int(payload, "credit_budget"),
+            acquisition_policy_version=_exact_str(
+                payload, "acquisition_policy_version"),
+            projection_policy_version=_exact_str(
+                payload, "projection_policy_version"),
+            cost_policy_version=_exact_str(payload, "cost_policy_version"),
+            manifest_format_version=_exact_str(payload, "manifest_format_version"),
+            plan_policy_version=_exact_str(payload, "plan_policy_version"),
         )
     except KeyError as exc:
         raise StageAManifestError(

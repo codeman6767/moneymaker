@@ -75,6 +75,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -162,6 +163,26 @@ def validate_repo_path(path: str) -> str:
     return path
 
 
+def _git_env() -> dict[str, str]:
+    """The environment every load-bearing git read must run under.
+
+    ``GIT_NO_REPLACE_OBJECTS`` -- git honours ``refs/replace/*`` by DEFAULT, so
+    ``git replace -f C1 C2`` makes ``cat-file blob C1:path`` return C2's content
+    while every command still reports C1. Measured against this repository's
+    helper before the fix: asking for a commit whose manifest declared
+    ``request_budget = 5`` returned ``999``. A verifier that can be told "when
+    you look up this object, use a different one" is not binding an object at
+    all, so replacement is disabled for every verification read.
+
+    ``GIT_NO_LAZY_FETCH`` -- in a partial/promisor clone, an object command may
+    silently fetch a missing object from the remote. The contract here is
+    MISSING LOCALLY -> REFUSE, never "download it", so implicit network I/O is
+    disabled rather than assumed absent.
+    """
+
+    return {**os.environ, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_NO_LAZY_FETCH": "1"}
+
+
 def _git(*args: str, repo_root: Optional[Path] = None) -> subprocess.CompletedProcess[str]:
     """Run a read-only local git command. No network, ever.
 
@@ -172,7 +193,7 @@ def _git(*args: str, repo_root: Optional[Path] = None) -> subprocess.CompletedPr
 
     return subprocess.run(
         ["git", "--no-optional-locks", "-C", str(repo_root or REPO_ROOT), *args],
-        capture_output=True, text=True, check=False)
+        capture_output=True, text=True, check=False, env=_git_env())
 
 
 def resolve_commit(commit_sha: str, *, repo_root: Optional[Path] = None) -> str:
@@ -202,6 +223,23 @@ def resolve_commit(commit_sha: str, *, repo_root: Optional[Path] = None) -> str:
     return commit_sha
 
 
+#: Tree modes a committed artefact may have. A symlink (120000) resolves to a
+#: blob containing a path string, and a gitlink (160000) points at a different
+#: repository entirely; accepting either would make "this file was committed" a
+#: misleading claim.
+_ALLOWED_BLOB_MODES: Final[frozenset[str]] = frozenset({"100644", "100755"})
+
+
+def _tree_entry_mode(commit_sha: str, path: str, *,
+                     repo_root: Optional[Path] = None) -> str:
+    entry = _git("ls-tree", "--full-tree", commit_sha, "--", path,
+                 repo_root=repo_root)
+    if entry.returncode != 0 or not entry.stdout.strip():
+        raise GitObjectError(
+            f"path {path!r} does not exist at commit {commit_sha!r}")
+    return entry.stdout.split()[0]
+
+
 def load_committed_bytes(commit_sha: str, path: str, *,
                          repo_root: Optional[Path] = None) -> bytes:
     """Load the EXACT committed blob bytes for ``path`` at ``commit_sha``.
@@ -218,10 +256,17 @@ def load_committed_bytes(commit_sha: str, path: str, *,
 
     resolved = resolve_commit(commit_sha, repo_root=repo_root)
     safe = validate_repo_path(path)
+    mode = _tree_entry_mode(resolved, safe, repo_root=repo_root)
+    if mode not in _ALLOWED_BLOB_MODES:
+        raise GitObjectError(
+            f"path {safe!r} at commit {resolved!r} is tree mode {mode!r}, not a "
+            f"regular file. A symlink entry (120000) is itself a blob holding a "
+            f"link target, and a gitlink (160000) names another repository, so "
+            f"neither is the committed artefact it appears to be.")
     blob = subprocess.run(
         ["git", "--no-optional-locks", "-C", str(repo_root or REPO_ROOT),
          "cat-file", "blob", f"{resolved}:{safe}"],
-        capture_output=True, check=False)
+        capture_output=True, check=False, env=_git_env())
     if blob.returncode != 0:
         raise GitObjectError(
             f"path {safe!r} does not exist at commit {resolved!r}; "

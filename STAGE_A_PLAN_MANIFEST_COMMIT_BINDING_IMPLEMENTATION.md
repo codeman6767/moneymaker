@@ -16,6 +16,22 @@
 
 ---
 
+> **SUPERSEDED IN PART by the independent review**
+> (`STAGE_A_PLAN_MANIFEST_COMMIT_BINDING_INDEPENDENT_REVIEW.md`), which
+> reproduced three further defects against `40846d0`:
+>
+> - **git replacement objects** (`refs/replace/*`, honoured by default) let one
+>   `git replace` silently substitute a different committed manifest while the
+>   verifier reported the requested commit. Repaired with
+>   `GIT_NO_REPLACE_OBJECTS=1`; `GIT_NO_LAZY_FETCH=1` added alongside it.
+> - the closed schema still **coerced types** on known fields, so a committed
+>   `60.9` certified as `60` and a JSON `null` became the string `"None"`.
+>   Repaired with exact JSON types and strict-JSON constants.
+> - a **symlink tree entry** was read as the manifest, returning the link target.
+>   Repaired by requiring a regular-file tree mode.
+>
+> The review is authoritative wherever the two differ.
+
 ## 1. The defect, reproduced
 
 `stage_a_plans` stored `manifest_commit_sha`, `manifest_content_digest` and
