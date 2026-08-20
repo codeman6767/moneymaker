@@ -163,6 +163,13 @@ request, never *which* provider event is a game.
 | Probe registered | **NO** |
 | Linking provider / G5 / crosswalk / F1-R / E1 / P1 | **NO** |
 
+> **BLOCKER ADJUDICATED.** See `CORPUS_TARGET_POPULATION_BINDING_ARCHITECTURE.md`:
+> membership will come from the preserved official listing raw responses of
+> bound acquisition runs, materialized as explicit corpus membership rows with a
+> derived `target-set-v1` digest (**v23 required**). Legacy `target_set_digest`
+> values stay LEGACY UNBOUND and can never back §AF. A retained **data**
+> dependency remains: the authoritative NBA March corpus is not present locally.
+
 ## 9. Exact next authorization boundary
 
 > **Corpus target-population binding** — give
