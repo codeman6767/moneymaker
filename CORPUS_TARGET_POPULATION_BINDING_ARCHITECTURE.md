@@ -17,6 +17,17 @@
 | 8 | §AF ready after implementation | **YES for the mechanism**, gated on supplying the authoritative corpus |
 | 9 | Overall | **ARCHITECTURE ACCEPTED — READY FOR IMPLEMENTATION**, with a retained **source/data** dependency |
 
+> **SUPERSEDED IN PART BY INDEPENDENT REVIEW.** See
+> `CORPUS_TARGET_POPULATION_BINDING_ARCHITECTURE_INDEPENDENT_REVIEW.md`. The
+> scientific core (verdicts 1, 2, 3, 5, 6) survived attack. Four mechanisms did
+> not and are corrected in place below: the closure rule in §7 is **not
+> implementable** and is replaced by construct-then-seal; run provenance sits
+> **outside the content address**, so the §6 digest becomes a composite; §4's
+> "projection" requires a mutable, nullable mapping and a new verifier; and the
+> run set must bind a **precommitted acquisition manifest**, not caller-chosen
+> run ids. The v23 shape in §7 grows from two objects to three plus a column.
+> Each correction is marked **[REVIEW]**.
+
 ---
 
 ## 1. The blocker, independently reproduced
@@ -41,6 +52,15 @@ why "league=NBA and March 2026" cannot be the membership source.
 but it commits the **acquisition scope**; the games were discovered by a
 contingent *during* acquisition. So no precommitted artefact enumerates the
 original 239.
+
+> **[REVIEW] G is incomplete.** The resume **checkpoint** does enumerate a frozen
+> game set — `Checkpoint.stage_game_ids`, bound to `manifest_hash`,
+> `plan_version` and `scratch_fingerprint`. It is written *during* acquisition, so
+> it is not precommitted evidence of the intended population and does not license
+> retroactive attestation; but it is preserved evidence of the **selected** set
+> and belongs on the artefact checklist. Note also that the selected set is not
+> automatically the complete official set: `max_games`, `max_pages` and
+> `max_records` truncation is reported in runtime fields, not persisted rows.
 
 ## 2. What a target population is — and is not
 
@@ -101,6 +121,22 @@ lacks.
 The corpus must therefore bind the exact `run_id` set, so derivation is scoped to
 *those* acquisitions rather than to every response the database happens to hold.
 
+> **[REVIEW] Two corrections.**
+> **(a) Run ids alone are unfalsifiable.** No v22 object derives "the complete
+> required run set" for the official acquisition — the manifest and checkpoint are
+> files. A caller binding R1+R2 while omitting R3 yields membership that is
+> internally perfect, moving denominator shrinkage one layer earlier. The corpus
+> must bind the **precommitted acquisition manifest hash and plan version**; the
+> run ids are the *resolution* of that manifest, not the primary claim.
+> **(b) This is not a pure projection.** `games.game_id` is a random **ULID**
+> (`ids.py`), never derivable from a provider payload. Derivation must resolve
+> `provider_game_id` through `provider_game_references`, whose `game_id` is
+> NULLABLE and whose row is mutable. A deterministic
+> `official-listing-projection-v1` verifier is required, and it must **fail
+> closed** — never drop a member — when a provider game has no resolved canonical
+> game. Page completeness comes from **cursor-chain closure** over the bound
+> `/v1/games` responses, which is derivable from preserved evidence.
+
 **Retained source dependency.** This source is sound in principle and **cannot be
 instantiated now**: no database under `data/` contains a single NBA game row, so
 the March corpus and its listing responses are absent. The minimum input needed
@@ -134,6 +170,18 @@ Whether it *supersedes* the official corpus or is a sibling policy version is an
 implementation detail the next task must settle; the invariant is that a
 target-unbound corpus can never be the parent of an E0 lane.
 
+> **[REVIEW] Settled: SIBLING / DISTINCT POLICY — it does not supersede.**
+> Supersession asserts a corrected restatement of the *same* claim. A target-bound
+> corpus makes a claim the old corpus never made, under a different
+> `reconstruction_policy_version`, and may have no ancestor at all. Recording
+> supersession would manufacture a lineage. Consequences: C1 stays byte-identical;
+> legacy audits and crosswalks stay valid; "latest corpus" resolution must **not**
+> silently switch consumers onto the target-bound corpus; and the E0 invariant is
+> enforced **at the E0 seam**, never by recency. `source_corpus_digest` must be
+> **scoped to the bound acquisition's evidence** rather than inherited from a
+> broader official corpus, so the source and derivation digests commit to the same
+> evidence.
+
 ## 6. `target_set_digest` — derived contract
 
 ```
@@ -154,6 +202,31 @@ semantic change requires `target-set-v2`.
 `games.game_id` is the membership key — the project's canonical surrogate
 identity, deliberately stable across provider-id changes and corrections
 (`db/ids.py`). Provider ids and team names are never used.
+
+> **[REVIEW] The digest becomes a composite, and the key has a caveat.**
+> Run provenance cannot be added to the `semantic_digest` payload: widening that
+> payload changes the digest of **every** corpus, including legacy rows. But run
+> provenance must be part of corpus identity, because otherwise two different run
+> sets reaching the same member set collapse to **one** corpus row (proved), so a
+> single content-addressed identity carries two derivation explanations. The
+> repair keeps membership as its own named object inside a composite:
+>
+> ```
+> members_digest    = sha256(canonical{policy:"target-set-v1",
+>                                      league_id, members:[sorted unique game ids]})
+> derivation_digest = sha256(canonical{policy:"target-derivation-v1",
+>                                      acquisition_manifest_hash, plan_version,
+>                                      run_ids:[sorted unique]})
+> target_set_digest = sha256(canonical{policy:"target-binding-v1",
+>                                      league_id, members_digest, derivation_digest})
+> ```
+>
+> Duplicates must be **refused** by the digest function, not de-duplicated:
+> `sorted()` retains a duplicate, so one membership set would otherwise have two
+> valid digests. Non-emptiness is enforced on the seal, not in the digest.
+> **Caveat on the key:** `game_id` is a random ULID, so the content address is
+> over *this database's* surrogates. A byte-copy is portable; a rebuild from
+> identical raw evidence is not.
 
 ## 7. Minimal schema — **V23 REQUIRED**
 
@@ -176,6 +249,32 @@ run bindings and membership **in one savepoint** → verify by recomputation.
 one, *and* closed: no member may be inserted for a corpus that already exists,
 because the corpus id is a function of the membership. A later insert is refused
 by trigger, not convention.
+
+> **[REVIEW] This closure rule is NOT IMPLEMENTABLE and is replaced.** With an
+> ordinary FK to the corpus, the parent must exist before a member can be
+> inserted — at which point a literal "corpus already exists" trigger fires and
+> membership becomes uninsertable in every case (reproduced:
+> `IntegrityError: membership is closed: corpus already exists`). SQLite triggers
+> cannot distinguish "this parent was created earlier in my savepoint" from "this
+> parent is old".
+>
+> **Replacement: construct-then-seal**, proved executable against a real migrated
+> v22 database under eleven attacks. A third table
+> `reconstruction_corpus_target_seals` (PK `corpus_version_id`, carrying
+> `target_set_policy_version`, `member_count > 0`, `acquisition_manifest_hash`,
+> `plan_version`) is inserted last in the same savepoint. Membership and run
+> bindings are insertable **only while unsealed**; a seal trigger asserts
+> `member_count == COUNT(membership)`; the seal is immutable. Verified refusals:
+> post-seal append, DELETE, UPDATE, `INSERT OR REPLACE`, re-seal, count
+> disagreement, wrong league, missing `games` row. A failed membership insert
+> rolls the corpus back too, leaving no orphan identity.
+>
+> **Consequence:** an unsealed corpus is open by construction, so the verifier
+> must treat a missing seal as a hard failure. The seal is also where the policy
+> version lives — a verifier cannot infer a hashing policy from an opaque 64-hex
+> digest, and "try every known policy until one matches" is not a contract.
+>
+> **v23 is therefore three tables plus the manifest binding, not two.**
 
 ## 8. Direct-SQL threat model
 
@@ -247,5 +346,19 @@ plan, no probe registered, Stage A not run, linking provider unregistered,
 
 ## 14. Exact next authorization boundary
 
-> **Independent adversarial review of this architecture**, then the v23
-> target-population implementation.
+> ~~**Independent adversarial review of this architecture**, then the v23
+> target-population implementation.~~ **Done — see
+> `CORPUS_TARGET_POPULATION_BINDING_ARCHITECTURE_INDEPENDENT_REVIEW.md`.**
+>
+> **Next: V23 target-population implementation in the REPAIRED shape** — three
+> tables (`reconstruction_corpus_targets`, `reconstruction_corpus_target_runs`,
+> `reconstruction_corpus_target_seals` carrying the acquisition manifest binding
+> and policy version), the composite `target-binding-v1` digest, the
+> official-listing projection verifier with cursor-chain closure, and
+> `verify_corpus_target_population`.
+
+The artefact checklist in §4 is also extended by the review: beyond the preserved
+database, target binding needs `provider_game_references`, the **acquisition
+manifest file** and the **resume checkpoint file**. Without the last two the
+derivation digest cannot be computed and the historical March corpus is
+permanently unusable for target binding — completeness would be unfalsifiable.
