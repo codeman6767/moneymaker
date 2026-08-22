@@ -23,11 +23,14 @@ depend on downstream success, or the denominator becomes the numerator.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
-from collections.abc import Collection
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Final, Optional
+
+from ..db.repositories.raw_responses import response_content_hash
 
 __all__ = [
     "LISTING_PROJECTION_POLICY_V1",
@@ -38,6 +41,7 @@ __all__ = [
     "ListingChain",
     "ProjectionResult",
     "admitted_listing_responses",
+    "verify_response_integrity",
     "verify_cursor_chain",
     "project_targets",
 ]
@@ -56,6 +60,28 @@ NBA_GAMES_LISTING_ENDPOINT: Final = "/v1/games"
 
 class ListingProjectionError(RuntimeError):
     """Listing evidence is inadmissible, incomplete, or unprojectable."""
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Refuse duplicate JSON keys in a preserved provider body (RV-4).
+
+    A body carrying `"meta"` twice would otherwise parse last-value-wins, so a
+    truncated page could be made to look terminal (or vice versa) by an
+    appended key that a human reading the payload never sees.
+    """
+
+    seen: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in seen:
+            raise ListingProjectionError(
+                f"preserved listing body contains the duplicate key {key!r}")
+        seen[key] = value
+    return seen
+
+
+def _reject_non_standard(value: str) -> float:
+    raise ListingProjectionError(
+        f"preserved listing body contains the non-standard JSON constant {value!r}")
 
 
 @dataclass(frozen=True)
@@ -133,9 +159,46 @@ def admitted_listing_responses(
     return [r for r in rows if int(r["http_status"]) == 200]
 
 
+def verify_response_integrity(rows: Iterable[sqlite3.Row]) -> tuple[str, ...]:
+    """Recompute `body_hash` and `content_hash` from the stored bytes.
+
+    Independent review defect RV-1. `scoped_source_digest` fingerprints the
+    STORED `content_hash`, so a forged body left with its original hashes
+    produced an unchanged source digest -- the tamper was caught only
+    indirectly, when derived membership happened to differ from stored
+    membership. A forgery that changes nothing about the member set would have
+    passed silently. Provenance must be recomputed, never trusted.
+
+    `content_hash` is sha256 over (provider, endpoint, params, body), so this
+    also detects a rewritten endpoint, provider or request parameter.
+    """
+
+    problems: list[str] = []
+    for row in rows:
+        rid = str(row["raw_response_id"])
+        body = str(row["body"])
+        if hashlib.sha256(body.encode("utf-8")).hexdigest() != str(row["body_hash"]):
+            problems.append(
+                f"listing response {rid} body does not match its stored body_hash")
+        try:
+            params = json.loads(str(row["request_params_json"]))
+        except json.JSONDecodeError:
+            problems.append(f"listing response {rid} has unreadable request params")
+            continue
+        recomputed = response_content_hash(
+            provider=str(row["provider"]), endpoint=str(row["endpoint"]),
+            request_params=params, body=body)
+        if recomputed != str(row["content_hash"]):
+            problems.append(
+                f"listing response {rid} provider/endpoint/params/body do not match "
+                f"its stored content_hash")
+    return tuple(problems)
+
+
 def _parse_body(row: sqlite3.Row) -> dict[str, Any]:
     try:
-        body = json.loads(row["body"])
+        body = json.loads(row["body"], object_pairs_hook=_reject_duplicate_keys,
+                          parse_constant=_reject_non_standard)
     except json.JSONDecodeError as exc:
         raise ListingProjectionError(
             f"listing response {row['raw_response_id']} body is not valid JSON: "
@@ -176,9 +239,28 @@ def _request_cursor(row: sqlite3.Row) -> Optional[str]:
 
 
 def _next_cursor(body: dict[str, Any], response_id: str) -> Optional[str]:
+    """`meta.next_cursor`, requiring `meta` to be PRESENT on every page.
+
+    Independent review defect RV-2. Treating a missing `meta` as a terminus made
+    a truncated body indistinguishable from a real last page, and the documented
+    mitigation -- the manifest cap proof -- closes nothing when the caps are far
+    from binding: a single 100-game page with no `meta` certified as a complete
+    population under caps of 8 pages / 1000 records / 400 games.
+
+    Requiring `meta` is safe against the preserved March evidence, where all
+    three pages carry it including the terminal page whose `next_cursor` is
+    `null`. An explicit `"next_cursor": null` still terminates the chain; only a
+    body that omits the pagination envelope entirely is refused.
+    """
+
+    if "meta" not in body:
+        raise ListingProjectionError(
+            f"listing response {response_id} has no `meta` pagination envelope, so "
+            f"a truncated body cannot be distinguished from a real last page")
     meta = body.get("meta")
     if meta is None:
-        return None
+        raise ListingProjectionError(
+            f"listing response {response_id} has a null `meta`")
     if not isinstance(meta, dict):
         raise ListingProjectionError(
             f"listing response {response_id} has a non-object meta")

@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from sports_quant.db.engine import Database
+from sports_quant.db.repositories.raw_responses import response_content_hash
 from sports_quant.db.repositories.retrospective import (
     SqliteRetrospectiveProvenanceRepository,
 )
@@ -129,6 +130,9 @@ def _make_response(conn: sqlite3.Connection, response_id: str, run_id: str, *,
         text = json.dumps(payload)
     else:
         text = body if isinstance(body, str) else json.dumps(body)
+    # Hashes are built with the PRODUCTION helpers: the verifier now recomputes
+    # both (review defect RV-1), so a fixture that invents its own scheme would
+    # be testing the fixture rather than the code.
     conn.execute(
         "INSERT INTO raw_responses (raw_response_id, run_id, provider, endpoint,"
         " request_params_json, http_status, response_headers_json, requested_at,"
@@ -137,7 +141,8 @@ def _make_response(conn: sqlite3.Connection, response_id: str, run_id: str, *,
         (response_id, run_id, provider, endpoint, json.dumps(params, sort_keys=True),
          status, NOW, NOW, text, len(text),
          hashlib.sha256(text.encode()).hexdigest(),
-         hashlib.sha256((endpoint + text).encode()).hexdigest(), NOW))
+         response_content_hash(provider=provider, endpoint=endpoint,
+                               request_params=params, body=text), NOW))
     return response_id
 
 
@@ -581,6 +586,7 @@ def test_seal_helper_refuses_duplicate_input(tmp_path: Path) -> None:
     binding = AcquisitionBinding(
         manifest_hash="a" * 64, plan_version="v1", provider="balldontlie",
         league="nba", date_range="2026-03-01..2026-03-31", families=("games",),
+        start_date="2026-03-01", end_date="2026-03-31",
         max_pages=None, max_records=None, max_games=None)
     with pytest.raises(TargetPopulationError, match="duplicate member"):
         seal_target_population(conn, corpus_version_id="rcv_x",
@@ -696,16 +702,22 @@ def test_listing_without_data_array_refuses(tmp_path: Path) -> None:
         verify_cursor_chain(admitted_listing_responses(conn, run_ids=[run]))
 
 
-def test_body_omitting_meta_terminates_the_chain_a_documented_limit(
+def test_body_omitting_meta_is_refused_after_review_repair_rv2(
         tmp_path: Path) -> None:
-    """The retained limitation, pinned so nobody later claims it is detected."""
+    """Replaces the test that PINNED this as an accepted limitation.
+
+    The independent review showed the documented mitigation (the manifest cap
+    proof) closes nothing when the caps are far from binding, so a single
+    100-game page with no `meta` certified as a complete population. Requiring
+    the pagination envelope is safe against the preserved March evidence, whose
+    three pages all carry `meta`.
+    """
 
     conn = _db(tmp_path)
     run = _make_run(conn, "run_1")
     _make_response(conn, "raw_1", run, body={"data": [{"id": "1"}]})  # no meta
-    chain = verify_cursor_chain(admitted_listing_responses(conn, run_ids=[run]))
-    assert chain.ok
-    assert chain.pages == 1
+    with pytest.raises(ListingProjectionError, match="no `meta`"):
+        verify_cursor_chain(admitted_listing_responses(conn, run_ids=[run]))
 
 
 def test_projection_refuses_unresolved_and_never_drops(tmp_path: Path) -> None:

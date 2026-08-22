@@ -30,6 +30,7 @@ import json
 import sqlite3
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any, Final, Optional
 
@@ -43,6 +44,7 @@ from .listing_projection import (
     admitted_listing_responses,
     project_targets,
     verify_cursor_chain,
+    verify_response_integrity,
 )
 from .target_binding import (
     SUPPORTED_TARGET_SET_POLICIES,
@@ -80,6 +82,10 @@ TARGET_BOUND_RECONSTRUCTION_POLICY_V1: Final = "target-bound-reconstruction-v1"
 
 SUPPORTED_ACQUISITION_COMPLETENESS_POLICIES: Final = frozenset(
     {ACQUISITION_COMPLETENESS_POLICY_V1})
+
+#: The manifest family that authorizes game-listing acquisition. A manifest that
+#: does not declare it cannot bind a listing-derived target population (RV-6).
+LISTING_FAMILY: Final = "games"
 
 _TARGETS_TABLE: Final = "reconstruction_corpus_targets"
 _RUNS_TABLE: Final = "reconstruction_corpus_target_runs"
@@ -119,19 +125,38 @@ class AcquisitionBinding:
     league: str
     date_range: str
     families: tuple[str, ...]
+    #: Validated at parse time (RV-5), never re-split from `date_range` on demand.
+    start_date: str
+    end_date: str
     max_pages: Optional[int]
     max_records: Optional[int]
     max_games: Optional[int]
     checkpoint_stage_game_ids: tuple[str, ...] = ()
     checkpoint_present: bool = False
 
-    @property
-    def start_date(self) -> str:
-        return self.date_range.split("..", 1)[0]
 
-    @property
-    def end_date(self) -> str:
-        return self.date_range.split("..", 1)[-1]
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Refuse duplicate JSON keys instead of silently taking the last value.
+
+    Independent review defect RV-4. `json.loads` is last-value-wins, so a
+    manifest carrying `"plan_version":"good"` followed by `"plan_version":"evil"`
+    parsed as `"evil"` while a human reading the file sees the first. This is the
+    third time the B2 defect class has appeared, so it is refused here too.
+    """
+
+    seen: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in seen:
+            raise TargetPopulationError(
+                f"duplicate JSON key {key!r}; a provenance artefact must have "
+                f"exactly one value per field")
+        seen[key] = value
+    return seen
+
+
+def _reject_non_standard(value: str) -> float:
+    raise TargetPopulationError(
+        f"non-standard JSON constant {value!r}; only strict JSON is accepted")
 
 
 def _read_json(path: Path, *, what: str) -> tuple[bytes, dict[str, Any]]:
@@ -143,12 +168,35 @@ def _read_json(path: Path, *, what: str) -> tuple[bytes, dict[str, Any]]:
         raise TargetPopulationError(f"{what} too large: {path}")
     raw = path.read_bytes()
     try:
-        payload = json.loads(raw.decode("utf-8"))
+        payload = json.loads(raw.decode("utf-8"),
+                             object_pairs_hook=_reject_duplicate_keys,
+                             parse_constant=_reject_non_standard)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise TargetPopulationError(f"{what} is not valid JSON: {exc}") from None
     if not isinstance(payload, dict):
         raise TargetPopulationError(f"{what} root must be a JSON object")
     return raw, payload
+
+
+def _exact_str(payload: dict[str, Any], field: str, *, what: str) -> str:
+    """A real JSON string. No coercion.
+
+    Independent review defect RV-3: `str(manifest["plan_version"])` turned
+    `None` into `"None"`, `True` into `"True"` and `1` into `"1"`, so three
+    different manifests could claim the same plan version. `bool` is checked
+    first because it is an `int` subclass.
+    """
+
+    value = payload.get(field)
+    if isinstance(value, bool) or not isinstance(value, str):
+        raise TargetPopulationError(
+            f"{what} field {field!r} must be a JSON string, got "
+            f"{type(value).__name__}")
+    if not value or value != value.strip():
+        raise TargetPopulationError(
+            f"{what} field {field!r} must be non-empty and carry no surrounding "
+            f"whitespace")
+    return value
 
 
 def _opt_int(bounds: dict[str, Any], key: str) -> Optional[int]:
@@ -158,6 +206,34 @@ def _opt_int(bounds: dict[str, Any], key: str) -> Optional[int]:
     if isinstance(value, bool) or not isinstance(value, int):
         raise TargetPopulationError(f"manifest bound {key} must be an integer")
     return value
+
+
+def _parse_date_range(text: str) -> tuple[str, str]:
+    """`YYYY-MM-DD..YYYY-MM-DD`, both real calendar dates, start <= end.
+
+    Independent review defect RV-5: splitting on `".."` accepted a missing
+    delimiter (start == end silently), a reversed range, `2026-02-30`, embedded
+    whitespace, and a third segment.
+    """
+
+    parts = text.split("..")
+    if len(parts) != 2:
+        raise TargetPopulationError(
+            f"date_range {text!r} must be exactly 'START..END'")
+    start, end = parts
+    for label, value in (("start", start), ("end", end)):
+        if len(value) != 10 or value != value.strip():
+            raise TargetPopulationError(
+                f"date_range {label} {value!r} must be a bare YYYY-MM-DD date")
+        try:
+            date.fromisoformat(value)
+        except ValueError:
+            raise TargetPopulationError(
+                f"date_range {label} {value!r} is not a real calendar date") from None
+    if start > end:
+        raise TargetPopulationError(
+            f"date_range {text!r} ends before it starts")
+    return start, end
 
 
 def load_acquisition_binding(
@@ -183,9 +259,36 @@ def load_acquisition_binding(
         if required not in manifest:
             raise TargetPopulationError(
                 f"acquisition manifest is missing required field {required!r}")
-    families = manifest["families"]
-    if not isinstance(families, list) or not all(isinstance(f, str) for f in families):
-        raise TargetPopulationError("acquisition manifest families must be strings")
+
+    plan_version = _exact_str(manifest, "plan_version", what="acquisition manifest")
+    league = _exact_str(manifest, "league", what="acquisition manifest")
+    date_range = _exact_str(manifest, "date_range", what="acquisition manifest")
+    start_date, end_date = _parse_date_range(date_range)
+    provider = (_exact_str(manifest, "provider", what="acquisition manifest")
+                if "provider" in manifest else BALLDONTLIE_PROVIDER)
+
+    families_raw = manifest["families"]
+    if not isinstance(families_raw, list) or not families_raw:
+        raise TargetPopulationError(
+            "acquisition manifest families must be a non-empty list")
+    families: list[str] = []
+    for entry in families_raw:
+        if isinstance(entry, bool) or not isinstance(entry, str) or not entry.strip():
+            raise TargetPopulationError(
+                f"acquisition manifest family {entry!r} must be a non-empty string")
+        if entry in families:
+            raise TargetPopulationError(
+                f"acquisition manifest lists family {entry!r} twice")
+        families.append(entry)
+    # RV-6: the manifest must actually AUTHORIZE the listing family whose
+    # responses the target population is derived from. Without this the binding
+    # is decorative -- a manifest declaring only `stats` certified a population
+    # built from `/v1/games` responses that merely happened to exist.
+    if LISTING_FAMILY not in families:
+        raise TargetPopulationError(
+            f"acquisition manifest does not authorize the {LISTING_FAMILY!r} family "
+            f"(declares {families}); it cannot bind a listing-derived target "
+            f"population")
 
     bounds = manifest.get("bounds") or {}
     if not isinstance(bounds, dict):
@@ -196,14 +299,16 @@ def load_acquisition_binding(
     if checkpoint_path is not None:
         _, checkpoint = _read_json(Path(checkpoint_path), what="resume checkpoint")
         checkpoint_present = True
+        ck_families = checkpoint.get("families")
+        if not isinstance(ck_families, list):
+            raise TargetPopulationError("checkpoint families must be a list")
         mismatches = [
             name for name, left, right in (
                 ("manifest_hash", checkpoint.get("manifest_hash"), manifest_hash),
-                ("plan_version", checkpoint.get("plan_version"),
-                 manifest.get("plan_version")),
-                ("league", checkpoint.get("league"), manifest.get("league")),
-                ("date_range", checkpoint.get("date_range"), manifest.get("date_range")),
-                ("families", tuple(checkpoint.get("families") or ()), tuple(families)),
+                ("plan_version", checkpoint.get("plan_version"), plan_version),
+                ("league", checkpoint.get("league"), league),
+                ("date_range", checkpoint.get("date_range"), date_range),
+                ("families", tuple(ck_families), tuple(families)),
             ) if left != right
         ]
         if mismatches:
@@ -213,15 +318,27 @@ def load_acquisition_binding(
         raw_ids = checkpoint.get("stage_game_ids") or []
         if not isinstance(raw_ids, list):
             raise TargetPopulationError("checkpoint stage_game_ids must be a list")
-        stage_ids = tuple(str(x) for x in raw_ids)
+        ids: list[str] = []
+        for entry in raw_ids:
+            if isinstance(entry, bool) or not isinstance(entry, (str, int)):
+                raise TargetPopulationError(
+                    f"checkpoint stage_game_ids entry {entry!r} must be a string or "
+                    f"integer provider game id")
+            ids.append(str(entry))
+        if len(set(ids)) != len(ids):
+            raise TargetPopulationError(
+                "checkpoint stage_game_ids contains a duplicate provider game id")
+        stage_ids = tuple(ids)
 
     return AcquisitionBinding(
         manifest_hash=manifest_hash,
-        plan_version=str(manifest["plan_version"]),
-        provider=str(manifest.get("provider") or BALLDONTLIE_PROVIDER),
-        league=str(manifest["league"]),
-        date_range=str(manifest["date_range"]),
+        plan_version=plan_version,
+        provider=provider,
+        league=league,
+        date_range=date_range,
         families=tuple(families),
+        start_date=start_date,
+        end_date=end_date,
         max_pages=_opt_int(bounds, "max_pages"),
         max_records=_opt_int(bounds, "max_records"),
         max_games=_opt_int(bounds, "max_games"),
@@ -461,7 +578,26 @@ def verify_corpus_target_population(
         return TargetPopulationReport(
             corpus_version_id, bound_runs=bound_runs, required_runs=required,
             problems=(*problems, str(exc)))
+    # RV-1. Recompute the preserved evidence's own hashes BEFORE parsing any
+    # body. The scoped source digest fingerprints the STORED content_hash, so a
+    # forged body left with its original hashes would not disturb it.
+    integrity = verify_response_integrity(rows)
+    problems.extend(integrity)
+
     problems.extend(chain.problems)
+
+    # RV-7. The checkpoint, when supplied, is cross-checked against the derived
+    # provider population rather than merely loaded. `stage_game_ids` records the
+    # SELECTED set, so it must be a subset of what the listing actually returned;
+    # a checkpoint naming games the listing never produced is not evidence about
+    # this acquisition.
+    if binding.checkpoint_stage_game_ids:
+        listed = set(chain.provider_game_ids)
+        stray = sorted(set(binding.checkpoint_stage_game_ids) - listed)
+        if stray:
+            problems.append(
+                f"checkpoint stage_game_ids name provider games the bound listing "
+                f"never returned: {stray[:5]}")
 
     # 8/9/10. Projection to canonical members, failing closed.
     try:
@@ -583,6 +719,33 @@ def seal_target_population(
     """
 
     stamp = now or utc_now_iso()
+    # RV-8. Own the savepoint. The previous contract lived only in this
+    # docstring, and a caller who ignored it left committed membership rows
+    # behind an absent seal -- an OPEN corpus that a later caller could still
+    # extend. A nested SAVEPOINT composes correctly inside a caller's own
+    # transaction, so this strengthens the guarantee without removing theirs.
+    conn.execute("SAVEPOINT seal_target_population")
+    try:
+        _seal_unguarded(conn, corpus_version_id=corpus_version_id, members=members,
+                        run_ids=run_ids, binding=binding, stamp=stamp)
+    except BaseException:
+        conn.execute("ROLLBACK TO seal_target_population")
+        conn.execute("RELEASE seal_target_population")
+        raise
+    conn.execute("RELEASE seal_target_population")
+
+
+def _seal_unguarded(
+    conn: sqlite3.Connection,
+    *,
+    corpus_version_id: str,
+    members: Collection[str],
+    run_ids: Collection[str],
+    binding: AcquisitionBinding,
+    stamp: str,
+) -> None:
+    """The write sequence. Always called inside `seal_target_population`'s savepoint."""
+
     ordered_members = sorted(set(members))
     if len(ordered_members) != len(list(members)):
         raise TargetPopulationError(

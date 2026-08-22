@@ -7,6 +7,31 @@
 Implements the architecture as reconciled at `fd9ce6e` and its independent
 review, which is authoritative wherever the two disagree.
 
+> **SUPERSEDED IN PART.** See
+> `V23_CORPUS_TARGET_POPULATION_BINDING_INDEPENDENT_REVIEW.md`, which is
+> authoritative wherever the two disagree. It reproduced eight defects (repaired)
+> and five retained blockers, two SEVERE. Corrections to claims made below:
+>
+> * **§5 run completeness** — "the required run set is derived from evidence, not
+>   accepted from the caller" is true but insufficient: it is derived from a DATE
+>   WINDOW over current database contents, so a sealed corpus is invalidated by
+>   an unrelated later acquisition, and two acquisitions in one window are
+>   indistinguishable. **RB-1, SEVERE.**
+> * **§7 cursor chain** — the meta-less-terminus limit was described as mitigated
+>   by the manifest cap proof. It was not: the caps are far from binding. Now
+>   **repaired** — `meta` is required on every page.
+> * **§9 mutable references** — "resolved better than predicted" was wrong.
+>   Immutability after assignment is not correctness; the FIRST NULL → value
+>   assignment is unchecked, and a wrong resolution projects cleanly and freezes.
+>   **RB-4, SEVERE.**
+> * **§10 scoped source digest** — it fingerprints stored `content_hash` values
+>   and local `raw_response_id`s, not evidence. Integrity is now recomputed
+>   (RV-1), but portability is **RB-3**.
+> * **§6 checkpoint** — called "required historical evidence" here; it is an
+>   **optional non-semantic cross-check**.
+> * **§1 / §18** — canonical materialization is **not** the safe next step. See
+>   the review's verdict 18.
+
 ---
 
 ## 1. Historical artefact preflight (read-only) — the headline result
