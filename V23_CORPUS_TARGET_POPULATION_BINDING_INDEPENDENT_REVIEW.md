@@ -238,13 +238,28 @@ G5 NOT run. No crosswalk. **F1-R blocked.**
 
 ## 15. Exact next authorization boundary
 
-> **Architecture adjudication of the five retained blockers** — RB-1 (acquisition
-> identity / run-set binding), RB-2 (required-unit accounting), RB-3 (digest
-> portability over random surrogates), RB-4 (canonical-identity admission gate),
-> RB-5 (manifest precommitment via Git binding) — **before** any canonical
-> materialization or corpus instantiation.
+> ~~**Architecture adjudication of the five retained blockers.**~~ **Done — see
+> `TARGET_POPULATION_PROVENANCE_BLOCKERS_ARCHITECTURE.md`, which is authoritative
+> for the resolutions.** Next: independent review of that adjudication, then the
+> v24 implementation.
 
-RB-1, RB-2 and RB-5 share one root cause and should be adjudicated together: there
-is no persisted acquisition ledger. RB-4 and RB-3 together decide what a
-target-bound corpus's members *are*, and both must be settled before the 239 are
-materialized.
+### Superseded by the RB adjudication
+
+Two findings in this review were understated and are corrected there:
+
+* **RB-5 strength.** This review classified the manifest as Levels 1+2. The
+  adjudication establishes **Level 2+**: the manifest blob is byte-identical
+  across all 64 commits containing it, its `sha256` equals both the working tree
+  and `checkpoint.manifest_hash`, and its commit is a **cryptographic ancestor**
+  of the commits reporting acquisition results. Ancestry is DAG-based, not
+  clock-based, so it rules out post-hoc amendment. It remains short of Level 3.
+* **RB-4 feasibility.** This review established that the first resolution is
+  unchecked, which stands. The adjudication adds that a gate **is** satisfiable
+  on this evidence: a read-only preflight resolved **239/239** provider games
+  through TEAM-A provider team ids, with zero unresolved, ambiguous, malformed or
+  conflicting cases.
+
+Verdict 18 of this review — materialization *"SAFE ONLY AFTER ADDITIONAL
+PROVENANCE REPAIR"* — is refined rather than reversed: **safe only as a
+LEGACY-ATTESTED class**, because no retrospective attestation can exclude
+evidence discarded before preservation.
