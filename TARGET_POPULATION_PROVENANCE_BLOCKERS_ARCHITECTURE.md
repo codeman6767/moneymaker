@@ -17,6 +17,36 @@ All five blockers have decidable resolutions. Two empirical results drive them:
 
 The cheap historical path survives, **but only as an explicitly weaker class**.
 
+> **RECONCILED BY INDEPENDENT REVIEW.** See
+> `TARGET_POPULATION_PROVENANCE_BLOCKERS_ARCHITECTURE_INDEPENDENT_REVIEW.md`,
+> authoritative wherever the two disagree. Four changes below are load-bearing:
+>
+> * **RR-1 (SEVERE) — verdict 2/RB-5 is NOT closed as written.** Deterministic
+>   plan/unit digests carry no chronology (a digest computed after seeing results
+>   is byte-identical), and timestamp-ordering triggers pass trivially when the
+>   caller supplies the timestamps. The ledger closes RB-5 only if the
+>   **executor owns provider contact** and stamps `registered_at`/`requested_at`
+>   from the repository clock. Tamper-evidence over an audited path, **not**
+>   cryptographic time.
+> * **RR-2 (HIGH) — identity admission must bind TEAM-A.** `identity-admission-v1`
+>   must commit the TEAM-A **map digest** and **namespace generation**, or a later
+>   map change silently re-means every attestation.
+> * **RR-3 — no plan seal; derive the root set.** Root units are fully derivable
+>   from manifest semantics, so the verifier recomputes the expected root set and
+>   compares, rather than trusting stored root rows (which can be appended).
+> * **Verdict 17 REVERSED.** "Safe as a legacy-attested class, claim strength is
+>   the user's call" is withdrawn. Legacy-attested March is **NOT ADMISSIBLE** for
+>   any denominator- or distribution-sensitive use — §AF, F1-R, E0, training,
+>   calibration, backtesting, EV. The undetectable deletion is a **structured
+>   tail**, not random noise, because pagination tracks date order. §AF/E0/F1-R
+>   require **PROSPECTIVE_LEDGER_COMPLETE**, and the verifier must return a
+>   certification **class**, not a boolean.
+>
+> Smaller repairs RR-4 … RR-9 (failure-outcome evidence, retry acceptance rule,
+> artefact-vs-semantic plan digest, provider-id typing, sanitized request params,
+> deterministic accepted-evidence selection, games-family scoping) are itemized in
+> the review.
+
 | # | Question | Verdict |
 |---|---|---|
 | 1 | Scientific corpus portability | **PORTABLE ACROSS FAITHFUL REBUILDS** |
@@ -35,9 +65,9 @@ The cheap historical path survives, **but only as an explicitly weaker class**.
 | 14 | Manifest precommit strength | **LEVEL 2+** — immutable bytes, hash-matched, DAG-ancestor; **not Level 3** |
 | 15 | RB-6 policy persistence | all five policy versions persisted on the seal |
 | 16 | Schema | **V24 REQUIRED** |
-| 17 | Real March cheap path | **SAFE ONLY AS LEGACY-ATTESTED CLASS** |
+| 17 | Real March cheap path | ~~SAFE ONLY AS LEGACY-ATTESTED CLASS~~ → **NOT ADMISSIBLE for denominator-sensitive use; FRESH PROSPECTIVE ACQUISITION REQUIRED** (reversed by review) |
 | 18 | 239 identity preflight | **239 ELIGIBLE / 0 / 0 / 0 / 0** |
-| 19 | §AF readiness | **YES, SUBJECT TO DATA/MATERIALIZATION** |
+| 19 | §AF readiness | **YES, SUBJECT TO DATA** — and gated on **PROSPECTIVE_LEDGER_COMPLETE** (review) |
 | 20 | Overall | **ACCEPTED WITH REPAIRS/CONDITIONS** |
 
 ---
@@ -213,8 +243,10 @@ report. Only a ledger row written at acquisition time closes that.
 
 ## 9. Verdict 3 / 17 — the historical class
 
-> **LEGACY-ATTESTED ONLY**, and the cheap path is **SAFE ONLY AS A
-> LEGACY-ATTESTED CLASS**.
+> **LEGACY-ATTESTED ONLY**, and the cheap path is ~~**SAFE ONLY AS A
+> LEGACY-ATTESTED CLASS**~~ → **NOT ADMISSIBLE for denominator- or
+> distribution-sensitive uses** (reversed by the independent review; see its §5
+> and permission matrix).
 
 What the historical evidence *can* support, and this is genuinely a lot: the
 listing population is self-proving for page completeness (intact cursor chain,
@@ -244,11 +276,17 @@ claims:
 artefacts satisfy X"*. It must never be written as ledger rows claiming to have
 existed at acquisition time, and the type name must keep that distinction visible.
 
-**A consequence worth stating plainly.** If the eventual research claim is a
-completion *rate* over the March population, a legacy-attested denominator must be
-reported as attested-not-precommitted. If that is unacceptable for the intended
-result, the answer is a fresh prospective acquisition — a decision about the
-strength of the claim, not about cost.
+**A consequence worth stating plainly.** ~~If the eventual research claim is a
+completion *rate*, a legacy-attested denominator must be reported as
+attested-not-precommitted, and if that is unacceptable the answer is a fresh
+prospective acquisition — a decision about claim strength, not cost.~~
+
+**REVERSED.** The independent review took this decision rather than deferring it,
+and it is NO. The undetectable deletion removes a **structured tail** (pagination
+tracks date order), so the risk is systematic bias, not random loss. A fresh
+prospective acquisition is required for any denominator- or
+distribution-sensitive use. The preserved 239 becomes the cross-check against
+that retrieval.
 
 ## 10. Digests — the portable contracts (all bumped to v2)
 
@@ -321,24 +359,30 @@ already proved executable.
 **§AF** — unchanged in shape: certified acquisition completeness **and** certified
 stable target identity **and** target-bound corpus verification → enumerate
 targets → `S_final − 60` → 300-second floor. No expected membership from the
-Stage-A manifest, ever. **Verdict 19: YES, subject to data/materialization.**
+Stage-A manifest, ever. **Verdict 19: YES, subject to data/materialization** —
+with the review's addition that the gate is **type-aware**: §AF, E0 and F1-R all
+require **PROSPECTIVE_LEDGER_COMPLETE**, and the verifier returns a certification
+class rather than a boolean.
 
 **E0** — the accepted gate is preserved. The only change is that the parent's
 member identity is now a stable key; the gate call site does not move.
 
 ## 15. Safe implementation order
 
-1. **independent review of this adjudication**
-2. v24 ledger + stable-identity + attestation implementation
+1. ~~independent review of this adjudication~~ **done**
+2. v24 ledger + stable-identity + attestation implementation, **with
+   executor-owned contact (RR-1), TEAM-A binding (RR-2) and derived root-set
+   verification (RR-3)**
 3. independent v24 review
-4. historical March admissibility adjudication under the legacy-attested class
-5. if accepted: surrogate materialization **on a COPY**, corpus construction, seal
-6. independent review of that instantiation
+4. ~~historical March admissibility adjudication~~ **resolved: not admissible for
+   denominator-sensitive use**
+5. **fresh prospective March acquisition under the ledger** (denominator-grade)
+6. corpus construction + independent review
 7. §AF closure + independent review
 8. real Stage-A plan, preflight, bounded acquisition
 
-Step 4 is a *claim-strength* gate, not a code gate: it decides whether a
-legacy-attested denominator is acceptable for the intended result.
+The preserved March 239 leaves the critical path and becomes the independent
+cross-check against the fresh retrieval.
 
 ## 16. 239 / 160 / 161
 
