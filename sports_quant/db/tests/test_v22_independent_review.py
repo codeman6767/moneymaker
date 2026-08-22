@@ -368,6 +368,62 @@ def test_fetch_then_declare_is_refused_through_the_public_api(conn):
 # --------------------------------------------------------------------------- #
 # D2 -- enrichment must invoke the gate for EVERY member
 # --------------------------------------------------------------------------- #
+def _target_bound_parent(conn: sqlite3.Connection, tmp_path):
+    """A sealed target-bound parent, which the v23 E0 gate now requires."""
+
+    from sports_quant.db.tests.test_v23_target_population_binding import (
+        _make_reference,
+        _make_response,
+        _make_run,
+        _write_manifest,
+    )
+    from sports_quant.retrospective.listing_projection import admitted_listing_responses
+    from sports_quant.retrospective.target_binding import (
+        derivation_digest,
+        members_digest,
+        target_binding_digest,
+    )
+    from sports_quant.retrospective.target_population import (
+        TARGET_BOUND_RECONSTRUCTION_POLICY_V1,
+        load_acquisition_binding,
+        scoped_source_digest,
+        seal_target_population,
+    )
+
+    _seed(conn)
+    members = sorted(
+        str(r[0]) for r in conn.execute(
+            "SELECT game_id FROM games WHERE league_id='lg_nba'").fetchall())
+    run = _make_run(conn, "run_listing_rv")
+    rid = _make_response(conn, "raw_listing_rv", run,
+                         provider_games=tuple(str(i) for i in range(len(members))))
+    for i, game_id in enumerate(members):
+        _make_reference(conn, str(i), game_id, rid)
+    manifest_path = _write_manifest(tmp_path)
+    binding = load_acquisition_binding(manifest_path)
+
+    rows = admitted_listing_responses(conn, run_ids=[run])
+    src = scoped_source_digest(rows)
+    md = members_digest(league_id="lg_nba", members=members)
+    dd = derivation_digest(acquisition_manifest_hash=binding.manifest_hash,
+                           plan_version=binding.plan_version, run_ids=[run])
+    tgt = target_binding_digest(league_id="lg_nba", members_digest_value=md,
+                                derivation_digest_value=dd)
+
+    repo = SqliteRetrospectiveProvenanceRepository(conn)
+    conn.execute("SAVEPOINT tb")
+    corpus = repo.record_corpus_version(
+        provenance_class=ProvenanceClass.RECONSTRUCTED_RESEARCH, league_id="lg_nba",
+        reconstruction_policy_version=TARGET_BOUND_RECONSTRUCTION_POLICY_V1,
+        cutoff_policy_id="cut", cutoff_policy_version="v1",
+        source_corpus_digest=src, target_set_digest=tgt,
+        g1_variant=G1Variant.G1_B_CORE)
+    seal_target_population(conn, corpus_version_id=corpus.corpus_version_id,
+                           members=members, run_ids=[run], binding=binding)
+    conn.execute("RELEASE tb")
+    return repo, corpus, manifest_path, src, tgt
+
+
 def _parent(conn: sqlite3.Connection, **over: Any):
     repo = SqliteRetrospectiveProvenanceRepository(conn)
     base: dict[str, Any] = {
@@ -450,16 +506,17 @@ def test_enrichment_cannot_proceed_without_a_resolvable_committed_manifest(conn)
 # --------------------------------------------------------------------------- #
 # D9 / O / P -- atomicity and argument handling
 # --------------------------------------------------------------------------- #
-def test_a_failed_enrichment_leaves_no_orphan_corpus(conn):
+def test_a_failed_enrichment_leaves_no_orphan_corpus(conn, tmp_path):
     """At 46f1725 a mid-function failure left C2 committing to evidence with no
     lane provenance to reconstruct it from."""
 
-    acquisition_id, manifest = _declared(conn)
+    repo, parent, manifest_path, src, tgt = _target_bound_parent(conn, tmp_path)
+    acquisition_id, manifest = _declared(
+        conn, official_source_corpus_digest=src, official_target_set_digest=tgt)
     _raw(conn, "raw_1", _wrapper([_event(EV_A, "Boston Celtics", "Miami Heat")]))
     record_attempt(conn, acquisition_id=acquisition_id, requested_at_bucket=BUCKET,
                    outcome="success_full_snapshot", raw_response_id="raw_1")
     _obs(conn, "raw_1", EV_A, "Boston Celtics", "Miami Heat")
-    repo, parent = _parent(conn)
     before = conn.execute(
         "SELECT COUNT(*) FROM reconstruction_corpus_versions").fetchone()[0]
 
@@ -467,7 +524,8 @@ def test_a_failed_enrichment_leaves_no_orphan_corpus(conn):
         enrich_corpus_with_market_lane(
             conn, repo, parent_corpus_id=parent.corpus_version_id,
             acquisition_ids=[acquisition_id], provider="fake_provider",
-            namespace_generation="v4", repo_root=_b2_repo())
+            namespace_generation="v4", repo_root=_b2_repo(),
+            target_manifest_path=manifest_path)
 
     after = conn.execute(
         "SELECT COUNT(*) FROM reconstruction_corpus_versions").fetchone()[0]

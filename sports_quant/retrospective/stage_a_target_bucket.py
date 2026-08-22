@@ -274,40 +274,67 @@ def compare_to_declared(
 
 
 def derive_target_population(
-    conn: object, *, parent_corpus_id: str
+    conn: object,
+    *,
+    parent_corpus_id: str,
+    manifest_path: Optional[object] = None,
+    checkpoint_path: Optional[object] = None,
 ) -> Sequence[TargetHint]:
-    """RETAINED BLOCKER -- refuses.
+    """The official target population of a VERIFIED target-bound parent corpus.
 
-    §AF requires the target population to come from the parent corpus, never
-    from the manifest, so that an omitted target is visible. At v22 that is not
-    derivable:
+    Closed at v23. The population comes from `reconstruction_corpus_targets`,
+    but only after `verify_corpus_target_population` has independently
+    re-derived it from the bound acquisition's preserved listing evidence and
+    reproduced the stored digests. A stored member row is not, by itself,
+    evidence; recomputation is.
 
-    * `reconstruction_corpus_versions` records `league_id` and policy versions
-      but NO target scope -- no season, no date range, no corpus→game membership
-      table. The only corpus-to-games link in the schema is
-      `stage_a_plan_targets`, which is the plan's own claim and therefore
-      exactly what must not be trusted.
-    * `target_set_digest` is a free-text caller-supplied label. No production
-      code derives it; the audit runner defaults it to the literal string
-      ``identity-audit-no-targets``.
-    * `reconstructed_input_provenance` is per-feature-input eligibility keyed by
-      `provider_game_id`, not a target population, and is written only by an
-      F1-R run, which is blocked.
+    A legacy target-unbound corpus, an unsealed corpus and a tampered corpus all
+    refuse here -- there is deliberately no "skip when unavailable" branch,
+    because a skippable scientific gate reads as coverage while providing none.
 
-    Enumerating "every NBA game in some month" from the `games` table would make
-    the target set a property of whatever rows a database happens to hold rather
-    than of the corpus, so two copies of the "same" corpus could derive
-    different populations. That is an invented scoping rule, not evidence, so
-    this refuses instead.
+    `S_final` is read from `games.scheduled_start`: the CURRENT scheduled UTC
+    start, which f002 documents as "updated on a postponement/reschedule" and is
+    therefore the retrospective official start. `original_start` is the FIRST
+    scheduled start and is explicitly not `S_final`. The value is a SEARCH HINT
+    ONLY -- it decides when to look, never what is true -- and is deliberately
+    not stored on the target rows, because membership and hint evidence are
+    different claims.
     """
 
-    raise TargetPopulationUnavailable(
-        f"corpus {parent_corpus_id!r} cannot enumerate its official target "
-        f"population: reconstruction_corpus_versions carries no target scope and "
-        f"target_set_digest is an underived caller-supplied label. §AF's bucket "
-        f"algorithm is implemented and testable, but the corpus-bound target "
-        f"population it must be applied to does not exist at v22. See "
-        f"STAGE_A_TARGET_BUCKET_POLICY_IMPLEMENTATION.md.")
+    from .target_population import TargetPopulationError, verified_target_members
+
+    if manifest_path is None:
+        raise TargetPopulationUnavailable(
+            f"corpus {parent_corpus_id!r} cannot be verified without its "
+            f"precommitted acquisition manifest: the bound run set would be "
+            f"caller-selected and a required run could be omitted undetectably")
+    try:
+        members = verified_target_members(
+            conn,  # type: ignore[arg-type]
+            parent_corpus_id,
+            manifest_path=manifest_path,  # type: ignore[arg-type]
+            checkpoint_path=checkpoint_path)  # type: ignore[arg-type]
+    except TargetPopulationError as exc:
+        raise TargetPopulationUnavailable(str(exc)) from None
+
+    hints: list[TargetHint] = []
+    unresolved: list[str] = []
+    for game_id in members:
+        row = conn.execute(  # type: ignore[attr-defined]
+            "SELECT scheduled_start FROM games WHERE game_id = ?",
+            (game_id,)).fetchone()
+        start = None if row is None else row[0]
+        if not start:
+            unresolved.append(game_id)
+            continue
+        hints.append(TargetHint(canonical_game_id=game_id, official_start=str(start)))
+    if unresolved:
+        # Fail closed. Dropping a target whose hint is missing would shrink the
+        # denominator exactly as §AF exists to prevent.
+        raise TargetPopulationUnavailable(
+            f"corpus {parent_corpus_id!r} has verified targets with no official "
+            f"start hint: {unresolved}")
+    return tuple(hints)
 
 
 def verify_stage_a_target_bucket_policy(
@@ -316,14 +343,37 @@ def verify_stage_a_target_bucket_policy(
     plan_id: str,
     parent_corpus_id: str,
     repo_root: Optional[object] = None,
+    manifest_path: Optional[object] = None,
+    checkpoint_path: Optional[object] = None,
 ) -> tuple[str, ...]:
-    """The load-bearing §AF verifier. Currently refuses -- see the blocker above.
+    """The load-bearing §AF verifier: independent target → bucket recomputation.
 
-    Kept as the single named entry point so that composing §AF into
-    `certify_stage_a` later is a one-line change at a reviewed seam, rather than
-    a new design decision taken under time pressure.
+    Derives the population from the VERIFIED target-bound parent corpus, recomputes
+    each target's first-pass request bucket, and compares against what the plan
+    declared. Returns the disagreements, empty when the plan is exactly right.
+
+    The plan may never supply the expected membership -- that is the whole point.
+    Comparison is exact keyed-set equality in both directions, because the
+    pigeonhole property means a dropped target can leave the bucket SET
+    byte-identical when another target shares its bucket.
     """
 
-    raise TargetPopulationUnavailable(
-        f"§AF cannot verify plan {plan_id!r} against corpus {parent_corpus_id!r}: "
-        f"the target population is not derivable from the parent corpus at v22")
+    corpus = conn.execute(  # type: ignore[attr-defined]
+        "SELECT league_id FROM reconstruction_corpus_versions "
+        "WHERE corpus_version_id = ?", (parent_corpus_id,)).fetchone()
+    if corpus is None:
+        raise TargetPopulationUnavailable(
+            f"parent corpus {parent_corpus_id!r} does not exist")
+    hints = derive_target_population(
+        conn, parent_corpus_id=parent_corpus_id,
+        manifest_path=manifest_path, checkpoint_path=checkpoint_path)
+    derivation = derive_mapping(str(corpus[0]), hints)
+    declared_mapping = {
+        str(r[0]): str(r[1]) for r in conn.execute(  # type: ignore[attr-defined]
+            "SELECT canonical_game_id, requested_at_bucket FROM stage_a_plan_targets "
+            "WHERE plan_id = ?", (plan_id,)).fetchall()}
+    declared_buckets = tuple(
+        str(r[0]) for r in conn.execute(  # type: ignore[attr-defined]
+            "SELECT requested_at_bucket FROM stage_a_planned_buckets "
+            "WHERE plan_id = ?", (plan_id,)).fetchall())
+    return compare_to_declared(derivation, declared_mapping, declared_buckets)

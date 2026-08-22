@@ -73,7 +73,7 @@ def test_wheel_includes_every_migration(built_wheel: tuple[list[str], str]) -> N
     assert "sports_quant/db/migrations/d009_provider_infra.sql" in names
     assert "sports_quant/db/migrations/e017_provider_identity.sql" in names
     assert "sports_quant/db/migrations/f018_retrospective_provenance.sql" in names
-    assert migrations[-1] == "f022_stage_a_provenance_and_evidence_lanes.sql"
+    assert migrations[-1] == "f023_corpus_target_population_binding.sql"
 
 
 def test_wheel_declares_console_entry_point(built_wheel: tuple[list[str], str]) -> None:
@@ -90,6 +90,12 @@ def test_wheel_excludes_tests_and_secrets(built_wheel: tuple[list[str], str]) ->
         low = n.lower()
         assert not low.endswith(".env"), n
         assert not low.endswith(".db"), n
-        assert "corpus" not in low, n
+        # The guard is against packaging a corpus DATABASE or its sidecars, not
+        # against the word appearing in a filename: f023 legitimately names the
+        # corpus target-population migration. `.db` is covered above; these
+        # catch the WAL/SHM sidecars and any exported corpus payload.
+        assert not any(low.endswith(sfx) for sfx in
+                       (".db-wal", ".db-shm", ".sqlite", ".ckpt")), n
+        assert "data/corpus" not in low, n
         assert "graphify-out" not in low, n
         assert not low.endswith(".raw"), n  # no raw payload export

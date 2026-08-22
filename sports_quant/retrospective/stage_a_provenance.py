@@ -815,6 +815,41 @@ def _outcome_claim_failures(
 # --------------------------------------------------------------------------- #
 # Corpus enrichment -- content-addressed, by supersession
 # --------------------------------------------------------------------------- #
+def _require_target_bound_parent(
+    conn: sqlite3.Connection,
+    parent_corpus_id: str,
+    *,
+    manifest_path: Optional[Path],
+    checkpoint_path: Optional[Path],
+) -> None:
+    """Refuse E0 enrichment unless the parent is a verified target-bound corpus.
+
+    Fails closed in both directions: without a manifest the bound run set would
+    be caller-selected, and with one the verifier must return clean. There is
+    deliberately no bypass -- a skippable gate reads as coverage while providing
+    none.
+    """
+
+    from .target_population import TargetPopulationError, verify_corpus_target_population
+
+    if manifest_path is None:
+        raise StageAProvenanceError(
+            f"E0 enrichment refused: parent corpus {parent_corpus_id!r} cannot be "
+            f"proven target-bound without its precommitted acquisition manifest "
+            f"(pass target_manifest_path)")
+    try:
+        report = verify_corpus_target_population(
+            conn, parent_corpus_id, manifest_path=manifest_path,
+            checkpoint_path=checkpoint_path)
+    except TargetPopulationError as exc:
+        raise StageAProvenanceError(
+            f"E0 enrichment refused: {exc}") from None
+    if not report.ok:
+        raise StageAProvenanceError(
+            f"E0 enrichment refused: parent corpus {parent_corpus_id!r} is not a "
+            f"verified target-bound corpus: " + "; ".join(report.problems))
+
+
 def enrich_corpus_with_market_lane(
     conn: sqlite3.Connection,
     repository: object,
@@ -824,6 +859,8 @@ def enrich_corpus_with_market_lane(
     provider: str,
     namespace_generation: str,
     repo_root: Optional[Path] = None,
+    target_manifest_path: Optional[Path] = None,
+    target_checkpoint_path: Optional[Path] = None,
 ) -> tuple[str, str]:
     """Derive the enriched corpus C2 from official corpus C1 plus a certified lane.
 
@@ -898,6 +935,23 @@ def enrich_corpus_with_market_lane(
             f"lane members use mixed projection policies {sorted(projection_versions)}; "
             f"a single lane cannot describe the union -- split them into separate lanes")
     projection_policy_version = projection_versions.pop()
+
+    # v23 E0 GATE, deliberately LAST among the admission checks. Enrichment may
+    # descend only from a SEALED, cleanly verified target-bound corpus -- never
+    # from recency, a date, or a "latest corpus" helper. Without it an E0 lane
+    # could be built on a corpus whose target population is a free-text label,
+    # and every completeness rate computed downstream would be over an unknown
+    # denominator.
+    #
+    # Ordering matters: running this first would mask the more specific v22
+    # refusals above (uncertified acquisition, mismatched official source corpus
+    # or target set) behind a generic "not target-bound" message, making a real
+    # defect harder to diagnose. Every earlier check still fires for its own
+    # reason; this one only decides final admission.
+    _require_target_bound_parent(
+        conn, parent_corpus_id,
+        manifest_path=target_manifest_path,
+        checkpoint_path=target_checkpoint_path)
 
     policy = digest_policy_for_lane(MARKET_EVENTS_E0_LANE)
     digest = lane_evidence_digest(

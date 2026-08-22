@@ -125,6 +125,8 @@ def _seed(conn: sqlite3.Connection) -> None:
         conn.execute(
             "INSERT INTO leagues (league_id, code, name, sport, created_at,"
             " updated_at) VALUES ('lg_nba','NBA','NBA','basketball',?,?)", (NOW, NOW))
+    if conn.execute("SELECT 1 FROM seasons WHERE season_id='sn_v22'").fetchone():
+        return
     conn.execute(
         "INSERT INTO seasons (season_id, league_id, year, label, phase, start_date,"
         " end_date, created_at, updated_at) VALUES ('sn_v22','lg_nba',2025,"
@@ -226,9 +228,10 @@ def _lane_args(acquisition_id: str, manifest: StageAManifest) -> dict[str, Any]:
             "manifest_texts": {acquisition_id: dumps(manifest)}}
 
 
-def _declared(conn: sqlite3.Connection) -> tuple[str, str, StageAManifest]:
+def _declared(conn: sqlite3.Connection,
+              **manifest_overrides: Any) -> tuple[str, str, StageAManifest]:
     _seed(conn)
-    manifest = _manifest()
+    manifest = _manifest(**manifest_overrides)
     plan_id = _declare_committed(conn, manifest)
     acquisition_id = register_acquisition(
         conn, plan_id=plan_id, acquisition_policy_version=ACQ_POLICY,
@@ -610,8 +613,9 @@ def _observation(conn: sqlite3.Connection, obs_id: str, raw_id: str,
          observation_content_hash(observation), raw_id, received, utc_now_iso()))
 
 
-def _complete_acquisition(conn: sqlite3.Connection) -> tuple[str, StageAManifest]:
-    _, acquisition_id, manifest = _declared(conn)
+def _complete_acquisition(conn: sqlite3.Connection,
+                          **manifest_overrides: Any) -> tuple[str, StageAManifest]:
+    _, acquisition_id, manifest = _declared(conn, **manifest_overrides)
     _raw_response(conn, "raw_c1")
     record_attempt(conn, acquisition_id=acquisition_id, requested_at_bucket=BUCKET_A,
                    outcome="success_full_snapshot", raw_response_id="raw_c1")
@@ -732,6 +736,64 @@ def test_outcomes_with_a_preserved_exchange_require_a_response(conn, outcome):
 # --------------------------------------------------------------------------- #
 # Content-addressed corpus enrichment (§16, §32)
 # --------------------------------------------------------------------------- #
+def _target_bound_parent(conn: sqlite3.Connection, tmp_path: Path):
+    """A sealed, verifiable target-bound parent corpus.
+
+    v23 refuses E0 enrichment from a corpus whose target population is a
+    free-text label, so these lane tests can no longer use one. Built over the
+    two games `_seed` already creates.
+    """
+
+    from sports_quant.db.tests.test_v23_target_population_binding import (
+        _make_reference,
+        _make_response,
+        _make_run,
+        _write_manifest,
+    )
+    from sports_quant.retrospective.listing_projection import admitted_listing_responses
+    from sports_quant.retrospective.target_binding import (
+        derivation_digest,
+        members_digest,
+        target_binding_digest,
+    )
+    from sports_quant.retrospective.target_population import (
+        TARGET_BOUND_RECONSTRUCTION_POLICY_V1,
+        load_acquisition_binding,
+        scoped_source_digest,
+        seal_target_population,
+    )
+
+    _seed(conn)
+    run = _make_run(conn, "run_listing_v22")
+    rid = _make_response(conn, "raw_listing_v22", run, provider_games=("1", "2"))
+    _make_reference(conn, "1", "gm_v1", rid)
+    _make_reference(conn, "2", "gm_v2", rid)
+    manifest_path = _write_manifest(tmp_path)
+    binding = load_acquisition_binding(manifest_path)
+
+    rows = admitted_listing_responses(conn, run_ids=[run])
+    src = scoped_source_digest(rows)
+    md = members_digest(league_id="lg_nba", members=["gm_v1", "gm_v2"])
+    dd = derivation_digest(acquisition_manifest_hash=binding.manifest_hash,
+                           plan_version=binding.plan_version, run_ids=[run])
+    tgt = target_binding_digest(league_id="lg_nba", members_digest_value=md,
+                                derivation_digest_value=dd)
+
+    repo = SqliteRetrospectiveProvenanceRepository(conn)
+    conn.execute("SAVEPOINT tb")
+    corpus = repo.record_corpus_version(
+        provenance_class=ProvenanceClass.RECONSTRUCTED_RESEARCH, league_id="lg_nba",
+        reconstruction_policy_version=TARGET_BOUND_RECONSTRUCTION_POLICY_V1,
+        cutoff_policy_id="cut", cutoff_policy_version="v1",
+        source_corpus_digest=src, target_set_digest=tgt,
+        g1_variant=G1Variant.G1_B_CORE)
+    seal_target_population(conn, corpus_version_id=corpus.corpus_version_id,
+                           members=["gm_v1", "gm_v2"], run_ids=[run],
+                           binding=binding)
+    conn.execute("RELEASE tb")
+    return repo, corpus, manifest_path, src, tgt
+
+
 def _corpus(conn: sqlite3.Connection, **overrides: Any):
     repo = SqliteRetrospectiveProvenanceRepository(conn)
     base: dict[str, Any] = {
@@ -748,15 +810,17 @@ def _corpus(conn: sqlite3.Connection, **overrides: Any):
     return repo, repo.record_corpus_version(**base)
 
 
-def test_enriched_corpus_is_a_distinct_superseding_row(conn):
-    acquisition_id, manifest = _complete_acquisition(conn)
-    repo, parent = _corpus(conn)
+def test_enriched_corpus_is_a_distinct_superseding_row(conn, tmp_path):
+    repo, parent, manifest_path, src, tgt = _target_bound_parent(conn, tmp_path)
+    acquisition_id, manifest = _complete_acquisition(
+        conn, official_source_corpus_digest=src, official_target_set_digest=tgt)
     parent_digest = parent.semantic_digest
 
     new_id, lane_id = enrich_corpus_with_market_lane(
         conn, repo, parent_corpus_id=parent.corpus_version_id,
         acquisition_ids=[acquisition_id], provider=THE_ODDS_API_PROVIDER,
-        namespace_generation="v4", repo_root=_b2_repo())
+        namespace_generation="v4", repo_root=_b2_repo(),
+        target_manifest_path=manifest_path)
 
     assert new_id != parent.corpus_version_id
     child = conn.execute(
@@ -812,13 +876,15 @@ def test_market_lane_cannot_be_bound_to_a_corpus_that_does_not_commit_to_it(conn
             (parent.corpus_version_id, THE_ODDS_API_PROVIDER, PROJ_POLICY, NOW))
 
 
-def test_forged_acquisition_set_digest_is_detected(conn):
-    acquisition_id, manifest = _complete_acquisition(conn)
-    repo, parent = _corpus(conn)
+def test_forged_acquisition_set_digest_is_detected(conn, tmp_path):
+    repo, parent, manifest_path, src, tgt = _target_bound_parent(conn, tmp_path)
+    acquisition_id, manifest = _complete_acquisition(
+        conn, official_source_corpus_digest=src, official_target_set_digest=tgt)
     _, lane_id = enrich_corpus_with_market_lane(
         conn, repo, parent_corpus_id=parent.corpus_version_id,
         acquisition_ids=[acquisition_id], provider=THE_ODDS_API_PROVIDER,
-        namespace_generation="v4", repo_root=_b2_repo())
+        namespace_generation="v4", repo_root=_b2_repo(),
+        target_manifest_path=manifest_path)
     # Add a second acquisition to the lane WITHOUT updating the set digest.
     plan_id = conn.execute("SELECT plan_id FROM stage_a_plans").fetchone()[0]
     second = register_acquisition(
@@ -868,24 +934,28 @@ def test_legacy_official_audit_with_a_null_lane_remains_accepted(conn):
     assert stored is None
 
 
-def test_audit_citing_a_lane_for_another_provider_is_refused(conn):
-    acquisition_id, manifest = _complete_acquisition(conn)
-    repo, parent = _corpus(conn)
+def test_audit_citing_a_lane_for_another_provider_is_refused(conn, tmp_path):
+    repo, parent, manifest_path, src, tgt = _target_bound_parent(conn, tmp_path)
+    acquisition_id, manifest = _complete_acquisition(
+        conn, official_source_corpus_digest=src, official_target_set_digest=tgt)
     _, lane_id = enrich_corpus_with_market_lane(
         conn, repo, parent_corpus_id=parent.corpus_version_id,
         acquisition_ids=[acquisition_id], provider=THE_ODDS_API_PROVIDER,
-        namespace_generation="v4", repo_root=_b2_repo())
+        namespace_generation="v4", repo_root=_b2_repo(),
+        target_manifest_path=manifest_path)
     with pytest.raises(sqlite3.IntegrityError, match="lane for a different provider"):
         _audit(conn, "ida_wrong", "balldontlie", lane_binding_id=lane_id)
 
 
-def test_audit_digest_must_equal_its_cited_lane_digest(conn):
-    acquisition_id, manifest = _complete_acquisition(conn)
-    repo, parent = _corpus(conn)
+def test_audit_digest_must_equal_its_cited_lane_digest(conn, tmp_path):
+    repo, parent, manifest_path, src, tgt = _target_bound_parent(conn, tmp_path)
+    acquisition_id, manifest = _complete_acquisition(
+        conn, official_source_corpus_digest=src, official_target_set_digest=tgt)
     _, lane_id = enrich_corpus_with_market_lane(
         conn, repo, parent_corpus_id=parent.corpus_version_id,
         acquisition_ids=[acquisition_id], provider=THE_ODDS_API_PROVIDER,
-        namespace_generation="v4", repo_root=_b2_repo())
+        namespace_generation="v4", repo_root=_b2_repo(),
+        target_manifest_path=manifest_path)
     with pytest.raises(sqlite3.IntegrityError, match="does not equal its cited lane"):
         _audit(conn, "ida_forged", THE_ODDS_API_PROVIDER, lane_binding_id=lane_id,
                digest="FORGED")
@@ -928,13 +998,15 @@ def test_replace_cannot_mutate_a_recorded_attempt(conn):
         (attempt["attempt_id"],)).fetchone()[0] == "success_full_snapshot"
 
 
-def test_replace_cannot_mutate_a_lane_digest(conn):
-    acquisition_id, manifest = _complete_acquisition(conn)
-    repo, parent = _corpus(conn)
+def test_replace_cannot_mutate_a_lane_digest(conn, tmp_path):
+    repo, parent, manifest_path, src, tgt = _target_bound_parent(conn, tmp_path)
+    acquisition_id, manifest = _complete_acquisition(
+        conn, official_source_corpus_digest=src, official_target_set_digest=tgt)
     _, lane_id = enrich_corpus_with_market_lane(
         conn, repo, parent_corpus_id=parent.corpus_version_id,
         acquisition_ids=[acquisition_id], provider=THE_ODDS_API_PROVIDER,
-        namespace_generation="v4", repo_root=_b2_repo())
+        namespace_generation="v4", repo_root=_b2_repo(),
+        target_manifest_path=manifest_path)
     lane = conn.execute(
         "SELECT * FROM corpus_evidence_lane_bindings WHERE lane_binding_id = ?",
         (lane_id,)).fetchone()

@@ -261,19 +261,25 @@ def test_the_provider_off_grid_snapshot_cannot_influence_a_bucket():
 # --------------------------------------------------------------------------- #
 # RETAINED BLOCKER -- the target population is not derivable at v22
 # --------------------------------------------------------------------------- #
-def test_the_parent_corpus_carries_no_target_scope(conn: sqlite3.Connection):
-    """Why §AF cannot close: nothing binds a corpus to its target population."""
+def test_the_parent_corpus_binds_membership_but_still_carries_no_scope(
+        conn: sqlite3.Connection):
+    """v23 closed the blocker with MEMBERSHIP, deliberately not with a scope.
+
+    Replaces the v22-era assertion that nothing binds a corpus to its targets.
+    A scope predicate was rejected by the architecture's portability
+    reproduction, so the corpus row must still carry no season or date range;
+    the corpus→games link is now an explicit membership table rather than the
+    plan's own claim.
+    """
 
     columns = {r[1] for r in conn.execute(
         "PRAGMA table_info(reconstruction_corpus_versions)")}
     for absent in ("season_id", "start_date", "end_date", "target_scope"):
         assert absent not in columns
-    # The only corpus-to-games link is the plan's own claim, which is exactly
-    # what §AF must not trust as its source of truth.
     linking = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
         " AND sql LIKE '%REFERENCES games%' AND sql LIKE '%corpus%'")}
-    assert linking <= {"stage_a_plan_targets"}
+    assert linking == {"reconstruction_corpus_targets"}
 
 
 def test_target_set_digest_has_no_production_derivation():
@@ -287,19 +293,26 @@ def test_target_set_digest_has_no_production_derivation():
     assert 'target_set_digest: str = "identity-audit-no-targets"' in source
 
 
-def test_target_population_derivation_refuses(conn: sqlite3.Connection):
-    with pytest.raises(TargetPopulationUnavailable, match="no target scope"):
+def test_target_population_derivation_refuses_without_a_manifest(
+        conn: sqlite3.Connection):
+    """v23 replacement: the refusal is now about PROVENANCE, not absence.
+
+    Without the precommitted acquisition manifest the bound run set would be
+    caller-selected and a required run could be omitted undetectably, so
+    derivation still fails closed.
+    """
+
+    with pytest.raises(TargetPopulationUnavailable, match="acquisition manifest"):
         derive_target_population(conn, parent_corpus_id="rcv_anything")
 
 
-def test_the_load_bearing_verifier_refuses(conn: sqlite3.Connection):
-    """§AF stays a RETAINED BLOCKER until a reviewed enumerator exists.
+def test_the_load_bearing_verifier_refuses_an_unknown_parent(
+        conn: sqlite3.Connection):
+    """§AF is composed at v23; a real verification result is asserted in
+    `test_v23_af_and_e0_seams.py`. Here the seam must still fail closed on a
+    parent that does not exist."""
 
-    This test must be REPLACED, not deleted, when the corpus can enumerate its
-    targets -- at which point it should assert a real verification result.
-    """
-
-    with pytest.raises(TargetPopulationUnavailable, match="not derivable"):
+    with pytest.raises(TargetPopulationUnavailable, match="does not exist"):
         verify_stage_a_target_bucket_policy(
             conn, plan_id="sap_x", parent_corpus_id="rcv_x")
 

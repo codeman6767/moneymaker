@@ -243,6 +243,19 @@ _ENTRIES: tuple[TableEntry, ...] = (
                  "AsOfReader path: this table is the OTHER lane, and the entire point of keeping "
                  "the two apart is that a reconstructed-research eligibility verdict must never be "
                  "mistaken for a transaction-time-exact one. It stores no feature values."),
+    _unsupported("reconstruction_corpus_target_runs",
+                 "Lane-R (f023) target-population derivation provenance: which acquisition runs "
+                 "a corpus's membership was derived from. Corpus-level provenance, not a "
+                 "per-row fact and not a predictor."),
+    _unsupported("reconstruction_corpus_target_seals",
+                 "Lane-R (f023) target-population finalization. Records the frozen policy "
+                 "versions, the precommitted acquisition manifest binding and the member count; "
+                 "corpus-level provenance, never a feature."),
+    _unsupported("reconstruction_corpus_targets",
+                 "Lane-R (f023) corpus target membership: WHICH games a reconstruction corpus is "
+                 "about. Retrospective by construction -- it is derived from the complete "
+                 "official listing acquisition, so it is knowable only after the fact and must "
+                 "never reach the strict AsOfReader path as a predictor."),
     _unsupported("reconstruction_corpus_versions",
                  "Lane-R (f018) corpus identity. Manifest-level provenance describing a whole "
                  "reconstruction; not a per-row fact and not a predictor."),

@@ -722,7 +722,7 @@ def test_every_enum_value_appears_in_its_sql_check(
 def test_v19_schema_version_and_migration_count(conn: sqlite3.Connection) -> None:
     from sports_quant.db.schema import CURRENT_SCHEMA_VERSION
 
-    assert CURRENT_SCHEMA_VERSION == 22
+    assert CURRENT_SCHEMA_VERSION == 23
     rows = conn.execute(
         "SELECT version, name FROM schema_versions ORDER BY version").fetchall()
     assert [int(r["version"]) for r in rows] == list(

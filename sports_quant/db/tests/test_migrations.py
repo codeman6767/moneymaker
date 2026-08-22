@@ -45,6 +45,7 @@ EXPECTED_MIGRATIONS = (
     (20, "f020_historical_market_event_observations"),
     (21, "f021_append_only_replace_and_event_id_type"),
     (22, "f022_stage_a_provenance_and_evidence_lanes"),
+    (23, "f023_corpus_target_population_binding"),
 )
 
 

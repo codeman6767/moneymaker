@@ -34,18 +34,27 @@ def _fresh(path: Path) -> Database:
     return db
 
 
-def test_fresh_database_reaches_v22_with_22_migrations(tmp_path):
+def test_fresh_database_reaches_the_current_version_with_v22_intact(tmp_path):
+    """v22's migrations keep their positions as later ones append.
+
+    Originally asserted "fresh == v22". f023 appends, so the invariant this test
+    actually protects is that f022 stays at position 22 and the sequence stays
+    contiguous -- not that 22 is the newest.
+    """
+
     _fresh(tmp_path / "fresh.db")
     migrations = discover_migrations()
-    assert len(migrations) == 22
-    assert migrations[-1].version == 22
-    assert CURRENT_SCHEMA_VERSION == 22
+    assert len(migrations) == CURRENT_SCHEMA_VERSION
+    assert migrations[21].version == 22
+    assert migrations[21].name == "f022_stage_a_provenance_and_evidence_lanes"
+    assert migrations[-1].version == CURRENT_SCHEMA_VERSION
+    assert CURRENT_SCHEMA_VERSION == 23
 
 
 def test_supported_versions_still_include_every_older_corpus():
     """Dropping an older version would orphan preserved pilot artifacts."""
 
-    assert {16, 17, 18, 19, 20, 21, 22} <= set(SUPPORTED_SCHEMA_VERSIONS)
+    assert {16, 17, 18, 19, 20, 21, 22, 23} <= set(SUPPORTED_SCHEMA_VERSIONS)
 
 
 def test_frozen_migrations_are_unchanged():
